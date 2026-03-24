@@ -8,10 +8,12 @@ CONFIG = {
     "assets": ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT"],
     "market_type": "5min_15min_binary_direction",
 
-    # Binance data
-    "binance_depth_levels": 10,
-    "binance_stream_speed_ms": 100,
-    "binance_snapshot_interval_s": 30,
+    # Bybit spot data
+    "exchange": "bybit_spot",
+    "exchange_testnet": True,  # flip to False for live
+    "bybit_depth_levels": 10,
+    "bybit_ws_channel": "orderbook.200.{symbol}",
+    "bybit_ws_channel_type": "spot",
 
     # MLOFI
     "mlofi_weights": "inverse_depth",
@@ -62,19 +64,23 @@ CONFIG = {
     "polymarket_book_endpoint": "/book?token_id={token_id}",
     "polymarket_rate_limit_books": 50,
 
-    # Binance WebSocket
-    "binance_ws_base": "wss://stream.binance.com:9443/ws",
-    "binance_diff_depth_stream": "{symbol}@depth@100ms",
-    "binance_partial_depth_stream": "{symbol}@depth10@100ms",
+    # Bybit WebSocket
+    "bybit_ws_spot": "wss://stream.bybit.com/v5/public/spot",
+    "bybit_ws_spot_testnet": "wss://stream-testnet.bybit.com/v5/public/spot",
+    "bybit_kline_channel": "kline.{interval}.{symbol}",
+
+    # Bybit REST
+    "bybit_rest_base": "https://api.bybit.com",
+    "bybit_rest_testnet": "https://api-testnet.bybit.com",
+    "bybit_kline_endpoint": "/v5/market/kline",
+    "bybit_orderbook_endpoint": "/v5/market/orderbook",
 }
 
 # Training data boundaries — never train across these dates.
-# Source: Binance official announcements.
-TRAINING_BOUNDARIES = [
-    "2022-07-08",   # Zero-fee START — 13 BTC spot pairs (14:00 UTC)
-    "2023-03-22",   # Zero-fee ENDS for BTC/USDT and 11 other pairs (00:00 UTC)
-    "2023-09-07",   # BTC/TUSD zero-fee ENDS — full fee restoration
-]
+# Bybit spot: no identified fee regime changes or structural events
+# in the Apr 2025 – Mar 2026 training window. Standard 0.1% maker/taker
+# throughout. USDC fee cuts (Mar 2026) affect only USDC pairs, not USDT.
+TRAINING_BOUNDARIES = []
 
 # Pre-committed decision rules for lag measurement outcomes.
 # These do not change based on measurement results.
@@ -103,7 +109,7 @@ PRE_COMMITMENT = {
 
     "2_adverse_composite": {
         "method": "logistic_regression",
-        "inputs": ["depth_change_5s", "spread_change_5s", "binance_spread_pct"],
+        "inputs": ["depth_change_5s", "spread_change_5s", "bybit_spread_pct"],
         "min_adverse_events_to_fit": 30,
         "fpr_target": 0.20,
         "refit_trigger": "distribution_psi > 0.25 on MLOFI",
@@ -146,8 +152,8 @@ VALIDATION_PROTOCOL = """
    and any forward-filled features.
 
 3. DATASET BOUNDARIES:
-   Split at TRAINING_BOUNDARIES (Section 3.1). Never train across a Binance
-   fee regime change.
+   Split at TRAINING_BOUNDARIES (Section 3.1). Never train across an exchange
+   fee regime change. Bybit spot: no boundaries in current training window.
 
 4. MULTI-SEED ENSEMBLE:
    Train on 5 seeds. Average probability outputs.

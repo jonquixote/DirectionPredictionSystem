@@ -73,8 +73,10 @@ class TestFeeRegimeChecker:
 
     def test_returns_false_when_boundary_crossed(self):
         """FeeRegimeChecker: returns False when current date crosses a post-training boundary."""
+        # Use explicit test boundaries (not from config — config may be empty for Bybit)
+        test_boundaries = ["2023-03-22", "2023-09-07"]
         checker = FeeRegimeChecker(
-            boundaries=TRAINING_BOUNDARIES,
+            boundaries=test_boundaries,
             trained_start="2023-04-01",
             trained_end="2023-08-01",
         )
@@ -84,13 +86,24 @@ class TestFeeRegimeChecker:
 
     def test_returns_true_within_trained_regime(self):
         """FeeRegimeChecker: returns True for dates within trained regime."""
+        test_boundaries = ["2023-03-22", "2023-09-07"]
         checker = FeeRegimeChecker(
-            boundaries=TRAINING_BOUNDARIES,
+            boundaries=test_boundaries,
             trained_start="2023-04-01",
             trained_end="2023-08-01",
         )
         # Current date within the same regime (post 2023-03-22, before 2023-09-07)
         current = datetime.datetime(2023, 7, 1, tzinfo=datetime.timezone.utc)
+        assert checker.is_active(current)
+
+    def test_empty_boundaries_always_active(self):
+        """FeeRegimeChecker: empty TRAINING_BOUNDARIES (Bybit) → always active."""
+        checker = FeeRegimeChecker(
+            boundaries=TRAINING_BOUNDARIES,  # empty for Bybit
+            trained_start="2025-04-29",
+            trained_end="2026-03-23",
+        )
+        current = datetime.datetime(2026, 6, 1, tzinfo=datetime.timezone.utc)
         assert checker.is_active(current)
 
 
