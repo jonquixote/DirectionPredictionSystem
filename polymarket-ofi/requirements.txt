@@ -7,6 +7,7 @@ scipy>=1.11
 websockets>=12.0
 aiohttp>=3.9
 py-clob-client>=0.18
+pybit>=5.8
 
 # Feature engineering
 statsmodels>=0.14
@@ -19,8 +20,10 @@ shap>=0.44
 
 # Storage
 pyarrow>=14
+polars>=1.0
 
 # Utilities
 python-dotenv
 structlog
+requests>=2.28
 pytest>=7.4
