@@ -14,9 +14,11 @@ statsmodels>=0.14
 
 # ML
 scikit-learn>=1.4
+lightgbm>=4.3
 torch>=2.2
 xgboost>=2.0
 shap>=0.44
+matplotlib>=3.8
 
 # Storage
 pyarrow>=14

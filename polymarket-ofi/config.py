@@ -76,6 +76,28 @@ CONFIG = {
     "bybit_orderbook_endpoint": "/v5/market/orderbook",
 }
 
+# Paper trading configuration
+PAPER_TRADING = {
+    "models": {
+        "h60":  "/data/models/latest_h60/model.lgb",
+        "h300": "/data/models/latest_h300/model.lgb",
+    },
+    "confidence_threshold": 0.55,
+    "trade_symbols": ["BTCUSDT", "SOLUSDT"],                  # ETH excluded from trades
+    "prediction_symbols": ["BTCUSDT", "ETHUSDT", "SOLUSDT"],  # ETH still logged
+    "contract_durations": [300, 900],
+    "simulated_stake_usdc": 10.00,
+    "min_warmup_seconds": 120,
+    "log_dir": "/data/logs",
+    "mid_price_training_range": {
+        "BTCUSDT": [58_000, 110_000],
+        "ETHUSDT": [1_400, 4_200],
+        "SOLUSDT": [90, 220],
+    },
+}
+
+MAX_MODELS_TO_KEEP = 5  # never auto-delete a model referenced in PAPER_TRADING
+
 # Training data boundaries — never train across these dates.
 # Bybit spot: no identified fee regime changes or structural events
 # in the Apr 2025 – Mar 2026 training window. Standard 0.1% maker/taker
