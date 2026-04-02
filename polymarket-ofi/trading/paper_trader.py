@@ -134,6 +134,28 @@ class PaperTrader:
         self._running = True
         self._start_time_ms = int(time.time() * 1000)
         self._first_data_time_ms: int | None = None
+        
+        self.pending_file = self.log_dir / "pending_resolutions.json"
+        self._load_pending_resolutions()
+
+    def _load_pending_resolutions(self):
+        """Restore pending resolutions from disk if the bot crashed/restarted."""
+        if self.pending_file.exists():
+            try:
+                with open(self.pending_file, "r") as f:
+                    self._pending_resolutions = json.load(f)
+                logger.info("Restored %d pending resolutions from disk.", len(self._pending_resolutions))
+            except Exception as e:
+                logger.error("Failed to restore pending resolutions: %s", e)
+                self._pending_resolutions = []
+
+    def _save_pending_resolutions(self):
+        """Save pending resolutions to disk."""
+        try:
+            with open(self.pending_file, "w") as f:
+                json.dump(self._pending_resolutions, f)
+        except Exception as e:
+            logger.error("Failed to save pending resolutions: %s", e)
 
     def _is_in_warmup(self) -> bool:
         """Check if we're still in the 30-minute MAD warmup period."""
@@ -346,6 +368,8 @@ class PaperTrader:
                             "contract_duration_seconds": duration,
                         }))
 
+                    self._save_pending_resolutions()
+
                     logger.info(
                         "[%s] %s %s: proba=%.4f dir=%s TRADE (%d pending)",
                         model_name, symbol, "🔼" if pred_direction == "up" else "🔽",
@@ -367,12 +391,30 @@ class PaperTrader:
         still_pending = []
         for resolve_at_ms, data in self._pending_resolutions:
             if now_ms >= resolve_at_ms:
-                await self._resolve_trade(data, resolve_at_ms)
+                try:
+                    success = await self._resolve_trade(data, resolve_at_ms)
+                    if not success:
+                        if now_ms - resolve_at_ms > 600_000:  # Give up after 10m
+                            logger.error("Giving up on resolving trade %s due to missing data.", data.get("trade_id"))
+                        else:
+                            still_pending.append((resolve_at_ms, data))
+                except Exception as e:
+                    logger.error("Error resolving trade %s: %s", data.get("trade_id"), e)
+                    # Don't drop it immediately, try again unless expired
+                    if now_ms - resolve_at_ms > 600_000:
+                        logger.error("Giving up on trade %s after repeated errors.", data.get("trade_id"))
+                    else:
+                        still_pending.append((resolve_at_ms, data))
             else:
                 still_pending.append((resolve_at_ms, data))
-        self._pending_resolutions = still_pending
+        
+        if len(self._pending_resolutions) != len(still_pending):
+            self._pending_resolutions = still_pending
+            self._save_pending_resolutions()
+        else:
+            self._pending_resolutions = still_pending
 
-    async def _resolve_trade(self, data: dict, resolve_at_ms: int) -> None:
+    async def _resolve_trade(self, data: dict, resolve_at_ms: int) -> bool:
         """Resolve a single pending trade with current price."""
         symbol = data["symbol"]
         model_name = data["model_name"]
@@ -381,7 +423,7 @@ class PaperTrader:
         state = self.feature_computer.states.get(symbol)
         if not state or not state.mid_price_history:
             logger.warning("Cannot resolve %s trade — no price data", symbol)
-            return
+            return False
 
         price_at_close = state.mid_price_history[-1]
         ts_close_ms = int(time.time() * 1000)
@@ -439,6 +481,7 @@ class PaperTrader:
             model_name, symbol, data["pred_direction"], duration,
             data["price_at_open"], price_at_close, contract_result, emoji, net_pnl,
         )
+        return True
 
     def _check_mid_price_range(self, symbol: str, mid_price: float) -> None:
         """Warn if mid_price is outside training range."""
