@@ -95,7 +95,7 @@ export const RawLogExplorer = () => {
                               {log.level}
                            </span>
                            <span className="text-[10px] font-mono text-[var(--color-text-faint)]">
-                              {log.timestamp.split('T')[1].split('.')[0]}
+                              {log.timestamp ? log.timestamp.split('T')[1]?.split('.')[0] : new Date(log.timestamp_ms || Date.now()).toISOString().split('T')[1].split('.')[0]}
                            </span>
                         </div>
                         <div className="text-sm font-mono truncate text-[var(--color-text)]">{log.event}</div>

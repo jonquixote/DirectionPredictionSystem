@@ -70,17 +70,24 @@ export const PriceOverlay = () => {
         if (mounted && seriesRef.current && chartRef.current) {
           if (resp && resp.data && resp.data.length > 0 && !resp.data_gap) {
             // Map parquet columns to Recharts Lightweight-Charts format
-            const mappedData = resp.data.map((row: any) => ({
-              time: Math.floor(row.timestamp_ms / 1000) as any,
-              open: row.open,
-              high: row.high,
-              low: row.low,
-              close: row.close
-            }));
+            const mappedData = resp.data
+              .filter((row: any) => row && row.timestamp_ms)
+              .map((row: any) => ({
+                time: Math.floor(row.timestamp_ms / 1000) as any,
+                open: row.open,
+                high: row.high,
+                low: row.low,
+                close: row.close
+              }));
             
-            seriesRef.current.setData(mappedData);
-            chartRef.current.timeScale().fitContent();
-            setDataGap(false);
+            if (mappedData.length > 0) {
+              seriesRef.current.setData(mappedData);
+              chartRef.current.timeScale().fitContent();
+              setDataGap(false);
+            } else {
+              seriesRef.current.setData([]);
+              setDataGap(true);
+            }
           } else {
             // No data
             seriesRef.current.setData([]);

@@ -15,7 +15,7 @@ export const ModelComparison = () => {
         setLoading(true);
         const data = await endpoints.getModelsRegistry();
         if (mounted) {
-           setRegistry(data);
+           setRegistry(data?.data || data || []);
            setError(null);
         }
       } catch (err: any) {

@@ -24,94 +24,116 @@ async def performance_summary(
     symbols = [symbol] if symbol else ["BTCUSDT", "SOLUSDT", "ETHUSDT", "ALL"]
 
     summaries = []
+    # Base durations and ALL
+    contract_durations = ["ALL", 300, 900]
+    
     for m in models:
         for s in symbols:
-            sym_arg = None if s == "ALL" else s
-            resolved = store.get_resolved_trades(model=m, symbol=sym_arg)
+            for dur in contract_durations:
+                sym_arg = None if s == "ALL" else s
+                dur_arg = None if dur == "ALL" else dur
+                
+                # Fast path: only compute if it's the base "ALL" combinations or if we specifically need it
+                # For UI efficiency, we usually only need Symbol=ALL/Dur=split OR Symbol=split/Dur=ALL
+                if s != "ALL" and dur != "ALL":
+                    continue
+                    
+                resolved = store.get_resolved_trades(model=m, symbol=sym_arg)
+                
+                # Duration filter
+                if dur_arg is not None:
+                    resolved = [t for t in resolved if (t.get("contract_duration_seconds") == dur_arg or t.get("contract_duration") == dur_arg)]
 
-            # Time filter
-            if from_ms:
-                resolved = [t for t in resolved if t.get("ts_model_ran_ms", 0) >= from_ms]
-            if to_ms:
-                resolved = [t for t in resolved if t.get("ts_model_ran_ms", 0) <= to_ms]
+                # Time filter
+                if from_ms:
+                    resolved = [t for t in resolved if t.get("ts_model_ran_ms", 0) >= from_ms]
+                if to_ms:
+                    resolved = [t for t in resolved if t.get("ts_model_ran_ms", 0) <= to_ms]
 
-            n = len(resolved)
-            wins = sum(1 for t in resolved if t.get("prediction_correct"))
-            losses = n - wins
+                n = len(resolved)
+                # Only include entries that have at least some data, or if it's the primary "ALL" baseline
+                if n == 0 and (s != "ALL" or dur != "ALL"):
+                    continue
+                    
+                wins = sum(1 for t in resolved if t.get("prediction_correct"))
+                losses = n - wins
 
-            # Unresolved count
-            all_trades, _ = store.get_trades(model=m, page_size=100000)
-            if sym_arg:
-                all_trades = [t for t in all_trades if t.get("symbol") == sym_arg]
-            unresolved = sum(1 for t in all_trades if not t.get("resolved") and not t.get("suppressed_reason"))
+                # Unresolved count
+                all_trades, _ = store.get_trades(model=m, page_size=100000)
+                if sym_arg:
+                    all_trades = [t for t in all_trades if t.get("symbol") == sym_arg]
+                if dur_arg is not None:
+                    all_trades = [t for t in all_trades if (t.get("contract_duration_seconds") == dur_arg or t.get("contract_duration") == dur_arg)]
+                    
+                unresolved = sum(1 for t in all_trades if not t.get("resolved") and not t.get("suppressed_reason"))
 
-            acc = wins / n if n > 0 else None
-            ci_low, ci_high = wilson_ci(wins, n) if n > 0 else (None, None)
-            zt = z_test(n, acc or 0) if n > 0 else {"z_score": None, "p_value_one_tailed": None, "significant_at_05": False}
+                acc = wins / n if n > 0 else None
+                ci_low, ci_high = wilson_ci(wins, n) if n > 0 else (None, None)
+                zt = z_test(n, acc or 0) if n > 0 else {"z_score": None, "p_value_one_tailed": None, "significant_at_05": False}
 
-            # NE_t
-            ne_vals = []
-            for t in resolved:
-                pm = t.get("p_market")
-                d = t.get("pred_direction")
-                c = t.get("prediction_correct")
-                if pm is not None and d and c is not None:
-                    ne = compute_realized_net(d, c, pm)
-                    if ne is not None:
-                        ne_vals.append(ne)
+                # NE_t
+                ne_vals = []
+                for t in resolved:
+                    pm = t.get("p_market")
+                    d = t.get("pred_direction")
+                    c = t.get("prediction_correct")
+                    if pm is not None and d and c is not None:
+                        ne = compute_realized_net(d, c, pm)
+                        if ne is not None:
+                            ne_vals.append(ne)
 
-            ne_total = sum(ne_vals) if ne_vals else None
-            ne_per = ne_total / len(ne_vals) if ne_vals else None
+                ne_total = sum(ne_vals) if ne_vals else None
+                ne_per = ne_total / len(ne_vals) if ne_vals else None
 
-            # High divergence subset (top 25%)
-            with_div = [t for t in resolved if t.get("p_market") is not None and t.get("pred_proba") is not None]
-            if with_div:
-                divs = sorted([abs(t["pred_proba"] - t["p_market"]) for t in with_div])
-                threshold = divs[int(len(divs) * 0.75)] if len(divs) >= 4 else 0
-                high_div = [
-                    t for t in with_div
-                    if abs(t["pred_proba"] - t["p_market"]) >= threshold
-                ]
-                hd_n = len(high_div)
-                hd_wins = sum(1 for t in high_div if t.get("prediction_correct"))
-                hd_acc = hd_wins / hd_n if hd_n > 0 else None
-                hd_ci = wilson_ci(hd_wins, hd_n) if hd_n > 0 else (None, None)
-            else:
-                hd_n, hd_acc, hd_ci = 0, None, (None, None)
+                # High divergence subset (top 25%)
+                with_div = [t for t in resolved if t.get("p_market") is not None and t.get("pred_proba") is not None]
+                if with_div:
+                    divs = sorted([abs(t["pred_proba"] - t["p_market"]) for t in with_div])
+                    threshold = divs[int(len(divs) * 0.75)] if len(divs) >= 4 else 0
+                    high_div = [
+                        t for t in with_div
+                        if abs(t["pred_proba"] - t["p_market"]) >= threshold
+                    ]
+                    hd_n = len(high_div)
+                    hd_wins = sum(1 for t in high_div if t.get("prediction_correct"))
+                    hd_acc = hd_wins / hd_n if hd_n > 0 else None
+                    hd_ci = wilson_ci(hd_wins, hd_n) if hd_n > 0 else (None, None)
+                else:
+                    hd_n, hd_acc, hd_ci = 0, None, (None, None)
 
-            # Direction breakdown
-            up = [t for t in resolved if t.get("pred_direction") == "up"]
-            down = [t for t in resolved if t.get("pred_direction") == "down"]
-            up_wins = sum(1 for t in up if t.get("prediction_correct"))
-            down_wins = sum(1 for t in down if t.get("prediction_correct"))
+                # Direction breakdown
+                up = [t for t in resolved if t.get("pred_direction") == "up"]
+                down = [t for t in resolved if t.get("pred_direction") == "down"]
+                up_wins = sum(1 for t in up if t.get("prediction_correct"))
+                down_wins = sum(1 for t in down if t.get("prediction_correct"))
 
-            summaries.append({
-                "model": m,
-                "symbol": s,
-                "contract_duration": "ALL",
-                "total_trades": n,
-                "wins": wins,
-                "losses": losses,
-                "unresolved": unresolved,
-                "accuracy": round(acc, 4) if acc is not None else None,
-                "ci_low": round(ci_low, 4) if ci_low is not None else None,
-                "ci_high": round(ci_high, 4) if ci_high is not None else None,
-                "z_score": zt.get("z_score"),
-                "p_value": zt.get("p_value_one_tailed"),
-                "is_significant": zt.get("significant_at_05"),
-                "realized_net_total": round(ne_total, 4) if ne_total is not None else None,
-                "realized_net_per_trade": round(ne_per, 6) if ne_per is not None else None,
-                "candidates_total": len(all_trades),
-                "gate_pass_rate": round(n / len(all_trades), 4) if all_trades else None,
-                "high_divergence_n": hd_n,
-                "high_divergence_accuracy": round(hd_acc, 4) if hd_acc is not None else None,
-                "high_divergence_ci_low": round(hd_ci[0], 4) if hd_ci[0] is not None else None,
-                "high_divergence_ci_high": round(hd_ci[1], 4) if hd_ci[1] is not None else None,
-                "up_bets_n": len(up),
-                "up_bets_accuracy": round(up_wins / len(up), 4) if up else None,
-                "down_bets_n": len(down),
-                "down_bets_accuracy": round(down_wins / len(down), 4) if down else None,
-            })
+                summaries.append({
+                    "model": m,
+                    "symbol": s,
+                    "contract_duration": str(dur) if dur != "ALL" else "ALL",
+                    "total_trades": n,
+                    "wins": wins,
+                    "losses": losses,
+                    "unresolved": unresolved,
+                    "accuracy": round(acc, 4) if acc is not None else None,
+                    "ci_low": round(ci_low, 4) if ci_low is not None else None,
+                    "ci_high": round(ci_high, 4) if ci_high is not None else None,
+                    "z_score": zt.get("z_score"),
+                    "p_value": zt.get("p_value_one_tailed"),
+                    "is_significant": zt.get("significant_at_05"),
+                    "realized_net_total": round(ne_total, 4) if ne_total is not None else None,
+                    "realized_net_per_trade": round(ne_per, 6) if ne_per is not None else None,
+                    "candidates_total": len(all_trades),
+                    "gate_pass_rate": round(n / len(all_trades), 4) if all_trades else None,
+                    "high_divergence_n": hd_n,
+                    "high_divergence_accuracy": round(hd_acc, 4) if hd_acc is not None else None,
+                    "high_divergence_ci_low": round(hd_ci[0], 4) if hd_ci[0] is not None else None,
+                    "high_divergence_ci_high": round(hd_ci[1], 4) if hd_ci[1] is not None else None,
+                    "up_bets_n": len(up),
+                    "up_bets_accuracy": round(up_wins / len(up), 4) if up else None,
+                    "down_bets_n": len(down),
+                    "down_bets_accuracy": round(down_wins / len(down), 4) if down else None,
+                })
 
     return summaries
 

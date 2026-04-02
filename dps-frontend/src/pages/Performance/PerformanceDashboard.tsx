@@ -10,6 +10,7 @@ export const PerformanceDashboard = () => {
   const [activeTab, setActiveTab] = useState<string>('Overview');
   
   const [summaryData, setSummaryData] = useState<PerformanceSummary | null>(null);
+  const [allSummaries, setAllSummaries] = useState<any[]>([]);
   const [cumlData, setCumlData] = useState<any[]>([]);
   const [rollingData, setRollingData] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
@@ -27,6 +28,7 @@ export const PerformanceDashboard = () => {
         if (!mounted) return;
         
         if (summaryArr && summaryArr.length > 0) {
+          setAllSummaries(summaryArr);
           if (activeModel === 'All') {
             const allModels = summaryArr.filter((s: any) => s.symbol === 'ALL');
             if (allModels.length > 0) {
@@ -55,9 +57,9 @@ export const PerformanceDashboard = () => {
         }
         
         // Transform rolling accuracy for Recharts
-        if (rollingResp?.data) {
-           const mapped = rollingResp.data.map((d: any) => ({
-             name: format(new Date(d.timestamp_ms), 'MMM dd HH:mm'),
+        if (rollingResp?.series) {
+           const mapped = rollingResp.series.map((d: any) => ({
+             name: format(new Date(d.timestamp_ms || d.ts_created_ms || Date.now()), 'MMM dd HH:mm'),
              accuracy: d.accuracy * 100
            }));
            setRollingData(mapped);
@@ -280,7 +282,9 @@ export const PerformanceDashboard = () => {
 
       {activeTab === 'By Symbol' && (
          <div className="grid grid-cols-1 md:grid-cols-3 gap-6 animate-in fade-in">
-             {['BTC', 'ETH', 'SOL'].map((sym) => (
+             {allSummaries.filter(s => s.symbol !== 'ALL' && s.contract_duration === 'ALL').map((symData) => {
+                const sym = symData.symbol.replace('USDT', '');
+                return (
                 <div key={sym} className={`bg-[var(--color-surface)] border ${sym === 'BTC' ? 'border-[var(--color-orange)] shadow-[0_0_15px_rgba(251,146,60,0.1)]' : 'border-[var(--color-border)]'} rounded-xl p-6 shadow-sm`}>
                    <div className="flex justify-between items-center mb-6">
                       <div className="flex items-center">
@@ -289,40 +293,48 @@ export const PerformanceDashboard = () => {
                          </div>
                          <h3 className="ml-3 font-semibold text-lg">{sym}</h3>
                       </div>
-                      <span className="font-mono text-[var(--color-success)] font-bold text-xl">54.2%</span>
+                      <span className={`font-mono font-bold text-xl ${symData.accuracy >= 0.5 ? 'text-[var(--color-success)]' : 'text-[var(--color-error)]'}`}>
+                          {symData.accuracy ? `${(symData.accuracy * 100).toFixed(1)}%` : "—"}
+                      </span>
                    </div>
                    
                    <div className="space-y-4 text-sm">
                       <div className="flex justify-between py-2 border-b border-[var(--color-border)]/50">
                          <span className="text-[var(--color-text-muted)]">Trades</span>
-                         <span className="font-mono">142</span>
+                         <span className="font-mono">{symData.total_trades}</span>
                       </div>
                       <div className="flex justify-between py-2 border-b border-[var(--color-border)]/50">
                          <span className="text-[var(--color-text-muted)]">Realized NE_t</span>
-                         <span className="font-mono text-[var(--color-success)]">+$45.20</span>
+                         <span className={`font-mono ${symData.realized_net_total >= 0 ? 'text-[var(--color-success)]' : 'text-[var(--color-error)]'}`}>
+                             {symData.realized_net_total != null ? `${symData.realized_net_total >= 0 ? '+' : ''}$${symData.realized_net_total.toFixed(2)}` : "—"}
+                         </span>
                       </div>
                       <div className="flex justify-between py-2 border-b border-[var(--color-border)]/50">
                          <span className="text-[var(--color-text-muted)]">Avg NE_t / trade</span>
-                         <span className="font-mono text-[var(--color-success)]">+$1.03</span>
+                         <span className={`font-mono ${symData.realized_net_per_trade >= 0 ? 'text-[var(--color-success)]' : 'text-[var(--color-error)]'}`}>
+                             {symData.realized_net_per_trade != null ? `${symData.realized_net_per_trade >= 0 ? '+' : ''}$${symData.realized_net_per_trade.toFixed(2)}` : "—"}
+                         </span>
                       </div>
                       <div className="flex justify-between py-2">
                          <span className="text-[var(--color-text-muted)]">Significance (Z)</span>
-                         <span className="font-mono text-[var(--color-success)]">2.41 (p=0.01)</span>
+                         <span className={`font-mono ${(symData.z_score || 0) >= 1.645 ? 'text-[var(--color-success)]' : 'text-[var(--color-text-faint)]'}`}>
+                             {symData.z_score != null ? `${symData.z_score.toFixed(2)} (p=${symData.p_value?.toFixed(2)})` : "—"}
+                         </span>
                       </div>
                       
                       <div className="pt-4">
                          <div className="w-full bg-[var(--color-surface-offset)] rounded-full h-2.5 flex overflow-hidden">
-                            <div className="bg-[var(--color-success)] h-2.5" style={{ width: '54.2%' }}></div>
-                            <div className="bg-[var(--color-error)] h-2.5" style={{ width: '45.8%' }}></div>
+                            <div className="bg-[var(--color-success)] h-2.5" style={{ width: `${(symData.accuracy || 0) * 100}%` }}></div>
+                            <div className="bg-[var(--color-error)] h-2.5" style={{ width: `${(1 - (symData.accuracy || 0)) * 100}%` }}></div>
                          </div>
                          <div className="flex justify-between text-xs font-mono text-[var(--color-text-faint)] mt-2">
-                            <span>77 WIN</span>
-                            <span>65 LOSS</span>
+                            <span>{symData.wins} WIN</span>
+                            <span>{symData.losses} LOSS</span>
                          </div>
                       </div>
                    </div>
                 </div>
-             ))}
+             )})}
          </div>
       )}
 
@@ -337,10 +349,27 @@ export const PerformanceDashboard = () => {
             <div className="flex-1 min-h-[400px]">
                <ResponsiveContainer width="100%" height="100%">
                   <BarChart data={[
-                     { name: 'BTC', '300s': 54.2, '900s': 58.1 },
-                     { name: 'ETH', '300s': 53.8, '900s': 55.4 },
-                     { name: 'SOL', '300s': 51.1, '900s': 52.3 },
-                  ]} margin={{ top: 20, right: 30, left: 0, bottom: 5 }}>
+                     { 
+                        name: 'All Symbols', 
+                        '300s': (allSummaries.find(s => s.symbol === 'ALL' && s.contract_duration === '300')?.accuracy || 0) * 100, 
+                        '900s': (allSummaries.find(s => s.symbol === 'ALL' && s.contract_duration === '900')?.accuracy || 0) * 100 
+                     },
+                     { 
+                        name: 'BTC', 
+                        '300s': (allSummaries.find(s => s.symbol === 'BTCUSDT' && s.contract_duration === '300')?.accuracy || 0) * 100, 
+                        '900s': (allSummaries.find(s => s.symbol === 'BTCUSDT' && s.contract_duration === '900')?.accuracy || 0) * 100 
+                     },
+                     { 
+                        name: 'ETH', 
+                        '300s': (allSummaries.find(s => s.symbol === 'ETHUSDT' && s.contract_duration === '300')?.accuracy || 0) * 100, 
+                        '900s': (allSummaries.find(s => s.symbol === 'ETHUSDT' && s.contract_duration === '900')?.accuracy || 0) * 100 
+                     },
+                     { 
+                        name: 'SOL', 
+                        '300s': (allSummaries.find(s => s.symbol === 'SOLUSDT' && s.contract_duration === '300')?.accuracy || 0) * 100, 
+                        '900s': (allSummaries.find(s => s.symbol === 'SOLUSDT' && s.contract_duration === '900')?.accuracy || 0) * 100 
+                     },
+                  ].filter(d => d['300s'] > 0 || d['900s'] > 0)} margin={{ top: 20, right: 30, left: 0, bottom: 5 }}>
                      <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="var(--color-border)" opacity={0.3} />
                      <XAxis dataKey="name" tick={{fill: 'var(--color-text-faint)'}} axisLine={false} tickLine={false} />
                      <YAxis tick={{fill: 'var(--color-text-faint)'}} axisLine={false} tickLine={false} domain={[45, 65]} tickFormatter={v => `${v}%`} />
