@@ -39,14 +39,15 @@ import json
 import logging
 import os
 import threading
+import time
 from datetime import datetime, timezone
-from typing import List
+from typing import List, Optional
 
 logger = logging.getLogger("calibration")
 
 MIN_REFIT_SAMPLES = 30     # Don't refit until we have this many outcomes
 BIN_WIDTH = 0.01           # Same as fit_calibration.py
-MIN_SAMPLES_PER_BIN = 5    # Lower than offline script for faster adaptation
+MIN_SAMPLES_PER_BIN = 20   # raised from 5 to prevent overfit on extreme bins
 
 
 class ProbabilityCalibrator:
@@ -67,8 +68,21 @@ class ProbabilityCalibrator:
 
         # Auto-recalibration state
         self._outcomes: List[tuple[float, bool]] = []  # (side_conf, won)
+        self._bins: List[dict] = []  # last-refit fitted bins: [{"raw": .., "calibrated": ..}, ...]
+        self.last_refit_at: Optional[float] = None
         outcomes_dir = os.path.dirname(self._path) if self._path else "/data"
-        self._outcomes_path = os.path.join(outcomes_dir, "calibration_outcomes.jsonl")
+        # Derive a per-map outcomes filename so multiple calibrators sharing a
+        # directory (e.g. via CalibratorRegistry) don't cross-contaminate.
+        base = os.path.basename(self._path) if self._path else "calibration.json"
+        if base.endswith(".json"):
+            stem = base[:-len(".json")]
+        else:
+            stem = base
+        if stem == "calibration":
+            outcomes_name = "calibration_outcomes.jsonl"
+        else:
+            outcomes_name = f"{stem}_outcomes.jsonl"
+        self._outcomes_path = os.path.join(outcomes_dir, outcomes_name)
         self._load()
         self._load_outcomes()
 
@@ -90,6 +104,10 @@ class ProbabilityCalibrator:
             sorted_bins = sorted(bins, key=lambda b: float(b["raw"]))
             self._raw_pts = [float(b["raw"]) for b in sorted_bins]
             self._cal_pts = [float(b["calibrated"]) for b in sorted_bins]
+            self._bins = [
+                {"raw": float(b["raw"]), "calibrated": float(b["calibrated"])}
+                for b in sorted_bins
+            ]
             for c in self._cal_pts:
                 if not 0.0 <= c <= 1.0:
                     logger.warning(
@@ -239,6 +257,9 @@ class ProbabilityCalibrator:
         # Update in-memory state
         self._raw_pts = [b["raw"] for b in fitted]
         self._cal_pts = [b["calibrated"] for b in fitted]
+        self._bins = [
+            {"raw": b["raw"], "calibrated": b["calibrated"]} for b in fitted
+        ]
         self._enabled = True
 
         # Atomically write to disk (write temp, then rename)
@@ -253,6 +274,7 @@ class ProbabilityCalibrator:
             "_diagnostics": {"fitted_bins_with_counts": fitted},
         }
         try:
+            os.makedirs(os.path.dirname(self._path), exist_ok=True)
             tmp_path = self._path + ".tmp"
             with open(tmp_path, "w") as f:
                 json.dump(out, f, indent=2)
@@ -264,8 +286,42 @@ class ProbabilityCalibrator:
             )
         except Exception as e:
             logger.warning("calibration: auto-refit write failed: %s", e)
+        # Track refit time regardless of disk write success — in-memory state
+        # was updated above and is what callers use.
+        self.last_refit_at = time.time()
+
+    def is_stale(self, now_epoch: float, ttl_seconds: int = 86_400) -> bool:
+        """Return True if the calibrator hasn't been refit within ttl_seconds.
+
+        Returns False if it has never been refit (treat as fresh-but-empty).
+        """
+        if self.last_refit_at is None:
+            return False
+        return (now_epoch - self.last_refit_at) > ttl_seconds
 
     @property
     def outcome_count(self) -> int:
         """Number of recorded outcomes (for diagnostics)."""
         return len(self._outcomes)
+
+
+class CalibratorRegistry:
+    """Per-(model, symbol, market_window) calibrator factory.
+
+    Each combination has its own JSON map and outcomes log under
+    ``base_dir``. Sharing a single calibrator across multiple models is
+    a v2 footgun: a strong-signal h300 outcome would skew the h60 map.
+    """
+
+    def __init__(self, base_dir: str) -> None:
+        self._base = base_dir
+        self._cache: dict[tuple, ProbabilityCalibrator] = {}
+
+    def get(self, model_name: str, symbol: str,
+            market_window_seconds: int) -> ProbabilityCalibrator:
+        key = (model_name, symbol, market_window_seconds)
+        if key not in self._cache:
+            slug = f"{model_name}__{symbol}__{market_window_seconds}"
+            map_path = f"{self._base}/calibration_{slug}.json"
+            self._cache[key] = ProbabilityCalibrator(path=map_path)
+        return self._cache[key]
