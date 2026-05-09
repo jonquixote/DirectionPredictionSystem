@@ -1,0 +1,24 @@
+{
+  "include": [
+    "storage",
+    "trading",
+    "execution",
+    "validation",
+    "data",
+    "regime",
+    "scripts",
+    "api",
+    "tests"
+  ],
+  "exclude": [
+    ".venv",
+    "**/__pycache__",
+    ".mypy_cache"
+  ],
+  "extraPaths": ["."],
+  "venvPath": ".",
+  "venv": ".venv",
+  "pythonVersion": "3.13",
+  "reportMissingImports": "warning",
+  "reportMissingTypeStubs": "none"
+}
