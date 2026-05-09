@@ -14,6 +14,7 @@ from __future__ import annotations
 import sqlite3
 import threading
 import uuid
+from datetime import datetime, timezone
 from typing import Iterable, Optional
 
 from storage.provenance import ProvenanceEnvelope
@@ -22,6 +23,12 @@ from storage.window_planner import ResolutionRow
 
 def _new_id_prefix() -> str:
     return uuid.uuid4().hex
+
+
+def _utc_iso_seconds(ts_ms: int) -> str:
+    return datetime.fromtimestamp(ts_ms / 1000, tz=timezone.utc).strftime(
+        "%Y-%m-%dT%H:%M:%S.%fZ"
+    )
 
 
 class SQLiteLedger:
@@ -204,4 +211,122 @@ class SQLiteLedger:
                 (decision_outcome, decision_reason, ev_estimate,
                  kelly_fraction_capped, final_size_usdc, order_type,
                  prediction_id),
+            )
+
+    # ------------------------------------------------------------------
+    # Resolution writers
+    # ------------------------------------------------------------------
+    def record_native_resolution(
+        self,
+        *,
+        prediction_id: str,
+        ts_resolved_ms: int,
+        price_at_open: float,
+        price_at_close: float,
+        contract_result: str,
+        prediction_correct: bool,
+    ) -> None:
+        """Resolve a native row and append a calibration outcome.
+
+        Calibration outcomes are written **only** for native rows.
+        Evaluation rows resolve via ``record_evaluation_resolution`` and
+        never touch ``calibration_outcomes``.
+        """
+        with self._lock, self._conn:
+            row = self._conn.execute(
+                "SELECT model_name, symbol, market_window_seconds,"
+                " resolution_type, pred_proba_calibrated, warmup,"
+                " regime_volatility, regime_liquidity"
+                " FROM predictions WHERE prediction_id = ?",
+                (prediction_id,),
+            ).fetchone()
+            if row is None:
+                raise ValueError(f"unknown prediction_id {prediction_id!r}")
+            if row["resolution_type"] != "native":
+                raise ValueError(
+                    f"record_native_resolution called on "
+                    f"{row['resolution_type']!r} row {prediction_id!r}"
+                )
+            self._conn.execute(
+                "UPDATE predictions SET"
+                "  resolved = 1, ts_resolved_ms = ?,"
+                "  price_at_open = ?, price_at_close = ?,"
+                "  contract_result = ?, prediction_correct = ?"
+                " WHERE prediction_id = ?",
+                (ts_resolved_ms, price_at_open, price_at_close,
+                 contract_result, int(prediction_correct), prediction_id),
+            )
+            self._conn.execute(
+                "INSERT INTO calibration_outcomes ("
+                " ts, prediction_id, model_name, symbol,"
+                " market_window_seconds, resolution_type,"
+                " side_conf, won, warmup,"
+                " regime_volatility, regime_liquidity"
+                ") VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                (_utc_iso_seconds(ts_resolved_ms), prediction_id,
+                 row["model_name"], row["symbol"],
+                 row["market_window_seconds"], "native",
+                 float(row["pred_proba_calibrated"]),
+                 int(prediction_correct), row["warmup"],
+                 row["regime_volatility"], row["regime_liquidity"]),
+            )
+
+    def record_evaluation_resolution(
+        self,
+        *,
+        prediction_id: str,
+        ts_resolved_ms: int,
+        price_at_open: float,
+        price_at_close: float,
+        contract_result: str,
+        prediction_correct: bool,
+    ) -> None:
+        with self._lock, self._conn:
+            row = self._conn.execute(
+                "SELECT resolution_type FROM predictions WHERE prediction_id = ?",
+                (prediction_id,),
+            ).fetchone()
+            if row is None:
+                raise ValueError(f"unknown prediction_id {prediction_id!r}")
+            if row["resolution_type"] != "evaluation":
+                raise ValueError(
+                    f"record_evaluation_resolution called on "
+                    f"{row['resolution_type']!r} row {prediction_id!r}"
+                )
+            self._conn.execute(
+                "UPDATE predictions SET"
+                "  resolved = 1, ts_resolved_ms = ?,"
+                "  price_at_open = ?, price_at_close = ?,"
+                "  contract_result = ?, prediction_correct = ?"
+                " WHERE prediction_id = ?",
+                (ts_resolved_ms, price_at_open, price_at_close,
+                 contract_result, int(prediction_correct), prediction_id),
+            )
+
+    def record_trade_resolution(
+        self,
+        *,
+        trade_id: str,
+        ts_resolved_ms: int,
+        price_at_close: float,
+        contract_result: str,
+        prediction_correct: bool,
+        gross_pnl: float,
+        fee_paid: float,
+        net_pnl: float,
+        trade_result: str,
+        pnl_method: str,
+    ) -> None:
+        with self._lock, self._conn:
+            self._conn.execute(
+                "UPDATE paper_trades SET"
+                "  resolved = 1, ts_resolved_ms = ?,"
+                "  price_at_close = ?, contract_result = ?,"
+                "  prediction_correct = ?,"
+                "  gross_pnl = ?, fee_paid = ?, net_pnl = ?,"
+                "  trade_result = ?, pnl_method = ?"
+                " WHERE trade_id = ?",
+                (ts_resolved_ms, price_at_close, contract_result,
+                 int(prediction_correct), gross_pnl, fee_paid, net_pnl,
+                 trade_result, pnl_method, trade_id),
             )

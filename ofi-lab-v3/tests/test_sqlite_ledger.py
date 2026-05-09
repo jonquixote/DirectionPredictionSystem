@@ -199,3 +199,98 @@ def test_log_compact_decision_writes_inline_fields(ledger):
     ).fetchone()
     assert row["decision_outcome"] == "suppressed"
     assert row["decision_reason"] == "below_confidence"
+
+
+def test_record_native_resolution_updates_prediction_and_calibration(ledger):
+    led, conn = ledger
+    rows = plan_resolution_rows(1_000_000, 900, [900])
+    pid = led.log_prediction_set(
+        envelope=_envelope(), symbol="BTCUSDT",
+        ts_model_ran_ms=1_000_000, ts_contract_open_ms=1_000_000,
+        rows=rows, pred_proba_raw=0.55, pred_proba_calibrated=0.53,
+        pred_direction="up", above_threshold=True, warmup=False,
+        platform="paper",
+    )
+    led.record_native_resolution(
+        prediction_id=pid,
+        ts_resolved_ms=1_900_000,
+        price_at_open=60_000.0,
+        price_at_close=60_100.0,
+        contract_result="up",
+        prediction_correct=True,
+    )
+    row = conn.execute(
+        "SELECT resolved, contract_result, prediction_correct,"
+        " price_at_open, price_at_close FROM predictions WHERE prediction_id=?",
+        (pid,)).fetchone()
+    assert row["resolved"] == 1
+    assert row["contract_result"] == "up"
+    assert row["prediction_correct"] == 1
+    assert row["price_at_open"] == 60_000.0
+    cal = conn.execute(
+        "SELECT * FROM calibration_outcomes WHERE prediction_id=?",
+        (pid,)).fetchone()
+    assert cal is not None
+    assert cal["resolution_type"] == "native"
+    assert cal["won"] == 1
+
+
+def test_record_evaluation_resolution_does_not_write_calibration(ledger):
+    led, conn = ledger
+    rows = plan_resolution_rows(1_000_000, 900, [300, 900])
+    led.log_prediction_set(
+        envelope=_envelope(), symbol="BTCUSDT",
+        ts_model_ran_ms=1_000_000, ts_contract_open_ms=1_000_000,
+        rows=rows, pred_proba_raw=0.55, pred_proba_calibrated=0.53,
+        pred_direction="up", above_threshold=False, warmup=False,
+        platform="paper",
+    )
+    eval_pid = conn.execute(
+        "SELECT prediction_id FROM predictions WHERE resolution_type='evaluation'"
+    ).fetchone()["prediction_id"]
+    led.record_evaluation_resolution(
+        prediction_id=eval_pid, ts_resolved_ms=1_300_000,
+        price_at_open=60_000.0, price_at_close=60_050.0,
+        contract_result="up", prediction_correct=True,
+    )
+    cal = conn.execute(
+        "SELECT count(*) AS n FROM calibration_outcomes"
+    ).fetchone()
+    assert cal["n"] == 0  # evaluation rows must never feed calibration
+
+
+def test_record_trade_resolution_updates_pnl(ledger):
+    led, conn = ledger
+    rows = plan_resolution_rows(1_000_000, 900, [900])
+    pid = led.log_prediction_set(
+        envelope=_envelope(), symbol="BTCUSDT",
+        ts_model_ran_ms=1_000_000, ts_contract_open_ms=1_000_000,
+        rows=rows, pred_proba_raw=0.55, pred_proba_calibrated=0.53,
+        pred_direction="up", above_threshold=True, warmup=False,
+        platform="paper",
+    )
+    tid = led.log_paper_trade(
+        prediction_id=pid, envelope=_envelope(), symbol="BTCUSDT",
+        market_window_seconds=900, resolution_type="native",
+        ts_model_ran_ms=1_000_000, ts_contract_open_ms=1_000_000,
+        ts_resolve_at_ms=1_900_000,
+        pred_proba_raw=0.55, pred_proba_calibrated=0.53,
+        pred_direction="up", confidence_threshold_used=0.52,
+        simulated_stake_usdc=10.0, decision_outcome="executed",
+        decision_reason=None, ev_estimate=0.018,
+        kelly_fraction_capped=0.25, final_size_usdc=10.0,
+        order_type="maker", warmup=False, platform="paper",
+    )
+    led.record_trade_resolution(
+        trade_id=tid, ts_resolved_ms=1_900_000,
+        price_at_close=60_100.0, contract_result="up",
+        prediction_correct=True, gross_pnl=8.07,
+        fee_paid=0.18, net_pnl=7.89,
+        trade_result="win", pnl_method="binary_polymarket",
+    )
+    row = conn.execute(
+        "SELECT resolved, net_pnl, trade_result FROM paper_trades WHERE trade_id=?",
+        (tid,)).fetchone()
+    assert row["resolved"] == 1
+    assert abs(row["net_pnl"] - 7.89) < 1e-9
+    assert row["trade_result"] == "win"
