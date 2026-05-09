@@ -104,3 +104,104 @@ class SQLiteLedger:
                 )
         assert native_id is not None, "rows must include exactly one native row"
         return native_id
+
+    # ------------------------------------------------------------------
+    # Paper trades
+    # ------------------------------------------------------------------
+    def log_paper_trade(
+        self,
+        *,
+        prediction_id: str,
+        envelope: ProvenanceEnvelope,
+        symbol: str,
+        market_window_seconds: int,
+        resolution_type: str,
+        ts_model_ran_ms: int,
+        ts_contract_open_ms: int,
+        ts_resolve_at_ms: int,
+        pred_proba_raw: float,
+        pred_proba_calibrated: float,
+        pred_direction: str,
+        confidence_threshold_used: float,
+        simulated_stake_usdc: float,
+        decision_outcome: str,
+        decision_reason: Optional[str],
+        ev_estimate: Optional[float],
+        kelly_fraction_capped: Optional[float],
+        final_size_usdc: Optional[float],
+        order_type: Optional[str],
+        warmup: bool,
+        platform: str,
+        p_market: Optional[float] = None,
+        suppressed_reason: Optional[str] = None,
+        filter_mode: Optional[str] = None,
+    ) -> str:
+        trade_id = _new_id_prefix() + "_t"
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO paper_trades ("
+                " trade_id, prediction_id,"
+                " model_name, model_artifact_hash, policy_config_hash,"
+                " decision_policy_version, calibration_map_hash,"
+                " registry_load_generation, feature_version,"
+                " training_horizon_seconds,"
+                " symbol, market_window_seconds, resolution_type,"
+                " ts_model_ran_ms, ts_contract_open_ms, ts_resolve_at_ms,"
+                " pred_proba_raw, pred_proba_calibrated, pred_direction,"
+                " confidence_threshold_used, simulated_stake_usdc,"
+                " p_market, suppressed_reason, filter_mode,"
+                " warmup, platform,"
+                " decision_outcome, decision_reason,"
+                " ev_estimate, kelly_fraction_capped,"
+                " final_size_usdc, order_type"
+                ") VALUES ("
+                " ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?"
+                ")",
+                (
+                    trade_id, prediction_id,
+                    envelope.model_name, envelope.model_artifact_hash,
+                    envelope.policy_config_hash, envelope.decision_policy_version,
+                    envelope.calibration_map_hash,
+                    envelope.registry_load_generation, envelope.feature_version,
+                    envelope.training_horizon_seconds,
+                    symbol, market_window_seconds, resolution_type,
+                    ts_model_ran_ms, ts_contract_open_ms, ts_resolve_at_ms,
+                    float(pred_proba_raw), float(pred_proba_calibrated),
+                    pred_direction, float(confidence_threshold_used),
+                    simulated_stake_usdc, p_market, suppressed_reason, filter_mode,
+                    int(warmup), platform,
+                    decision_outcome, decision_reason,
+                    ev_estimate, kelly_fraction_capped,
+                    final_size_usdc, order_type,
+                ),
+            )
+        return trade_id
+
+    # ------------------------------------------------------------------
+    # Compact decision (inline fields on the prediction row)
+    # ------------------------------------------------------------------
+    def log_compact_decision(
+        self,
+        *,
+        prediction_id: str,
+        decision_outcome: str,
+        decision_reason: Optional[str],
+        ev_estimate: Optional[float],
+        kelly_fraction_capped: Optional[float],
+        final_size_usdc: Optional[float],
+        order_type: Optional[str],
+    ) -> None:
+        with self._lock:
+            self._conn.execute(
+                "UPDATE predictions SET"
+                "  decision_outcome = ?,"
+                "  decision_reason = ?,"
+                "  ev_estimate = ?,"
+                "  kelly_fraction_capped = ?,"
+                "  final_size_usdc = ?,"
+                "  order_type = ?"
+                " WHERE prediction_id = ?",
+                (decision_outcome, decision_reason, ev_estimate,
+                 kelly_fraction_capped, final_size_usdc, order_type,
+                 prediction_id),
+            )

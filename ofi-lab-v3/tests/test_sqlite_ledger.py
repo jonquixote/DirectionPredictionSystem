@@ -129,3 +129,73 @@ def test_warmup_flag_is_persisted(ledger):
     )
     row = conn.execute("SELECT warmup FROM predictions").fetchone()
     assert row["warmup"] == 1
+
+
+def test_log_paper_trade_links_to_prediction(ledger):
+    led, conn = ledger
+    rows = plan_resolution_rows(1_700_000_000_000, 900, [900])
+    pid = led.log_prediction_set(
+        envelope=_envelope(), symbol="BTCUSDT",
+        ts_model_ran_ms=1_700_000_000_000,
+        ts_contract_open_ms=1_700_000_000_000,
+        rows=rows, pred_proba_raw=0.55, pred_proba_calibrated=0.53,
+        pred_direction="up", above_threshold=True, warmup=False,
+        platform="paper",
+    )
+    tid = led.log_paper_trade(
+        prediction_id=pid,
+        envelope=_envelope(),
+        symbol="BTCUSDT",
+        market_window_seconds=900,
+        resolution_type="native",
+        ts_model_ran_ms=1_700_000_000_000,
+        ts_contract_open_ms=1_700_000_000_000,
+        ts_resolve_at_ms=1_700_000_000_000 + 900_000,
+        pred_proba_raw=0.55,
+        pred_proba_calibrated=0.53,
+        pred_direction="up",
+        confidence_threshold_used=0.52,
+        simulated_stake_usdc=10.0,
+        decision_outcome="executed",
+        decision_reason=None,
+        ev_estimate=0.018,
+        kelly_fraction_capped=0.25,
+        final_size_usdc=10.0,
+        order_type="maker",
+        warmup=False,
+        platform="paper",
+    )
+    row = conn.execute(
+        "SELECT prediction_id, decision_outcome, ev_estimate"
+        " FROM paper_trades WHERE trade_id = ?", (tid,)
+    ).fetchone()
+    assert row["prediction_id"] == pid
+    assert row["decision_outcome"] == "executed"
+    assert abs(row["ev_estimate"] - 0.018) < 1e-9
+
+
+def test_log_compact_decision_writes_inline_fields(ledger):
+    led, conn = ledger
+    rows = plan_resolution_rows(1_000_000, 900, [900])
+    pid = led.log_prediction_set(
+        envelope=_envelope(), symbol="BTCUSDT",
+        ts_model_ran_ms=1_000_000, ts_contract_open_ms=1_000_000,
+        rows=rows, pred_proba_raw=0.55, pred_proba_calibrated=0.53,
+        pred_direction="up", above_threshold=False, warmup=False,
+        platform="paper",
+    )
+    led.log_compact_decision(
+        prediction_id=pid,
+        decision_outcome="suppressed",
+        decision_reason="below_confidence",
+        ev_estimate=-0.001,
+        kelly_fraction_capped=0.0,
+        final_size_usdc=0.0,
+        order_type="skipped",
+    )
+    row = conn.execute(
+        "SELECT decision_outcome, decision_reason FROM predictions"
+        " WHERE prediction_id = ?", (pid,)
+    ).fetchone()
+    assert row["decision_outcome"] == "suppressed"
+    assert row["decision_reason"] == "below_confidence"
