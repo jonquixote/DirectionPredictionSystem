@@ -202,3 +202,22 @@ VALIDATION_PROTOCOL = """
 """
 
 ENSEMBLE_SEEDS = [42, 137, 256, 512, 1024]
+
+# ---------- v3 storage / lifecycle / multi-window ----------
+
+STORAGE_DB_PATH = "/data/v3.db"
+
+# Live market windows that v3 tracks evaluation rows for. The native
+# horizon for a given model is *excluded* from this set at scheduling
+# time so a 900s model only generates evaluation rows at 300/1800/3600.
+EVALUATION_WINDOWS = [300, 900, 1800, 3600]
+
+# Golden baseline model. Plan B enforces baseline-removal protection in
+# the registry; Plan A only references the name.
+BASELINE_MODEL_NAME = "900s_btc_v3_20260315"
+BASELINE_PROTECTED = True
+
+# Warmup window applied at every container start. Predictions made
+# before now_ms exceeds boot_ts_ms + WARMUP_SECONDS * 1000 are stamped
+# warmup=1 and excluded from calibration / decay / Kalshi dispatch.
+WARMUP_SECONDS = 1800
