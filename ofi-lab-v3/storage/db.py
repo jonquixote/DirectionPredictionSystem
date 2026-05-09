@@ -26,3 +26,18 @@ def open_database(db_path: str = DEFAULT_DB_PATH) -> sqlite3.Connection:
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA synchronous = NORMAL")
     return conn
+
+
+_SCHEMA_PATH = Path(__file__).parent / "schema.sql"
+
+
+def init_schema(conn) -> None:
+    """Apply the canonical schema. Idempotent.
+
+    Reads ``storage/schema.sql`` and executes its DDL. SQLite's
+    ``CREATE TABLE`` and ``CREATE INDEX`` are not natively idempotent,
+    so the SQL file uses ``CREATE TABLE IF NOT EXISTS`` and
+    ``CREATE INDEX IF NOT EXISTS`` for safe re-application.
+    """
+    sql = _SCHEMA_PATH.read_text(encoding="utf-8")
+    conn.executescript(sql)
