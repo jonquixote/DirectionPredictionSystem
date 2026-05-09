@@ -1,0 +1,28 @@
+"""Database connection factory.
+
+All v3 storage flows through a single SQLite database. WAL mode is
+enabled so the API server can read concurrently with the paper trader's
+writes. Foreign keys are enforced for prediction → trade integrity.
+"""
+from __future__ import annotations
+
+import sqlite3
+from pathlib import Path
+
+DEFAULT_DB_PATH = "/data/v3.db"
+
+
+def open_database(db_path: str = DEFAULT_DB_PATH) -> sqlite3.Connection:
+    """Open (and create if needed) the v3 SQLite database.
+
+    Returns a connection with WAL journaling, foreign keys enforced,
+    and a 5-second busy timeout to handle multi-process contention
+    between the API server and the paper trader.
+    """
+    Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(db_path, timeout=5.0, isolation_level=None)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode = WAL")
+    conn.execute("PRAGMA foreign_keys = ON")
+    conn.execute("PRAGMA synchronous = NORMAL")
+    return conn
