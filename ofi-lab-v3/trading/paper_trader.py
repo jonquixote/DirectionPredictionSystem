@@ -274,6 +274,9 @@ class PaperTrader:
                 "feature_names_hash": feature_names_hash(self.feature_names[name]),
             }
 
+        # Boot timestamp for warmup tagging
+        self._boot_ts_ms = int(time.time() * 1000)
+
     def _capture_policy_dict(self) -> dict:
         """Snapshot the runtime-mutable filter/threshold/Kelly config.
 
@@ -456,6 +459,14 @@ class PaperTrader:
                 )
             self.pending_queue.remove(entry.prediction_id)
         self.pending_queue.persist()
+
+    def is_in_warmup(self, now_ms: int) -> bool:
+        """True while the predictor is still inside the warmup window.
+
+        Predictions made during warmup are stamped warmup=1 and excluded
+        from calibration / decay / Kalshi dispatch by downstream filters.
+        """
+        return now_ms < self._boot_ts_ms + config.WARMUP_SECONDS * 1000
 
     def kalshi_dispatch_eligible(
         self, *, model_name: str, symbol: str, market_window_seconds: int,
