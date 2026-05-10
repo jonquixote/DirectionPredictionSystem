@@ -398,6 +398,83 @@ class PaperTrader:
         self.pending_queue.persist()
         return native_pid
 
+    async def _check_prediction_resolutions_v3(self, now_ms: int) -> None:
+        """Walk the pending queue and resolve every ripe row.
+
+        Native rows update calibration_outcomes via SQLiteLedger;
+        evaluation rows do not. Each resolved row is removed from the
+        queue. The queue is persisted at the end so a crash mid-loop
+        leaves the partially-resolved state recoverable.
+        """
+        ripe = list(self.pending_queue.iter_ripe(now_ms))
+        if not ripe:
+            return
+        for entry in ripe:
+            try:
+                close_price = self.feature_computer.price_at(
+                    entry.symbol, entry.ts_resolve_at_ms,
+                )
+            except KeyError:
+                # Price not yet available for this exact ts; leave queued.
+                continue
+            result, correct = self._compute_outcome(
+                direction=self._direction_for(entry.prediction_id),
+                price_open=entry.price_at_open,
+                price_close=close_price,
+            )
+            if entry.resolution_type == "native":
+                self.sqlite_ledger.record_native_resolution(
+                    prediction_id=entry.prediction_id,
+                    ts_resolved_ms=entry.ts_resolve_at_ms,
+                    price_at_open=entry.price_at_open,
+                    price_at_close=close_price,
+                    contract_result=result,
+                    prediction_correct=correct,
+                )
+                # Feed per-model calibrator (only for native, only when not
+                # warmup)
+                row = self._db_conn.execute(
+                    "SELECT pred_proba_raw, warmup, model_name, symbol,"
+                    " market_window_seconds FROM predictions"
+                    " WHERE prediction_id = ?",
+                    (entry.prediction_id,),
+                ).fetchone()
+                if row and row["warmup"] == 0:
+                    cal = self.calibrators.get(
+                        row["model_name"], row["symbol"],
+                        row["market_window_seconds"],
+                    )
+                    cal.record_outcome(float(row["pred_proba_raw"]), bool(correct))
+            else:
+                self.sqlite_ledger.record_evaluation_resolution(
+                    prediction_id=entry.prediction_id,
+                    ts_resolved_ms=entry.ts_resolve_at_ms,
+                    price_at_open=entry.price_at_open,
+                    price_at_close=close_price,
+                    contract_result=result,
+                    prediction_correct=correct,
+                )
+            self.pending_queue.remove(entry.prediction_id)
+        self.pending_queue.persist()
+
+    def _direction_for(self, prediction_id: str) -> str:
+        row = self._db_conn.execute(
+            "SELECT pred_direction FROM predictions WHERE prediction_id = ?",
+            (prediction_id,),
+        ).fetchone()
+        return row["pred_direction"] if row else "up"
+
+    @staticmethod
+    def _compute_outcome(direction, price_open, price_close):
+        if price_close > price_open:
+            result = "up"
+        elif price_close < price_open:
+            result = "down"
+        else:
+            result = "flat"
+        correct = (result == direction)
+        return result, correct
+
     def _load_pending_resolutions(self):
         """Restore pending resolutions from disk if the bot crashed/restarted."""
         if self.pending_file.exists():
