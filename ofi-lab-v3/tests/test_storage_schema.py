@@ -11,6 +11,9 @@ EXPECTED_TABLES = {
     "calibration_outcomes",
     "registry_audit",
     "policy_audit",
+    "model_overlap",
+    "decay_metrics",
+    "decay_evaluations",
 }
 
 EXPECTED_INDEXES_INCLUDE = {
@@ -20,6 +23,9 @@ EXPECTED_INDEXES_INCLUDE = {
     "idx_cal_native",
     "idx_audit_generation",
     "idx_policy_version",
+    "idx_overlap_symbol_window",
+    "idx_decay_model",
+    "idx_decay_eval_model",
 }
 
 

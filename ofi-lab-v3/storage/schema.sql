@@ -248,3 +248,63 @@ CREATE TABLE IF NOT EXISTS policy_audit (
 );
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_policy_version ON policy_audit(decision_policy_version);
+
+-- =========================================================================
+-- model_overlap: per-boundary cross-model agreement record.
+-- =========================================================================
+CREATE TABLE IF NOT EXISTS model_overlap (
+    ts_contract_open_ms    INTEGER NOT NULL,
+    symbol                 TEXT NOT NULL,
+    market_window_seconds  INTEGER NOT NULL,
+    models_scored_json     TEXT NOT NULL,
+    directions_json        TEXT NOT NULL,
+    confidences_json       TEXT NOT NULL,
+    consensus              INTEGER NOT NULL,
+    consensus_direction    TEXT,
+    weighted_confidence    REAL,
+    registry_load_generation INTEGER NOT NULL,
+    PRIMARY KEY (ts_contract_open_ms, symbol, market_window_seconds, registry_load_generation)
+);
+
+CREATE INDEX IF NOT EXISTS idx_overlap_symbol_window
+    ON model_overlap(symbol, market_window_seconds);
+
+-- =========================================================================
+-- decay_metrics: rolling decay snapshots per (model, symbol, market_window).
+-- =========================================================================
+CREATE TABLE IF NOT EXISTS decay_metrics (
+    id                     INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts                     TEXT NOT NULL,
+    model_name             TEXT NOT NULL,
+    symbol                 TEXT NOT NULL,
+    market_window_seconds  INTEGER NOT NULL,
+    window_size            INTEGER NOT NULL,
+    rolling_ev             REAL,
+    recency_weighted_ev    REAL,
+    rolling_win_rate       REAL,
+    brier_score            REAL,
+    calibration_error      REAL,
+    sample_count           INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_decay_model
+    ON decay_metrics(model_name, symbol, market_window_seconds, ts);
+
+-- =========================================================================
+-- decay_evaluations: PSI / cliff / threshold check log.
+-- =========================================================================
+CREATE TABLE IF NOT EXISTS decay_evaluations (
+    id                     INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts                     TEXT NOT NULL,
+    model_name             TEXT NOT NULL,
+    symbol                 TEXT NOT NULL,
+    market_window_seconds  INTEGER NOT NULL,
+    eval_type              TEXT NOT NULL,
+    metric_value           REAL,
+    threshold              REAL,
+    triggered              INTEGER NOT NULL,
+    detail_json            TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_decay_eval_model
+    ON decay_evaluations(model_name, eval_type, ts);
