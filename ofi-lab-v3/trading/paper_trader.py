@@ -197,10 +197,7 @@ class PaperTrader:
                         name, path, len(self.feature_names[name]))
 
         # Ledgers (one per model)
-        self.ledgers: dict[str, Ledger] = {
-            name: Ledger(self.log_dir, name)
-            for name in self.models
-        }
+        self.ledgers: dict[str, Ledger] = {}  # legacy retired in T22; SQLite is canonical
 
         # Feature computer (all prediction symbols need L2 data)
         self.feature_computer = LiveFeatureComputer(
@@ -214,9 +211,6 @@ class PaperTrader:
             levels=10,
             testnet=testnet,
         )
-
-        # Pending resolutions: list of (resolve_at_ms, prediction_data)
-        self._pending_resolutions: list[tuple[int, dict]] = []
 
         # aiohttp session for Polymarket / Kalshi REST queries
         self._http_session: Optional[aiohttp.ClientSession] = None
@@ -233,14 +227,6 @@ class PaperTrader:
         self._running = True
         self._start_time_ms = int(time.time() * 1000)
         self._first_data_time_ms: int | None = None
-        
-        self.pending_file = self.log_dir / "pending_resolutions.json"
-        self._load_pending_resolutions()
-
-        # Pending prediction resolutions (resolves ALL predictions, not just trades)
-        self._pending_pred_resolutions: list[tuple[int, dict]] = []
-        self.pending_pred_file = self.log_dir / "pending_pred_resolutions.json"
-        self._load_pending_pred_resolutions()
 
         # ── Running P&L for circuit breaker ───────────────────
         self._running_pnl: dict[str, float] = {}  # per-model running P&L
@@ -460,6 +446,74 @@ class PaperTrader:
             self.pending_queue.remove(entry.prediction_id)
         self.pending_queue.persist()
 
+    async def _check_trade_resolutions_v3(self, now_ms: int) -> None:
+        """Resolve any open paper_trades whose ts_resolve_at_ms <= now_ms.
+
+        Uses Polymarket-style binary option PnL math (fee coef 0.072).
+        Plan B extends this to a per-platform fee model.
+        """
+        rows = self._db_conn.execute(
+            "SELECT trade_id, prediction_id, symbol,"
+            " ts_resolve_at_ms, pred_proba_calibrated, pred_direction,"
+            " simulated_stake_usdc, market_window_seconds"
+            " FROM paper_trades WHERE resolved = 0 AND ts_resolve_at_ms <= ?",
+            (now_ms,),
+        ).fetchall()
+        for row in rows:
+            try:
+                close = self.feature_computer.price_at(
+                    row["symbol"], row["ts_resolve_at_ms"]
+                )
+            except (KeyError, AttributeError):
+                continue
+            pred = self._db_conn.execute(
+                "SELECT price_at_open FROM predictions WHERE prediction_id = ?",
+                (row["prediction_id"],)
+            ).fetchone()
+            if pred is None or pred["price_at_open"] is None:
+                continue
+            gross, fee, net, result, correct = self._compute_paper_pnl(
+                direction=row["pred_direction"],
+                calibrated_p=row["pred_proba_calibrated"],
+                stake=row["simulated_stake_usdc"] or 10.0,
+                price_open=pred["price_at_open"],
+                price_close=close,
+            )
+            self.sqlite_ledger.record_trade_resolution(
+                trade_id=row["trade_id"],
+                ts_resolved_ms=row["ts_resolve_at_ms"],
+                price_at_close=close,
+                contract_result=result,
+                prediction_correct=correct,
+                gross_pnl=gross,
+                fee_paid=fee,
+                net_pnl=net,
+                trade_result="win" if correct else "loss",
+                pnl_method="binary_polymarket",
+            )
+
+    def _compute_paper_pnl(self, *, direction, calibrated_p, stake,
+                          price_open, price_close):
+        """Polymarket-style binary option PnL.
+
+        Lifted from v2 paper_trader.py _resolve_trade lines ~1100-1141.
+        Fee coef 0.072 matches Polymarket's published rate.
+        """
+        if price_close > price_open:
+            result = "up"
+        elif price_close < price_open:
+            result = "down"
+        else:
+            result = "flat"
+        correct = (result == direction)
+        fee = 0.072 * calibrated_p * (1 - calibrated_p) * stake
+        if correct:
+            gross = stake * (1 - calibrated_p) / calibrated_p if calibrated_p > 0 else 0
+        else:
+            gross = -stake
+        net = gross - fee
+        return gross, fee, net, result, correct
+
     def is_in_warmup(self, now_ms: int) -> bool:
         """True while the predictor is still inside the warmup window.
 
@@ -508,52 +562,6 @@ class PaperTrader:
         correct = (result == direction)
         return result, correct
 
-    def _load_pending_resolutions(self):
-        """Restore pending resolutions from disk if the bot crashed/restarted."""
-        if self.pending_file.exists():
-            try:
-                with open(self.pending_file, "r") as f:
-                    self._pending_resolutions = json.load(f)
-                logger.info("Restored %d pending resolutions from disk.", len(self._pending_resolutions))
-            except Exception as e:
-                logger.error("Failed to restore pending resolutions: %s", e)
-                # Back up the corrupt file so we can investigate later
-                bak_path = self.pending_file.with_suffix(".json.bak")
-                try:
-                    shutil.copy2(self.pending_file, bak_path)
-                    logger.warning("Backed up corrupt pending_resolutions to %s", bak_path)
-                except Exception as bak_err:
-                    logger.error("Could not back up pending_resolutions: %s", bak_err)
-                self._pending_resolutions = []
-
-    def _save_pending_resolutions(self):
-        """Save pending resolutions to disk."""
-        try:
-            with open(self.pending_file, "w") as f:
-                json.dump(self._pending_resolutions, f)
-        except Exception as e:
-            logger.error("Failed to save pending resolutions: %s", e)
-
-    def _load_pending_pred_resolutions(self):
-        """Restore pending prediction resolutions from disk."""
-        if self.pending_pred_file.exists():
-            try:
-                with open(self.pending_pred_file, "r") as f:
-                    self._pending_pred_resolutions = json.load(f)
-                if self._pending_pred_resolutions:
-                    logger.info("Loaded %d pending prediction resolutions from disk",
-                                len(self._pending_pred_resolutions))
-            except Exception as e:
-                logger.error("Failed to load pending pred resolutions: %s", e)
-                self._pending_pred_resolutions = []
-
-    def _save_pending_pred_resolutions(self):
-        """Save pending prediction resolutions to disk."""
-        try:
-            with open(self.pending_pred_file, "w") as f:
-                json.dump(self._pending_pred_resolutions, f)
-        except Exception as e:
-            logger.error("Failed to save pending pred resolutions: %s", e)
 
     def _hydrate_running_pnl(self) -> None:
         """Restore running P&L from existing trade ledger for circuit breaker continuity."""
@@ -930,8 +938,8 @@ class PaperTrader:
                 await self._run_predictions(now_ms, boundary_ms)
 
             # Check pending resolutions
-            await self._check_resolutions(now_ms)
-            await self._check_prediction_resolutions(now_ms)
+            await self._check_trade_resolutions_v3(now_ms)
+            await self._check_prediction_resolutions_v3(now_ms)
 
             await asyncio.sleep(1.0)
 
@@ -976,6 +984,7 @@ class PaperTrader:
 
             # Score with each model
             for model_name, model in self.models.items():
+                meta = config.PAPER_TRADING["model_metadata"][model_name]
                 features = {col: bar.get(col, 0.0) for col in self.feature_names[model_name]}
                 feature_vec = np.array(
                     [features[col] for col in self.feature_names[model_name]],
@@ -1009,39 +1018,26 @@ class PaperTrader:
                     p_model_minus_market = round(pred_proba - p_market, 6)
 
                 # Log prediction (always — even during warmup, even for non-trade symbols)
-                ledger = self.ledgers[model_name]
-                prediction_id = ledger.log_prediction(
+                prediction_id = self._emit_prediction_rows(
+                    model_name=model_name,
                     symbol=symbol,
-                    pred_proba=pred_proba,
+                    boundary_ms=boundary_ms,
+                    ts_model_ran_ms=ts_model_ran_ms,
+                    pred_proba_raw=pred_proba,
+                    pred_proba_calibrated=pred_proba,  # raw==calibrated until calibrator wired
                     pred_direction=pred_direction,
                     above_threshold=above_threshold,
-                    price_at_open=mid_price,
-                    ts_model_ran_ms=ts_model_ran_ms,
-                    ts_contract_open_ms=boundary_ms,
-                    features=features,
                     warmup=in_warmup,
-                    trade_eligible=trade_eligible,
+                    platform="paper",
+                    price_at_open=mid_price,
+                    p_market=p_market,
+                    p_model_minus_market=p_model_minus_market,
                     utc_hour=utc_hour,
                     day_of_week=day_of_week,
                     is_weekend=(day_of_week >= 5),
-                    relative_spread=features.get("relative_spread", None),
-                    p_market=p_market,
-                    p_model_minus_market=p_model_minus_market,
+                    relative_spread=features.get("relative_spread"),
                 )
                 self._prediction_count += 1
-
-                # Schedule prediction resolution at boundary + 900s
-                # (resolves ALL predictions for full model accuracy tracking)
-                pred_resolve_at_ms = boundary_ms + 900_000
-                self._pending_pred_resolutions.append((pred_resolve_at_ms, {
-                    "model_name": model_name,
-                    "prediction_id": prediction_id,
-                    "symbol": symbol,
-                    "pred_proba": pred_proba,
-                    "pred_direction": pred_direction,
-                    "price_at_open": mid_price,
-                    "features": features,  # Stash for APFS outcome recording
-                }))
 
                 # Suppress trades during warmup
                 if in_warmup:
@@ -1067,22 +1063,30 @@ class PaperTrader:
                 if model_name in H60_BLACKOUT_MODELS and utc_hour in H60_BLACKOUT_HOURS:
                     if above_threshold:
                         # Log the suppression to the ledger so outcome is still tracked
-                        for duration in CONTRACT_DURATIONS:
-                            ledger.log_trade(
-                                prediction_id=prediction_id,
-                                symbol=symbol,
-                                pred_proba=pred_proba,
-                                pred_direction=pred_direction,
-                                confidence_threshold=self.filters["confidence_threshold"],
-                                contract_duration_seconds=duration,
-                                price_at_open=mid_price,
-                                ts_model_ran_ms=ts_model_ran_ms,
-                                ts_contract_open_ms=boundary_ms,
-                                simulated_stake_usdc=SIMULATED_STAKE_USDC,
-                                p_market=p_market,
-                                p_model_minus_market=p_model_minus_market,
-                                suppressed_reason="utc_blackout",
-                            )
+                        self.sqlite_ledger.log_paper_trade(
+                            prediction_id=prediction_id,
+                            envelope=self._build_envelope(model_name, platform="paper"),
+                            symbol=symbol,
+                            market_window_seconds=meta["training_horizon_seconds"],  # native horizon
+                            resolution_type="native",
+                            ts_model_ran_ms=ts_model_ran_ms,
+                            ts_contract_open_ms=boundary_ms,
+                            ts_resolve_at_ms=boundary_ms + meta["training_horizon_seconds"] * 1000,
+                            pred_proba_raw=pred_proba,
+                            pred_proba_calibrated=pred_proba,
+                            pred_direction=pred_direction,
+                            confidence_threshold_used=self.filters["confidence_threshold"],
+                            simulated_stake_usdc=SIMULATED_STAKE_USDC,
+                            decision_outcome="suppressed",
+                            decision_reason="utc_blackout",
+                            ev_estimate=None,
+                            kelly_fraction_capped=None,
+                            final_size_usdc=SIMULATED_STAKE_USDC,
+                            order_type=None,
+                            warmup=in_warmup,
+                            platform="paper",
+                            p_market=p_market,
+                        )
                         logger.info(
                             "[%s] %s: proba=%.4f dir=%s SUPPRESSED (utc_blackout %02d:00)",
                             model_name, symbol, pred_proba, pred_direction, utc_hour,
@@ -1108,23 +1112,30 @@ class PaperTrader:
                     if filter_reason != "below_confidence":
                         # Only log a trade entry for non-confidence filters
                         # (below_confidence means we wouldn't have traded anyway)
-                        for duration in CONTRACT_DURATIONS:
-                            ledger.log_trade(
-                                prediction_id=prediction_id,
-                                symbol=symbol,
-                                pred_proba=pred_proba,
-                                pred_direction=pred_direction,
-                                confidence_threshold=self.filters["confidence_threshold"],
-                                contract_duration_seconds=duration,
-                                price_at_open=mid_price,
-                                ts_model_ran_ms=ts_model_ran_ms,
-                                ts_contract_open_ms=boundary_ms,
-                                simulated_stake_usdc=SIMULATED_STAKE_USDC,
-                                p_market=p_market,
-                                p_model_minus_market=p_model_minus_market,
-                                suppressed_reason=filter_reason,
-                                filter_mode=_active_filter_mode,
-                            )
+                        self.sqlite_ledger.log_paper_trade(
+                            prediction_id=prediction_id,
+                            envelope=self._build_envelope(model_name, platform="paper"),
+                            symbol=symbol,
+                            market_window_seconds=meta["training_horizon_seconds"],  # native horizon
+                            resolution_type="native",
+                            ts_model_ran_ms=ts_model_ran_ms,
+                            ts_contract_open_ms=boundary_ms,
+                            ts_resolve_at_ms=boundary_ms + meta["training_horizon_seconds"] * 1000,
+                            pred_proba_raw=pred_proba,
+                            pred_proba_calibrated=pred_proba,
+                            pred_direction=pred_direction,
+                            confidence_threshold_used=self.filters["confidence_threshold"],
+                            simulated_stake_usdc=SIMULATED_STAKE_USDC,
+                            decision_outcome="suppressed",
+                            decision_reason=filter_reason,
+                            ev_estimate=None,
+                            kelly_fraction_capped=None,
+                            final_size_usdc=SIMULATED_STAKE_USDC,
+                            order_type=None,
+                            warmup=in_warmup,
+                            platform="paper",
+                            p_market=p_market,
+                        )
                         logger.info(
                             "[%s] %s: proba=%.4f dir=%s SUPPRESSED (%s)",
                             model_name, symbol, pred_proba, pred_direction, filter_reason,
@@ -1159,21 +1170,29 @@ class PaperTrader:
                         if duration == 900 and not is_15m_boundary and not suppress_reason:
                             suppress_reason = "non_15m_boundary"
 
-                        trade_id = ledger.log_trade(
+                        self.sqlite_ledger.log_paper_trade(
                             prediction_id=prediction_id,
+                            envelope=self._build_envelope(model_name, platform="paper"),
                             symbol=symbol,
-                            pred_proba=pred_proba,
-                            pred_direction=pred_direction,
-                            confidence_threshold=self.filters["confidence_threshold"],
-                            contract_duration_seconds=duration,
-                            price_at_open=mid_price,
+                            market_window_seconds=meta["training_horizon_seconds"],  # native horizon
+                            resolution_type="native",
                             ts_model_ran_ms=ts_model_ran_ms,
                             ts_contract_open_ms=boundary_ms,
+                            ts_resolve_at_ms=boundary_ms + duration * 1000,
+                            pred_proba_raw=pred_proba,
+                            pred_proba_calibrated=pred_proba,
+                            pred_direction=pred_direction,
+                            confidence_threshold_used=self.filters["confidence_threshold"],
                             simulated_stake_usdc=stake,
+                            decision_outcome="executed" if not suppress_reason else "suppressed",
+                            decision_reason=suppress_reason,
+                            ev_estimate=None,
+                            kelly_fraction_capped=None,
+                            final_size_usdc=stake,
+                            order_type=None,
+                            warmup=in_warmup,
+                            platform="paper",
                             p_market=p_market,
-                            p_model_minus_market=p_model_minus_market,
-                            suppressed_reason=suppress_reason,
-                            filter_mode=_active_filter_mode,
                         )
 
                         if suppress_reason:
@@ -1186,52 +1205,32 @@ class PaperTrader:
                         # Dispatch to Kalshi when paper trade is placed on a
                         # 15-min boundary for h300 BTCUSDT 900s. This ensures
                         # Kalshi trades 1:1 with paper trades.
-                        if (duration == 900
-                                and is_15m_boundary
-                                and self._kalshi_trader is not None
-                                and EXCHANGE == "kalshi"
-                                and model_name == "h300"
-                                and symbol == "BTCUSDT"):
-                            asyncio.create_task(self._dispatch_kalshi_live(
-                                symbol=symbol,
-                                duration_sec=900,
-                                boundary_ms=boundary_ms,
-                                pred_proba=pred_proba,
-                                pred_direction=pred_direction,
-                                paper_stake_usd=stake,
-                                features=features,
-                                model_name=model_name,
-                            ))
-
-                        # Schedule resolution
-                        resolve_at_ms = boundary_ms + duration * 1000
-                        self._pending_resolutions.append((resolve_at_ms, {
-                            "model_name": model_name,
-                            "prediction_id": prediction_id,
-                            "trade_id": trade_id,
-                            "symbol": symbol,
-                            "pred_proba": pred_proba,
-                            "pred_direction": pred_direction,
-                            "price_at_open": mid_price,
-                            "contract_duration_seconds": duration,
-                            "p_market": p_market,
-                            "stake": stake,
-                        }))
-
-                    self._save_pending_resolutions()
+                        if self.kalshi_dispatch_eligible(
+                            model_name=model_name,
+                            symbol=symbol,
+                            market_window_seconds=duration,
+                        ):
+                            if not self.is_in_warmup(ts_model_ran_ms):
+                                asyncio.create_task(self._dispatch_kalshi_live(
+                                    symbol=symbol,
+                                    duration_sec=duration,
+                                    boundary_ms=boundary_ms,
+                                    pred_proba=pred_proba,
+                                    pred_direction=pred_direction,
+                                    paper_stake_usd=stake,
+                                    features=features,
+                                    model_name=model_name,
+                                ))
 
                     logger.info(
-                        "[%s] %s %s: proba=%.4f dir=%s TRADE (%d pending)",
+                        "[%s] %s %s: proba=%.4f dir=%s TRADE",
                         model_name, symbol, "🔼" if pred_direction == "up" else "🔽",
-                        pred_proba, pred_direction, len(self._pending_resolutions),
+                        pred_proba, pred_direction,
                     )
                 else:
                     logger.debug(
                         "[%s] %s: proba=%.4f (below threshold)", model_name, symbol, pred_proba,
                     )
-
-        # Persist pending prediction resolutions
-        self._save_pending_pred_resolutions()
 
         logger.info(
             "Boundary %s: %d predictions total, %d trades total",
@@ -1239,234 +1238,6 @@ class PaperTrader:
             self._prediction_count, self._trade_count,
         )
 
-    async def _check_resolutions(self, now_ms: int) -> None:
-        """Resolve pending trades whose contracts have expired."""
-        still_pending = []
-        for resolve_at_ms, data in self._pending_resolutions:
-            if now_ms >= resolve_at_ms:
-                try:
-                    success = await self._resolve_trade(data, resolve_at_ms)
-                    if not success:
-                        if now_ms - resolve_at_ms > 600_000:  # Give up after 10m
-                            logger.error("Giving up on resolving trade %s due to missing data.", data.get("trade_id"))
-                        else:
-                            still_pending.append((resolve_at_ms, data))
-                except Exception as e:
-                    logger.error("Error resolving trade %s: %s", data.get("trade_id"), e)
-                    # Don't drop it immediately, try again unless expired
-                    if now_ms - resolve_at_ms > 600_000:
-                        logger.error("Giving up on trade %s after repeated errors.", data.get("trade_id"))
-                    else:
-                        still_pending.append((resolve_at_ms, data))
-            else:
-                still_pending.append((resolve_at_ms, data))
-        
-        if len(self._pending_resolutions) != len(still_pending):
-            self._pending_resolutions = still_pending
-            self._save_pending_resolutions()
-        else:
-            self._pending_resolutions = still_pending
-
-    async def _check_prediction_resolutions(self, now_ms: int) -> None:
-        """Resolve pending predictions (ALL predictions, not just trades)."""
-        still_pending = []
-        resolved_count = 0
-        for resolve_at_ms, data in self._pending_pred_resolutions:
-            if now_ms >= resolve_at_ms:
-                symbol = data["symbol"]
-                model_name = data["model_name"]
-                state = self.feature_computer.states.get(symbol)
-
-                if not state or not state.mid_price_history:
-                    # Retry if within 10 min, otherwise drop
-                    if now_ms - resolve_at_ms < 600_000:
-                        still_pending.append((resolve_at_ms, data))
-                    continue
-
-                price_at_close = state.mid_price_history[-1]
-                ts_close_ms = int(time.time() * 1000)
-
-                # Determine result
-                if price_at_close > data["price_at_open"]:
-                    contract_result = "up"
-                elif price_at_close < data["price_at_open"]:
-                    contract_result = "down"
-                else:
-                    contract_result = "flat"
-                prediction_correct = (contract_result == data["pred_direction"])
-
-                # Log to predictions file (denormalized)
-                ledger = self.ledgers[model_name]
-                ledger.log_prediction_resolution(
-                    prediction_id=data["prediction_id"],
-                    ts_contract_close_ms=ts_close_ms,
-                    price_at_close=price_at_close,
-                    contract_result=contract_result,
-                    prediction_correct=prediction_correct,
-                    symbol=symbol,
-                    price_at_open=data["price_at_open"],
-                    pred_proba=data.get("pred_proba"),
-                    pred_direction=data["pred_direction"],
-                    contract_duration_seconds=900,
-                )
-
-                # Auto-recalibrate Kalshi Kelly after each h300 BTC 900s resolution
-                if (
-                    model_name == "h300"
-                    and symbol == "BTCUSDT"
-                    and self._kalshi_trader is not None
-                ):
-                    pred_proba = data.get("pred_proba")
-                    pred_dir = data.get("pred_direction")
-                    if pred_proba is not None and pred_dir is not None:
-                        # side_conf: model's confidence on the side it chose
-                        side_conf = pred_proba if pred_dir == "up" else (1.0 - pred_proba)
-                        self._kalshi_trader._calibrator.record_outcome(
-                            side_conf, prediction_correct,
-                        )
-
-                        # APFS outcome recording for auto-adaptation
-                        pred_features = data.get("features")
-                        if pred_features is not None:
-                            try:
-                                self._kalshi_trader._apfs.record_outcome(
-                                    model_name=model_name,
-                                    symbol=symbol,
-                                    pred_direction=pred_dir,
-                                    pred_proba=pred_proba,
-                                    features=pred_features,
-                                    won=prediction_correct,
-                                )
-                            except Exception as apfs_err:
-                                logger.warning("APFS outcome recording failed: %s", apfs_err)
-
-                resolved_count += 1
-            else:
-                still_pending.append((resolve_at_ms, data))
-
-        if resolved_count > 0:
-            self._pending_pred_resolutions = still_pending
-            self._save_pending_pred_resolutions()
-            logger.debug("Resolved %d predictions, %d still pending",
-                         resolved_count, len(still_pending))
-        else:
-            self._pending_pred_resolutions = still_pending
-
-    async def _resolve_trade(self, data: dict, resolve_at_ms: int) -> bool:
-        """Resolve a single pending trade with current price."""
-        symbol = data["symbol"]
-        model_name = data["model_name"]
-
-        # Get current mid-price from feature computer
-        state = self.feature_computer.states.get(symbol)
-        if not state or not state.mid_price_history:
-            logger.warning("Cannot resolve %s trade — no price data", symbol)
-            return False
-
-        price_at_close = state.mid_price_history[-1]
-        ts_close_ms = int(time.time() * 1000)
-
-        # Determine result — flat (close == open) is a loss for any prediction
-        if price_at_close > data["price_at_open"]:
-            contract_result = "up"
-        elif price_at_close < data["price_at_open"]:
-            contract_result = "down"
-        else:
-            contract_result = "flat"
-        prediction_correct = (contract_result == data["pred_direction"])  # flat never matches
-
-        # ── P&L calculation (true binary option math) ─────────────
-        pred_direction = data["pred_direction"]
-        p_market = data.get("p_market")
-        stake = data.get("stake", SIMULATED_STAKE_USDC)  # use per-trade stake (Kelly or flat)
-
-        if p_market is not None and p_market > 0 and p_market < 1:
-            # True Polymarket payout:
-            # If pred "up": buy Up shares at p_market → shares = stake / p_market
-            # If pred "down": buy Down shares at (1 - p_market) → shares = stake / (1 - p_market)
-            if pred_direction == "up":
-                buy_price = p_market
-            else:
-                buy_price = 1 - p_market
-
-            shares_bought = stake / buy_price
-            # Fee uses execution price (p_market side), not model probability
-            fee = stake * POLYMARKET_FEE_COEFFICIENT * buy_price * (1 - buy_price)
-
-            if prediction_correct:
-                gross_pnl = shares_bought * 1.0 - stake  # shares pay $1 each
-                trade_result = "win"
-            else:
-                gross_pnl = -stake  # shares worth $0
-                trade_result = "loss"
-
-            pnl_method = "binary_option"
-        else:
-            # Fallback: no p_market available — use flat $10 model
-            p = data.get("pred_proba", 0.5)
-            p_side = p if p > 0.5 else (1 - p)
-            fee = stake * POLYMARKET_FEE_COEFFICIENT * p_side * (1 - p_side)
-
-            if prediction_correct:
-                gross_pnl = stake
-                trade_result = "win"
-            else:
-                gross_pnl = -stake
-                trade_result = "loss"
-
-            pnl_method = "flat_fallback"
-
-        net_pnl = gross_pnl - fee
-
-        # Update running P&L for circuit breaker
-        self._running_pnl[model_name] = self._running_pnl.get(model_name, 0.0) + net_pnl
-
-        ledger = self.ledgers[model_name]
-        duration = data["contract_duration_seconds"]
-
-        # Log prediction resolution (denormalized)
-        ledger.log_prediction_resolution(
-            prediction_id=data["prediction_id"],
-            ts_contract_close_ms=ts_close_ms,
-            price_at_close=price_at_close,
-            contract_result=contract_result,
-            prediction_correct=prediction_correct,
-            symbol=symbol,
-            price_at_open=data["price_at_open"],
-            pred_proba=data.get("pred_proba"),
-            pred_direction=pred_direction,
-            contract_duration_seconds=duration,
-        )
-
-        # Log trade resolution (denormalized)
-        ledger.log_trade_resolution(
-            trade_id=data["trade_id"],
-            prediction_id=data["prediction_id"],
-            ts_contract_close_ms=ts_close_ms,
-            price_at_close=price_at_close,
-            contract_result=contract_result,
-            prediction_correct=prediction_correct,
-            gross_pnl=gross_pnl,
-            fee_paid=fee,
-            net_pnl=net_pnl,
-            trade_result=trade_result,
-            symbol=symbol,
-            contract_duration_seconds=duration,
-            price_at_open=data["price_at_open"],
-            pred_proba=data.get("pred_proba"),
-            pred_direction=pred_direction,
-            p_market=p_market,
-            simulated_stake_usdc=stake,
-            pnl_method=pnl_method,
-        )
-
-        emoji = "✅" if prediction_correct else "❌"
-        logger.info(
-            "[%s] %s %s %ds: open=%.2f close=%.2f %s %s net=%.2f (%s)",
-            model_name, symbol, pred_direction, duration,
-            data["price_at_open"], price_at_close, contract_result, emoji, net_pnl, pnl_method,
-        )
-        return True
 
     def _check_mid_price_range(self, symbol: str, mid_price: float) -> None:
         """Warn if mid_price is outside training range."""

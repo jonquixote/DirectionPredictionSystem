@@ -36,10 +36,10 @@ def test_policy_snapshot_captured_at_boot(tmp_path, monkeypatch, tiny_model_path
     assert len(h) == 64
 
 
-def test_legacy_jsonl_ledger_still_present(tmp_path, monkeypatch, tiny_model_path):
+def test_legacy_jsonl_ledger_is_removed(tmp_path, monkeypatch, tiny_model_path):
     t = make_trader(tmp_path, monkeypatch, tiny_model_path)
-    from trading.ledger import Ledger
-    assert all(isinstance(l, Ledger) for l in t.ledgers.values())
+    # PaperTrader no longer constructs legacy Ledger instances
+    assert t.ledgers == {}
 
 
 def test_model_artifact_hash_computed_at_init(tmp_path, monkeypatch, tiny_model_path):
