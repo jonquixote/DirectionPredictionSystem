@@ -30,6 +30,27 @@ logger = logging.getLogger("kline_downloader")
 BYBIT_REST = "https://api.bybit.com"
 KLINE_ENDPOINT = "/v5/market/kline"
 MAX_LIMIT = 1000  # Bybit max per request
+EXPECTED_ROWS_PER_DAY = 1440  # 1-minute bars × 24 h × 60 min
+
+
+def is_complete_day_file(path) -> bool:
+    """True iff the parquet file exists AND has the expected row count.
+
+    Treats any other case (missing, empty, short row count, unreadable)
+    as incomplete — caller should re-download.
+    """
+    from pathlib import Path as _P
+    p = _P(path)
+    if not p.exists():
+        return False
+    if p.stat().st_size == 0:
+        return False
+    try:
+        import pyarrow.parquet as pq
+        meta = pq.read_metadata(str(p))
+        return meta.num_rows >= EXPECTED_ROWS_PER_DAY
+    except Exception:
+        return False
 
 
 def fetch_klines(
