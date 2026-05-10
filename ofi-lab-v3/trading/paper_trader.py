@@ -55,7 +55,7 @@ from storage.db import open_database, init_schema
 from storage.registry_state import RegistryState
 from storage.policy_snapshot import PolicySnapshot
 from storage.sqlite_ledger import SQLiteLedger
-from storage.decision_trace import DecisionTraceWriter
+from storage.decision_trace import DecisionTraceWriter, FilterEval
 from storage.pending_queue import PendingResolutionQueue, PendingEntry
 from storage.window_planner import plan_resolution_rows
 from storage.provenance import sha256_file, feature_names_hash, ProvenanceEnvelope, calibration_map_hash
@@ -542,6 +542,44 @@ class PaperTrader:
             kelly_fraction_capped=kelly_fraction_capped,
             final_size_usdc=final_size_usdc,
             order_type=order_type,
+        )
+
+    def _write_verbose_trace_for_v2_filters(
+        self,
+        *,
+        prediction_id: str,
+        envelope,
+        filter_inputs: dict,
+        kelly_raw: Optional[float],
+        kelly_capped: Optional[float],
+        bankroll_used: Optional[float],
+        per_trade_cap_usdc: Optional[float],
+        fee_model: str,
+        fee_amount: Optional[float],
+        platform_gate: Optional[dict],
+        warmup: bool,
+        consensus_data: Optional[dict],
+    ) -> None:
+        """Adapter from v2 filter dict to FilterEval rows.
+
+        ``filter_inputs`` shape: {name: (threshold, input_value, passed)}.
+        """
+        filters = [
+            FilterEval(name=n, threshold=t, input_value=v, passed=bool(p))
+            for n, (t, v, p) in filter_inputs.items()
+        ]
+        self.decision_trace.write(
+            prediction_id=prediction_id,
+            filters=filters,
+            kelly_raw=kelly_raw, kelly_capped=kelly_capped,
+            bankroll_used=bankroll_used,
+            per_trade_cap_usdc=per_trade_cap_usdc,
+            fee_model=fee_model, fee_amount=fee_amount,
+            platform_gate=platform_gate,
+            warmup=warmup, consensus_data=consensus_data,
+            policy_config_hash=envelope.policy_config_hash,
+            calibration_map_hash=envelope.calibration_map_hash,
+            registry_load_generation=envelope.registry_load_generation,
         )
 
     def kalshi_dispatch_eligible(
