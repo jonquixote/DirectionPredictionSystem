@@ -56,7 +56,8 @@ from storage.registry_state import RegistryState
 from storage.policy_snapshot import PolicySnapshot
 from storage.sqlite_ledger import SQLiteLedger
 from storage.decision_trace import DecisionTraceWriter
-from storage.pending_queue import PendingResolutionQueue
+from storage.pending_queue import PendingResolutionQueue, PendingEntry
+from storage.window_planner import plan_resolution_rows
 from storage.provenance import sha256_file, feature_names_hash, ProvenanceEnvelope, calibration_map_hash
 from execution.calibration import CalibratorRegistry
 
@@ -324,6 +325,78 @@ class PaperTrader:
             calibration_map_hash=cal_h,
             platform=platform,
         )
+
+    def _emit_prediction_rows(
+        self,
+        *,
+        model_name: str,
+        symbol: str,
+        boundary_ms: int,
+        ts_model_ran_ms: int,
+        pred_proba_raw: float,
+        pred_proba_calibrated: float,
+        pred_direction: str,
+        above_threshold: bool,
+        warmup: bool,
+        platform: str,
+        price_at_open: float,
+        p_market: Optional[float] = None,
+        p_model_minus_market: Optional[float] = None,
+        utc_hour: Optional[int] = None,
+        day_of_week: Optional[int] = None,
+        is_weekend: Optional[int] = None,
+        relative_spread: Optional[float] = None,
+    ) -> str:
+        """Insert native + evaluation prediction rows for one boundary
+        and enqueue each in the pending resolution queue. Returns the
+        native row's prediction_id.
+        """
+        meta = config.PAPER_TRADING["model_metadata"][model_name]
+        horizon = meta["training_horizon_seconds"]
+        rows = plan_resolution_rows(
+            boundary_ms=boundary_ms,
+            training_horizon_seconds=horizon,
+            evaluation_windows=config.EVALUATION_WINDOWS,
+        )
+        envelope = self._build_envelope(model_name, platform=platform)
+        native_pid = self.sqlite_ledger.log_prediction_set(
+            envelope=envelope,
+            symbol=symbol,
+            ts_model_ran_ms=ts_model_ran_ms,
+            ts_contract_open_ms=boundary_ms,
+            rows=rows,
+            pred_proba_raw=pred_proba_raw,
+            pred_proba_calibrated=pred_proba_calibrated,
+            pred_direction=pred_direction,
+            above_threshold=above_threshold,
+            warmup=warmup,
+            platform=platform,
+            p_market=p_market,
+            p_model_minus_market=p_model_minus_market,
+            utc_hour=utc_hour,
+            day_of_week=day_of_week,
+            is_weekend=is_weekend,
+            relative_spread=relative_spread,
+        )
+        # Build prediction_id for each row to enqueue. Mirror SQLiteLedger's
+        # suffix scheme: <prefix>_<window><n|e>.
+        prefix = native_pid.rsplit("_", 1)[0]
+        for r in rows:
+            suffix = f"{r.market_window_seconds}{r.resolution_type[0]}"
+            pid = f"{prefix}_{suffix}"
+            self.pending_queue.enqueue(PendingEntry(
+                prediction_id=pid,
+                boundary_ms=boundary_ms,
+                model_name=model_name,
+                symbol=symbol,
+                market_window_seconds=r.market_window_seconds,
+                registry_load_generation=envelope.registry_load_generation,
+                ts_resolve_at_ms=r.ts_resolve_at_ms,
+                resolution_type=r.resolution_type,
+                price_at_open=price_at_open,
+            ))
+        self.pending_queue.persist()
+        return native_pid
 
     def _load_pending_resolutions(self):
         """Restore pending resolutions from disk if the bot crashed/restarted."""
