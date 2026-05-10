@@ -48,6 +48,18 @@ if _os.path.exists(_env_file):
                 _os.environ.setdefault(_k.strip(), _v.strip().strip('"').strip("'"))
 
 from execution.kalshi_live_trader import KalshiLiveTrader
+
+import os
+import config
+from storage.db import open_database, init_schema
+from storage.registry_state import RegistryState
+from storage.policy_snapshot import PolicySnapshot
+from storage.sqlite_ledger import SQLiteLedger
+from storage.decision_trace import DecisionTraceWriter
+from storage.pending_queue import PendingResolutionQueue
+from storage.provenance import sha256_file, feature_names_hash
+from execution.calibration import CalibratorRegistry
+
 EXCHANGE = _os.environ.get("EXCHANGE", "kalshi").lower()
 
 logging.basicConfig(
@@ -138,6 +150,7 @@ class PaperTrader:
         testnet: bool = True,
         features_dir: str | None = None,
         filter_config: dict | None = None,
+        confidence_threshold: float | None = None,
     ):
         self.testnet = testnet
         self.log_dir = Path(log_dir)
@@ -161,6 +174,8 @@ class PaperTrader:
             "pause_trading": fc.get("pause_trading", FILTER_PAUSE_TRADING),
             "per_symbol_confidence": fc.get("per_symbol_confidence", dict(FILTER_PER_SYMBOL_CONFIDENCE)),
         }
+        if confidence_threshold is not None:
+            self.filters["confidence_threshold"] = confidence_threshold
 
         # API server port (0 = disabled)
         self._api_port = fc.get("api_port", API_SERVER_PORT)
@@ -229,6 +244,53 @@ class PaperTrader:
         # ── Running P&L for circuit breaker ───────────────────
         self._running_pnl: dict[str, float] = {}  # per-model running P&L
         self._hydrate_running_pnl()
+
+        # ---------- v3 storage layer (parallel to legacy JSONL during cutover) ----------
+        db_path = os.environ.get("STORAGE_DB_PATH", config.STORAGE_DB_PATH)
+        self._db_conn = open_database(db_path)
+        init_schema(self._db_conn)
+        self.registry_state = RegistryState(self._db_conn)
+        self.registry_state.bootstrap_if_empty(reason="paper_trader boot")
+
+        self.policy_snapshot = PolicySnapshot(self._db_conn)
+        self._policy_snapshot_dict = self._capture_policy_dict()
+        self.policy_snapshot.capture(self._policy_snapshot_dict, initiated_by="boot")
+
+        self.sqlite_ledger = SQLiteLedger(self._db_conn)
+        self.decision_trace = DecisionTraceWriter(self._db_conn)
+        self.pending_queue = PendingResolutionQueue(
+            self.log_dir / "pending_v3.json"
+        )
+
+        calib_dir = os.environ.get("KALSHI_CALIBRATION_DIR", "/data")
+        self.calibrators = CalibratorRegistry(base_dir=calib_dir)
+
+        # Compute provenance hashes for each loaded model
+        self._model_envelopes: dict[str, dict] = {}
+        for name, path in model_paths.items():
+            self._model_envelopes[name] = {
+                "model_artifact_hash": sha256_file(path),
+                "feature_names_hash": feature_names_hash(self.feature_names[name]),
+            }
+
+    def _capture_policy_dict(self) -> dict:
+        """Snapshot the runtime-mutable filter/threshold/Kelly config.
+
+        Canonical input to PolicySnapshot.capture(). Any field that
+        influences a trade decision and can change at runtime must
+        appear here.
+        """
+        f = self.filters
+        return {
+            "confidence_threshold": f.get("confidence_threshold"),
+            "per_symbol_confidence": f.get("per_symbol_confidence", {}),
+            "kelly_fraction": f.get("kelly_fraction"),
+            "ev_threshold": f.get("ev_threshold", 0.0),
+            "circuit_breaker_drawdown": f.get("circuit_breaker_drawdown"),
+            "clob_divergence_min_edge": f.get("clob_divergence_min_edge"),
+            "filter_mode": f.get("filter_mode"),
+            "blackout_hours_utc": list(f.get("blackout_hours_utc", [])),
+        }
 
     def _load_pending_resolutions(self):
         """Restore pending resolutions from disk if the bot crashed/restarted."""
