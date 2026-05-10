@@ -57,7 +57,7 @@ from storage.policy_snapshot import PolicySnapshot
 from storage.sqlite_ledger import SQLiteLedger
 from storage.decision_trace import DecisionTraceWriter
 from storage.pending_queue import PendingResolutionQueue
-from storage.provenance import sha256_file, feature_names_hash
+from storage.provenance import sha256_file, feature_names_hash, ProvenanceEnvelope, calibration_map_hash
 from execution.calibration import CalibratorRegistry
 
 EXCHANGE = _os.environ.get("EXCHANGE", "kalshi").lower()
@@ -291,6 +291,39 @@ class PaperTrader:
             "filter_mode": f.get("filter_mode"),
             "blackout_hours_utc": list(f.get("blackout_hours_utc", [])),
         }
+
+    def _build_envelope(self, model_name: str, platform: str) -> ProvenanceEnvelope:
+        """Construct the provenance envelope for the next prediction.
+
+        Re-captures the policy snapshot (cheap; only writes a new audit row
+        if the canonical form changed) and re-hashes the active calibration
+        map for the model so any out-of-band refit flows through.
+        """
+        meta = config.PAPER_TRADING["model_metadata"][model_name]
+        art_hash = self._model_envelopes[model_name]["model_artifact_hash"]
+        fname_hash = self._model_envelopes[model_name]["feature_names_hash"]
+        policy_v, policy_h = self.policy_snapshot.capture(
+            self._capture_policy_dict(), initiated_by="prediction"
+        )
+        cal = self.calibrators.get(model_name, meta["symbol"],
+                                    meta["training_horizon_seconds"])
+        cal_map = {"method": "binmap", "bins": list(cal._bins)}
+        cal_h = calibration_map_hash(cal_map)
+        return ProvenanceEnvelope(
+            model_name=model_name,
+            model_artifact_hash=art_hash,
+            feature_names_hash=fname_hash,
+            feature_version=meta["feature_version"],
+            training_horizon_seconds=meta["training_horizon_seconds"],
+            train_window_start=meta["train_window_start"],
+            train_window_end=meta["train_window_end"],
+            train_cutoff=meta["train_cutoff"],
+            registry_load_generation=self.registry_state.current_generation(),
+            policy_config_hash=policy_h,
+            decision_policy_version=policy_v,
+            calibration_map_hash=cal_h,
+            platform=platform,
+        )
 
     def _load_pending_resolutions(self):
         """Restore pending resolutions from disk if the bot crashed/restarted."""

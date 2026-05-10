@@ -107,6 +107,42 @@ PAPER_TRADING = {
     },
 }
 
+PAPER_TRADING["model_metadata"] = {
+    "900s_btc_v3_20260315": {
+        "feature_version": "v3",
+        "training_horizon_seconds": 900,
+        "train_window_start": "2025-04-01",
+        "train_window_end":   "2026-03-15",
+        "train_cutoff":       "2026-03-15",
+        "symbol":             "BTCUSDT",
+    },
+    "60s_btc_v3_20260315": {
+        "feature_version": "v3",
+        "training_horizon_seconds": 60,
+        "train_window_start": "2025-04-01",
+        "train_window_end":   "2026-03-15",
+        "train_cutoff":       "2026-03-15",
+        "symbol":             "BTCUSDT",
+    },
+    # Legacy aliases the v2 CLI may still pass at startup
+    "h300": {
+        "feature_version": "v3",
+        "training_horizon_seconds": 900,
+        "train_window_start": "2025-04-01",
+        "train_window_end":   "2026-03-15",
+        "train_cutoff":       "2026-03-15",
+        "symbol":             "BTCUSDT",
+    },
+    "h60": {
+        "feature_version": "v3",
+        "training_horizon_seconds": 60,
+        "train_window_start": "2025-04-01",
+        "train_window_end":   "2026-03-15",
+        "train_cutoff":       "2026-03-15",
+        "symbol":             "BTCUSDT",
+    },
+}
+
 MAX_MODELS_TO_KEEP = 5  # never auto-delete a model referenced in PAPER_TRADING
 
 # Training data boundaries — never train across these dates.
