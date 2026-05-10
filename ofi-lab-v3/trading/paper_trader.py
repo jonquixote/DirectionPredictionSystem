@@ -457,6 +457,28 @@ class PaperTrader:
             self.pending_queue.remove(entry.prediction_id)
         self.pending_queue.persist()
 
+    def kalshi_dispatch_eligible(
+        self, *, model_name: str, symbol: str, market_window_seconds: int,
+    ) -> bool:
+        """Registry-driven Kalshi gate.
+
+        Replaces v2 hardcoded check
+        ``model_name == 'h300' and symbol == 'BTCUSDT' and duration == 900``.
+        Plan B replaces config.PAPER_TRADING["model_metadata"] with
+        model_registry.json — call site stays the same.
+        """
+        meta = config.PAPER_TRADING["model_metadata"].get(model_name)
+        if meta is None:
+            return False
+        if not meta.get("kalshi_dispatch_enabled", False):
+            return False
+        if symbol != meta["symbol"]:
+            return False
+        # Only native horizon dispatches.
+        if market_window_seconds != meta["training_horizon_seconds"]:
+            return False
+        return True
+
     def _direction_for(self, prediction_id: str) -> str:
         row = self._db_conn.execute(
             "SELECT pred_direction FROM predictions WHERE prediction_id = ?",
@@ -710,11 +732,11 @@ class PaperTrader:
             # Refresh calibration map if it changed on disk
             self._kalshi_trader._calibrator.reload()
 
-            ticker = await self._resolve_kalshi_ticker_for_boundary(boundary_ms)
+            ticker = await self._resolve_kalshi_ticker_for_boundary(boundary_ms, duration_sec)
             if ticker is None:
                 logger.info(
                     "kalshi dispatch: no market matches boundary close_unix=%d",
-                    boundary_ms // 1000 + 900,
+                    boundary_ms // 1000 + duration_sec,
                 )
                 return
 
@@ -775,25 +797,25 @@ class PaperTrader:
         except Exception as e:
             logger.warning("kalshi dispatch error (paper continues): %s", e)
 
-    async def _resolve_kalshi_ticker_for_boundary(self, boundary_ms: int) -> str | None:
+    async def _resolve_kalshi_ticker_for_boundary(self, boundary_ms: int, market_window_seconds: int = 900) -> str | None:
         """Return the Kalshi ticker whose close_time matches the contract that
-        spans (boundary_ms, boundary_ms + 900s].
+        spans (boundary_ms, boundary_ms + market_window_seconds].
 
         Kalshi rollover quirk (empirically measured 2026-05-03 23:14-23:15 UTC):
           - At boundary T, the OLD contract (close=T) stays in the active list
             for ~39 seconds AFTER T.
-          - The NEW contract (close=T+900) is NOT in the active list during
+          - The NEW contract (close=T+market_window_seconds) is NOT in the active list during
             that window — neither active nor reachable via no-status-filter
             queries.
           - At ~T+39s, Kalshi flips: OLD disappears, NEW appears as active.
 
         So we retry every 4 seconds for up to 60 seconds, looking for an
-        exact close_time match against (boundary_ts + 900). Once found we
+        exact close_time match against (boundary_ts + market_window_seconds). Once found we
         return the ticker and trading still has ~14 min remaining.
         """
         if self._kalshi_trader is None or self._kalshi_trader._rest is None:
             return None
-        target_close_unix = boundary_ms // 1000 + 900
+        target_close_unix = boundary_ms // 1000 + market_window_seconds
 
         from datetime import datetime
         max_attempts = 16  # 16 × 4 sec = 64 sec total window

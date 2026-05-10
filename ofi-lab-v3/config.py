@@ -143,6 +143,14 @@ PAPER_TRADING["model_metadata"] = {
     },
 }
 
+# Kalshi dispatch eligibility — registry-driven gate (Steering 10c).
+# Default: kalshi_dispatch_enabled=False (safe default for new models).
+# Only the native horizon dispatches; evaluation windows are never eligible.
+PAPER_TRADING["model_metadata"]["900s_btc_v3_20260315"]["kalshi_dispatch_enabled"] = True
+PAPER_TRADING["model_metadata"]["h300"]["kalshi_dispatch_enabled"] = True
+PAPER_TRADING["model_metadata"]["60s_btc_v3_20260315"]["kalshi_dispatch_enabled"] = False
+PAPER_TRADING["model_metadata"]["h60"]["kalshi_dispatch_enabled"] = False
+
 MAX_MODELS_TO_KEEP = 5  # never auto-delete a model referenced in PAPER_TRADING
 
 # Training data boundaries — never train across these dates.
