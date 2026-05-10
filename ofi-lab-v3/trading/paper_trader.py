@@ -522,6 +522,28 @@ class PaperTrader:
         """
         return now_ms < self._boot_ts_ms + config.WARMUP_SECONDS * 1000
 
+    def _record_compact_decision(
+        self,
+        *,
+        prediction_id: str,
+        outcome: str,
+        reason: Optional[str],
+        ev_estimate: Optional[float],
+        kelly_fraction_capped: Optional[float],
+        final_size_usdc: Optional[float],
+        order_type: Optional[str],
+    ) -> None:
+        """UPDATE the prediction row with the inline compact-decision fields."""
+        self.sqlite_ledger.log_compact_decision(
+            prediction_id=prediction_id,
+            decision_outcome=outcome,
+            decision_reason=reason,
+            ev_estimate=ev_estimate,
+            kelly_fraction_capped=kelly_fraction_capped,
+            final_size_usdc=final_size_usdc,
+            order_type=order_type,
+        )
+
     def kalshi_dispatch_eligible(
         self, *, model_name: str, symbol: str, market_window_seconds: int,
     ) -> bool:
@@ -1041,6 +1063,15 @@ class PaperTrader:
 
                 # Suppress trades during warmup
                 if in_warmup:
+                    self._record_compact_decision(
+                        prediction_id=prediction_id,
+                        outcome="gated",
+                        reason="warmup",
+                        ev_estimate=None,
+                        kelly_fraction_capped=None,
+                        final_size_usdc=None,
+                        order_type=None,
+                    )
                     if above_threshold and trade_eligible:
                         warmup_elapsed = (ts_model_ran_ms - (self._first_data_time_ms or ts_model_ran_ms)) / 1000
                         warmup_remaining = MAD_WARMUP_SECONDS - warmup_elapsed
@@ -1086,6 +1117,15 @@ class PaperTrader:
                             warmup=in_warmup,
                             platform="paper",
                             p_market=p_market,
+                        )
+                        self._record_compact_decision(
+                            prediction_id=prediction_id,
+                            outcome="suppressed",
+                            reason="utc_blackout",
+                            ev_estimate=None,
+                            kelly_fraction_capped=None,
+                            final_size_usdc=0.0,
+                            order_type="skipped",
                         )
                         logger.info(
                             "[%s] %s: proba=%.4f dir=%s SUPPRESSED (utc_blackout %02d:00)",
@@ -1136,11 +1176,29 @@ class PaperTrader:
                             platform="paper",
                             p_market=p_market,
                         )
+                        self._record_compact_decision(
+                            prediction_id=prediction_id,
+                            outcome="suppressed",
+                            reason=filter_reason,
+                            ev_estimate=None,
+                            kelly_fraction_capped=None,
+                            final_size_usdc=0.0,
+                            order_type="skipped",
+                        )
                         logger.info(
                             "[%s] %s: proba=%.4f dir=%s SUPPRESSED (%s)",
                             model_name, symbol, pred_proba, pred_direction, filter_reason,
                         )
                     else:
+                        self._record_compact_decision(
+                            prediction_id=prediction_id,
+                            outcome="suppressed",
+                            reason="below_confidence",
+                            ev_estimate=None,
+                            kelly_fraction_capped=None,
+                            final_size_usdc=0.0,
+                            order_type="skipped",
+                        )
                         logger.debug(
                             "[%s] %s: proba=%.4f (below_confidence)", model_name, symbol, pred_proba,
                         )
@@ -1154,6 +1212,17 @@ class PaperTrader:
                         pred_proba=pred_proba,
                         pred_direction=pred_direction,
                         p_market=p_market,
+                    )
+
+                    # Record the compact decision for executed trade
+                    self._record_compact_decision(
+                        prediction_id=prediction_id,
+                        outcome="executed",
+                        reason=None,
+                        ev_estimate=None,
+                        kelly_fraction_capped=None,
+                        final_size_usdc=stake,
+                        order_type="maker",
                     )
 
                     boundary_sec = boundary_ms // 1000
