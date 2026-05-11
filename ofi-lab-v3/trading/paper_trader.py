@@ -1759,15 +1759,33 @@ def main():
         "api_port": args.api_port,
     }
 
-    model_paths = {
-        "h60": args.h60_model,
-        "h300": args.h300_model,
-    }
-    if args.h60_v3_model:
-        model_paths["h60_v3"] = args.h60_v3_model
+    # Check if we should use fleet-mode (registry-driven) or legacy CLI-flag mode
+    if not args.h60_model and not args.h300_model:
+        # Registry-driven fleet mode
+        logger.info("No CLI model flags provided, entering fleet-mode from registry")
+        from trading.fleet_loader import load_active_fleet
+        db_path = _os.environ.get("STORAGE_DB_PATH", "/data/v3.db")
+        conn = open_database(db_path)
+        fleet = load_active_fleet(conn)
+        if not fleet:
+            logger.error("ERROR: no active models in registry. Run scripts/train_fleet.py first.")
+            sys.exit(1)
+        model_paths = {c["name"]: c["artifact_path"] for c in fleet}
+        logger.info(f"Fleet mode: loading {len(model_paths)} models from registry")
+    else:
+        # Legacy CLI-flag mode (h60 and/or h300 only)
+        model_paths = {
+            "h60": args.h60_model,
+            "h300": args.h300_model,
+        }
+        if args.h60_v3_model:
+            model_paths["h60_v3"] = args.h60_v3_model
 
     # Verify model files exist
     for name, path in model_paths.items():
+        if not path:
+            logger.error("Model path is None for %s", name)
+            sys.exit(1)
         if not Path(path).exists():
             logger.error("Model file not found: %s (%s)", path, name)
             sys.exit(1)
