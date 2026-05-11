@@ -1,0 +1,11 @@
+BEGIN;
+ALTER TABLE model_registry ADD COLUMN artifact_path TEXT;
+ALTER TABLE model_registry ADD COLUMN feature_names_path TEXT;
+ALTER TABLE model_registry ADD COLUMN artifact_hash TEXT;
+ALTER TABLE model_registry ADD COLUMN train_window_start TEXT;
+ALTER TABLE model_registry ADD COLUMN train_window_end TEXT;
+ALTER TABLE model_registry ADD COLUMN train_days INTEGER;
+ALTER TABLE model_registry ADD COLUMN feature_version TEXT DEFAULT 'v3';
+ALTER TABLE model_registry ADD COLUMN evaluation_windows TEXT DEFAULT '[300,900,1800]';
+CREATE INDEX IF NOT EXISTS idx_reg_symbol_horizon ON model_registry(symbol, training_horizon_seconds);
+COMMIT;

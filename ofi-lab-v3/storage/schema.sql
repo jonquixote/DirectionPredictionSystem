@@ -373,9 +373,19 @@ CREATE TABLE IF NOT EXISTS model_registry (
     symbol                 TEXT,
     training_horizon_seconds INTEGER,
     generation             INTEGER NOT NULL DEFAULT 0,
+    artifact_path          TEXT,
+    feature_names_path     TEXT,
+    artifact_hash          TEXT,
+    train_window_start     TEXT,
+    train_window_end       TEXT,
+    train_days             INTEGER,
+    feature_version        TEXT DEFAULT 'v3',
+    evaluation_windows     TEXT DEFAULT '[300,900,1800]',
     created_at             TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     updated_at             TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );
+
+CREATE INDEX IF NOT EXISTS idx_reg_symbol_horizon ON model_registry(symbol, training_horizon_seconds);
 
 -- =========================================================================
 -- model_audit: audit trail of model state changes.
