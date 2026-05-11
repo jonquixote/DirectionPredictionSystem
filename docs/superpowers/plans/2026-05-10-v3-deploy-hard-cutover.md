@@ -4,6 +4,26 @@
 
 **Goal:** Hard cutover from v2 (`ofi-lab/`) to v3 (`ofi-lab-v3/`) on the production server. No paper-shadow phase — system is not currently live-trading real money, so simpler cutover is acceptable.
 
+## VPS environment (per `docs_artifacts/vps_deployment_guide.md` or repo root `vps_deployment_guide.md`)
+
+- **Host:** `34.67.75.48` (Google Cloud VM, "vps-n2")
+- **SSH:** `ssh -i ~/.ssh/id_vps_n2 johnny@34.67.75.48`
+- **User:** `johnny` (existing — do NOT create new `v3` user; ignore deploy plan steps that create one)
+- **v2 layout:**
+  - Code on host: `/home/johnny/ofi-lab/`
+  - Runs inside Docker container `h300-retrain-shifted-v2-clone` (image `golden-goose-v2:clone`)
+  - Container has Kalshi env vars baked in via `docker run --env-file` — do NOT `docker rm`
+  - Container mounts host `/data` → container `/data`
+  - v2 kill switch is **in-memory only** — disable via API before `docker stop` (or env var `KALSHI_LIVE_ENABLED=0` on boot)
+  - 30-min warmup after any restart (no predictions)
+- **v3 layout (new, bare-metal alongside docker v2):**
+  - Code on host: `/home/johnny/ofi-lab-v3/` (parallel to v2)
+  - Runs bare metal via systemd, NOT in docker (avoid env-var rebuild complexity)
+  - DB: `/data/v3.db` — separate file, coexists with v2 artifacts in `/data`
+  - Port: dashboard on **8081** (v2 holds 8080)
+  - Sync method: `rsync` (same pattern as v2), or `git clone` of the v3 repo. Recommend `git clone` for v3 because we have proper tags.
+  - Do NOT touch `/data/models/`, `/data/kalshi_orders.jsonl`, `/data/kalshi_private_key.pem` — those are v2 state. v3 has its own `/data/models/v3/` if needed.
+
 **Architecture:** Stop v2 cleanly. Take a backup. Init v3 schema on prod server. Run backfills. Bring v3 services up via systemd. Verify dashboard + paper trader healthy. Keep v2 code on disk for 30 days for rollback insurance.
 
 **Tech Stack:** systemd, nginx, sqlite3, Python 3.13 venv, journald logs.
