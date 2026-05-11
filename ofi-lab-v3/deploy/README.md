@@ -219,7 +219,7 @@ sudo journalctl -u v3-paper-trader -n 20 -f
 
 ```bash
 # Test locally (if no HTTP auth)
-curl http://127.0.0.1:8080/api/status
+curl http://127.0.0.1:8081/api/status
 
 # Test through nginx (with domain)
 curl https://dashboard.example.com/api/status
@@ -246,7 +246,7 @@ Expected response (if disengaged):
 ps aux | grep paper_trader
 
 # Check dashboard is listening
-netstat -tlnp | grep 8080
+netstat -tlnp | grep 8081
 ```
 
 ## Troubleshooting
