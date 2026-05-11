@@ -14,7 +14,7 @@ router = APIRouter(prefix="/audit", tags=["audit"])
 @router.get("")
 def audit(limit: int = 50, model: str | None = None, action: str | None = None):
     conn = get_db()
-    sql = "SELECT * FROM registry_audit WHERE 1=1"
+    sql = "SELECT * FROM model_audit WHERE 1=1"
     params: list = []
     if model:
         sql += " AND model_name=?"
@@ -22,7 +22,7 @@ def audit(limit: int = 50, model: str | None = None, action: str | None = None):
     if action:
         sql += " AND action=?"
         params.append(action)
-    sql += " ORDER BY ts_ms DESC LIMIT ?"
+    sql += " ORDER BY ts DESC LIMIT ?"
     params.append(limit)
     rows = conn.execute(sql, params).fetchall()
     return {"entries": [dict(r) for r in rows]}

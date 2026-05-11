@@ -59,6 +59,7 @@ from storage.decision_trace import DecisionTraceWriter, FilterEval
 from storage.pending_queue import PendingResolutionQueue, PendingEntry
 from storage.window_planner import plan_resolution_rows
 from storage.provenance import sha256_file, feature_names_hash, ProvenanceEnvelope, calibration_map_hash
+from storage.lifecycle import evaluate_lifecycle_transitions
 from execution.calibration import CalibratorRegistry
 from regime.tagger import compute_regime, RegimeTags
 
@@ -225,9 +226,15 @@ class PaperTrader:
         self._last_contract_boundary_ms = 0
         self._prediction_count = 0
         self._trade_count = 0
+        self._paper_trade_count = 0
         self._running = True
         self._start_time_ms = int(time.time() * 1000)
         self._first_data_time_ms: int | None = None
+
+        # ── Boundary cadence counters (for periodic tasks) ────────
+        self._boundary_count = 0
+        self._decay_refresh_interval = 4  # every 4 boundaries
+        self._lifecycle_interval = 16      # every 16 boundaries
 
         # ── Running P&L for circuit breaker ───────────────────
         self._running_pnl: dict[str, float] = {}  # per-model running P&L
@@ -689,6 +696,22 @@ class PaperTrader:
                 sample_count=len(rows),
             )
 
+    def refresh_price_ranges(self) -> None:
+        """Refresh dynamic price ranges for tracked symbols from klines."""
+        from data.range_computer import compute_mid_price_range
+        self._price_ranges = {}
+        tracked = getattr(self, "_tracked_symbols", PREDICTION_SYMBOLS)
+        for symbol in tracked:
+            try:
+                price_range = compute_mid_price_range(
+                    symbol, self._db_conn, lookback_days=7
+                )
+                if price_range:
+                    self._price_ranges[symbol] = price_range
+            except Exception as e:
+                logger.exception("range_compute_failed",
+                                extra={"symbol": symbol, "err": str(e)})
+
     @property
     def _overlap_writer(self):
         if not hasattr(self, "_overlap_writer_cache"):
@@ -1124,6 +1147,28 @@ class PaperTrader:
                 self._last_contract_boundary_ms = boundary_ms
                 await self._run_predictions(now_ms, boundary_ms)
 
+                # ── Periodic boundary tasks ──────────────────────────────
+                self._boundary_count += 1
+
+                # C4: Refresh decay metrics every 4 boundaries
+                if self._boundary_count % self._decay_refresh_interval == 0:
+                    try:
+                        self.refresh_decay_metrics()
+                    except Exception as e:
+                        logger.exception("decay_refresh_failed", extra={"err": str(e)})
+
+                # C6: Evaluate lifecycle FSM every 16 boundaries
+                if self._boundary_count % self._lifecycle_interval == 0:
+                    try:
+                        transitions = evaluate_lifecycle_transitions(self._db_conn, now_ms=now_ms)
+                        for t in transitions:
+                            logger.info("lifecycle_transition", extra=t._asdict())
+                        if transitions:
+                            self.registry_state.increment("lifecycle_transitions",
+                                                        {"count": len(transitions)})
+                    except Exception as e:
+                        logger.exception("lifecycle_eval_failed", extra={"err": str(e)})
+
             # Check pending resolutions
             await self._check_trade_resolutions_v3(now_ms)
             await self._check_prediction_resolutions_v3(now_ms)
@@ -1133,6 +1178,9 @@ class PaperTrader:
     async def _run_predictions(self, now_ms: int, boundary_ms: int) -> None:
         """Score all symbols with all models at a contract boundary."""
         boundary_ts = boundary_ms // 1000
+
+        # C5: Initialize accumulator for overlap recording
+        per_boundary_scores: dict = {}
 
         # Fetch live Kalshi bankroll to sync paper trader bankroll
         self._current_kalshi_bankroll = None
@@ -1181,6 +1229,15 @@ class PaperTrader:
                 pred_proba = float(model.predict(feature_vec)[0])
                 pred_direction = "up" if pred_proba > 0.5 else "down"
 
+                # Try to get calibrated prediction from CalibratorRegistry
+                pred_proba_calibrated = pred_proba
+                try:
+                    calibrator = self.calibrators.get(model_name)
+                    if calibrator:
+                        pred_proba_calibrated = calibrator.calibrate(pred_proba)
+                except Exception as e:
+                    logger.debug("calibration_failed for %s: %s", model_name, e)
+
                 # In APFS mode, lower the confidence floor so APFS
                 # can evaluate the full prediction range.
                 _apfs_active = (
@@ -1211,7 +1268,7 @@ class PaperTrader:
                     boundary_ms=boundary_ms,
                     ts_model_ran_ms=ts_model_ran_ms,
                     pred_proba_raw=pred_proba,
-                    pred_proba_calibrated=pred_proba,  # raw==calibrated until calibrator wired
+                    pred_proba_calibrated=pred_proba_calibrated,
                     pred_direction=pred_direction,
                     above_threshold=above_threshold,
                     warmup=in_warmup,
@@ -1226,6 +1283,49 @@ class PaperTrader:
                     regime_features=features,
                 )
                 self._prediction_count += 1
+
+                # C3: Wire _evaluate_paper_filters to gate trade emission
+                filter_ctx = {
+                    "prediction_id": prediction_id,
+                    "model_name": model_name,
+                    "symbol": symbol,
+                    "boundary_ms": boundary_ms,
+                    "pred_proba": pred_proba,
+                    "pred_proba_calibrated": pred_proba_calibrated,
+                    "pred_direction": pred_direction,
+                    "above_threshold": above_threshold,
+                    "warmup": in_warmup,
+                    "confidence_threshold": _ct,
+                    "active_filter_mode": _active_filter_mode,
+                    "p_market": p_market,
+                    "regime_features": features,
+                }
+                verdict = self._evaluate_paper_filters(filter_ctx)
+                if not verdict.passed:
+                    logger.info("paper_filter_blocked",
+                                extra={"reasons": verdict.reasons,
+                                       "prediction_id": prediction_id})
+                    self._record_compact_decision(
+                        prediction_id=prediction_id,
+                        outcome="gated",
+                        reason="paper_filter",
+                        ev_estimate=None,
+                        kelly_fraction_capped=None,
+                        final_size_usdc=None,
+                        order_type=None,
+                    )
+                    continue  # skip to next symbol/model
+
+                # C5: Accumulate score for overlap recording
+                try:
+                    from trading.overlap_writer import ModelScore
+                    per_boundary_scores[(model_name, symbol)] = ModelScore(
+                        proba=pred_proba_calibrated,
+                        direction=pred_direction,
+                        ev=None,  # Will be filled in after trade resolution
+                    )
+                except Exception as e:
+                    logger.debug("overlap_score_accumulation_failed: %s", e)
 
                 # Suppress trades during warmup
                 if in_warmup:
@@ -1466,6 +1566,18 @@ class PaperTrader:
                     logger.debug(
                         "[%s] %s: proba=%.4f (below threshold)", model_name, symbol, pred_proba,
                     )
+
+        # C5: Record overlap scores for the boundary
+        try:
+            if per_boundary_scores:
+                self.record_overlap_for_boundary(
+                    ts_contract_open_ms=boundary_ms,
+                    symbol=PREDICTION_SYMBOLS[0] if PREDICTION_SYMBOLS else "BTCUSDT",
+                    market_window_seconds=900,
+                    scores=per_boundary_scores,
+                )
+        except Exception as e:
+            logger.exception("overlap_recording_failed", extra={"err": str(e)})
 
         logger.info(
             "Boundary %s: %d predictions total, %d trades total",

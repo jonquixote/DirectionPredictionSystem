@@ -1,0 +1,18 @@
+[Unit]
+Description=ofi-lab-v3 dashboard API
+After=network.target
+
+[Service]
+Type=simple
+User=v3
+WorkingDirectory=/opt/ofi-lab-v3
+EnvironmentFile=/etc/v3/env
+ExecStart=/opt/ofi-lab-v3/.venv/bin/uvicorn dashboard_api.main:app --host 127.0.0.1 --port 8080
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=v3-dashboard
+
+[Install]
+WantedBy=multi-user.target

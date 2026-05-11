@@ -53,3 +53,51 @@ class RegistryState:
                  json.dumps(detail) if detail is not None else None),
             )
             return new
+
+    def get(self, model: str):
+        """Get model row from registry."""
+        row = self._conn.execute(
+            "SELECT * FROM model_registry WHERE name=?", (model,)
+        ).fetchone()
+        return row
+
+    def set_paper(self, *, model: str, enabled: bool, by: str) -> None:
+        """Enable or disable paper trading for a model."""
+        self._conn.execute(
+            "UPDATE model_registry SET paper_active=? WHERE name=?",
+            (1 if enabled else 0, model)
+        )
+        self._conn.commit()
+        self._audit(model, "enable_paper" if enabled else "disable_paper", by, None)
+
+    def set_live(self, *, model: str, enabled: bool, by: str) -> None:
+        """Enable or disable live trading for a model."""
+        self._conn.execute(
+            "UPDATE model_registry SET live_eligible=? WHERE name=?",
+            (1 if enabled else 0, model)
+        )
+        self._conn.commit()
+        self._audit(model, "enable_live" if enabled else "disable_live", by, None)
+
+    def suspend(self, *, model: str, reason: str) -> None:
+        """Suspend a model (disable both paper and live, unless baseline)."""
+        row = self._conn.execute(
+            "SELECT is_baseline FROM model_registry WHERE name=?", (model,)
+        ).fetchone()
+        if row and row["is_baseline"]:
+            return  # baseline never suspended
+        self._conn.execute(
+            "UPDATE model_registry SET paper_active=0, live_eligible=0, "
+            "lifecycle_state='suspended' WHERE name=?", (model,)
+        )
+        self._conn.commit()
+        self._audit(model, "suspend", "lifecycle_fsm", reason)
+
+    def _audit(self, model: str, action: str, by: str, detail: Optional[str]) -> None:
+        """Record an audit entry for a model action."""
+        self._conn.execute(
+            "INSERT INTO model_audit (model_name, action, by_user, detail, ts) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (model, action, by, detail, _utc_iso())
+        )
+        self._conn.commit()

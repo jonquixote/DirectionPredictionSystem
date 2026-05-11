@@ -108,3 +108,88 @@ class LifecycleStateMachine:
 
         # Unknown state → no-op
         return LifecycleDecision(current_state, "unknown_state")
+
+
+@dataclass(frozen=True)
+class Transition:
+    """Lifecycle transition record."""
+    model_name: str
+    old_state: str
+    new_state: str
+    reason: str
+
+    def _asdict(self):
+        return {
+            "model_name": self.model_name,
+            "old_state": self.old_state,
+            "new_state": self.new_state,
+            "reason": self.reason,
+        }
+
+
+def evaluate_lifecycle_transitions(conn, *, now_ms: int) -> list[Transition]:
+    """Evaluate lifecycle FSM for all models and return transitions."""
+    from storage.decay_metrics import compute_brier_score, compute_calibration_error, compute_recency_weighted_ev
+
+    fsm = LifecycleStateMachine(LifecycleConfig())
+    transitions = []
+
+    models = conn.execute(
+        "SELECT name, lifecycle_state, is_baseline FROM model_registry"
+    ).fetchall()
+
+    for model_row in models:
+        model_name = model_row["name"]
+        current_state = model_row["lifecycle_state"]
+        is_baseline = bool(model_row["is_baseline"])
+
+        # Fetch decay metrics for this model
+        metrics = conn.execute(
+            "SELECT * FROM decay_metrics WHERE model_name = ? ORDER BY ts_ms DESC LIMIT 1",
+            (model_name,)
+        ).fetchone()
+
+        if not metrics:
+            continue
+
+        resolved_count = metrics["sample_count"] or 0
+        recency_weighted_ev = metrics["recency_weighted_ev"] or 0.0
+        calibration_error = metrics["calibration_error"] or 0.0
+        consecutive_failures = metrics.get("consecutive_requalification_failures", 0) or 0
+
+        # Evaluate FSM
+        decision = fsm.evaluate(
+            current_state=current_state,
+            resolved_count=resolved_count,
+            recency_weighted_ev=recency_weighted_ev,
+            calibration_error=calibration_error,
+            consecutive_requalification_failures=consecutive_failures,
+            is_baseline=is_baseline,
+        )
+
+        if decision.next_state != current_state:
+            # Transition occurred
+            transitions.append(Transition(
+                model_name=model_name,
+                old_state=current_state,
+                new_state=decision.next_state,
+                reason=decision.reason,
+            ))
+
+            # Apply transition to database
+            conn.execute(
+                "UPDATE model_registry SET lifecycle_state = ? WHERE name = ?",
+                (decision.next_state, model_name)
+            )
+
+            # Log audit entry
+            conn.execute(
+                "INSERT INTO model_audit (model_name, action, by_user, detail, ts) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (model_name, "lifecycle_transition", "lifecycle_fsm",
+                 f"from {current_state} to {decision.next_state}: {decision.reason}",
+                 now_ms // 1000)
+            )
+
+    conn.commit()
+    return transitions

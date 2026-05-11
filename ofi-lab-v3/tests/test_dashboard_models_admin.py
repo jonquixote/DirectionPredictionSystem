@@ -24,69 +24,10 @@ def seeded_app(tmp_path, monkeypatch):
     db_path = str(tmp_path / "test.db")
     monkeypatch.setenv("STORAGE_DB_PATH", db_path)
 
-    # Create schema + seed data
-    conn = sqlite3.connect(db_path)
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA foreign_keys=ON")
-
-    # model_registry table
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS model_registry (
-            name TEXT PRIMARY KEY,
-            is_baseline INTEGER DEFAULT 0,
-            lifecycle_state TEXT DEFAULT 'active',
-            paper_active INTEGER DEFAULT 0,
-            live_eligible INTEGER DEFAULT 0,
-            symbol TEXT,
-            training_horizon_seconds INTEGER,
-            generation INTEGER DEFAULT 0,
-            created_at TEXT DEFAULT (datetime('now'))
-        )
-    """)
-    # registry_audit table
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS registry_audit (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            ts_ms INTEGER,
-            model_name TEXT,
-            action TEXT,
-            actor TEXT,
-            reason TEXT,
-            before_state TEXT,
-            after_state TEXT
-        )
-    """)
-    # model_overlap table
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS model_overlap (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            ts_contract_open_ms INTEGER,
-            symbol TEXT,
-            market_window_seconds INTEGER,
-            consensus INTEGER,
-            weighted_confidence REAL,
-            model_details TEXT,
-            registry_load_generation INTEGER
-        )
-    """)
-    # decay_metrics table
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS decay_metrics (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            model_name TEXT,
-            symbol TEXT,
-            market_window_seconds INTEGER,
-            window_size INTEGER,
-            rolling_ev REAL,
-            recency_weighted_ev REAL,
-            rolling_win_rate REAL,
-            brier_score REAL,
-            calibration_error REAL,
-            sample_count INTEGER,
-            ts_ms INTEGER DEFAULT (strftime('%s','now')*1000)
-        )
-    """)
+    # Use real init_schema from storage
+    from storage.db import open_database, init_schema
+    conn = open_database(db_path)
+    init_schema(conn)
 
     # Seed models
     conn.execute(
@@ -163,7 +104,7 @@ def test_enable_paper(seeded_app):
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     audit = conn.execute(
-        "SELECT * FROM registry_audit WHERE model_name='h60_xrp' ORDER BY ts_ms DESC"
+        "SELECT * FROM model_audit WHERE model_name='h60_xrp' ORDER BY ts DESC"
     ).fetchone()
     assert audit["action"] == "enable_paper"
 

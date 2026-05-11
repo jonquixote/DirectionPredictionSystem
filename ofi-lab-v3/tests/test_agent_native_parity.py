@@ -36,31 +36,11 @@ def parity_client(tmp_path, monkeypatch):
         tmp_path / "kill.json",
     )
 
-    conn = sqlite3.connect(db_path)
-    conn.execute("""CREATE TABLE IF NOT EXISTS model_registry (
-        name TEXT PRIMARY KEY, is_baseline INTEGER DEFAULT 0,
-        lifecycle_state TEXT DEFAULT 'active', paper_active INTEGER DEFAULT 0,
-        live_eligible INTEGER DEFAULT 0, symbol TEXT,
-        training_horizon_seconds INTEGER, generation INTEGER DEFAULT 0,
-        created_at TEXT DEFAULT (datetime('now'))
-    )""")
-    conn.execute("""CREATE TABLE IF NOT EXISTS registry_audit (
-        id INTEGER PRIMARY KEY AUTOINCREMENT, ts_ms INTEGER,
-        model_name TEXT, action TEXT, actor TEXT, reason TEXT,
-        before_state TEXT, after_state TEXT
-    )""")
-    conn.execute("""CREATE TABLE IF NOT EXISTS model_overlap (
-        id INTEGER PRIMARY KEY AUTOINCREMENT, ts_contract_open_ms INTEGER,
-        symbol TEXT, market_window_seconds INTEGER, consensus INTEGER,
-        weighted_confidence REAL, model_details TEXT, registry_load_generation INTEGER
-    )""")
-    conn.execute("""CREATE TABLE IF NOT EXISTS decay_metrics (
-        id INTEGER PRIMARY KEY AUTOINCREMENT, model_name TEXT,
-        symbol TEXT, market_window_seconds INTEGER, window_size INTEGER,
-        rolling_ev REAL, recency_weighted_ev REAL, rolling_win_rate REAL,
-        brier_score REAL, calibration_error REAL, sample_count INTEGER,
-        ts_ms INTEGER DEFAULT 0
-    )""")
+    from storage.db import open_database, init_schema
+    conn = open_database(db_path)
+    init_schema(conn)
+
+    # Seed models
     conn.execute(
         "INSERT INTO model_registry (name, is_baseline, symbol, training_horizon_seconds) "
         "VALUES ('h300_btc', 1, 'BTCUSDT', 900)"
@@ -72,12 +52,10 @@ def parity_client(tmp_path, monkeypatch):
     conn.commit()
     conn.close()
 
-    import dashboard_api.routers.models_admin as ma
     def _test_db():
         c = sqlite3.connect(db_path, check_same_thread=False)
         c.row_factory = sqlite3.Row
         return c
-    monkeypatch.setattr(ma, "_get_conn", _test_db)
 
     import dashboard_api.services.db as db_mod
     monkeypatch.setattr(db_mod, "get_db", _test_db)

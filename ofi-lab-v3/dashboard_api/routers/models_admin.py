@@ -32,11 +32,14 @@ def _get_conn():
 
 
 def _audit(conn, name, action, by, reason, before, after):
+    detail = f"before={before}; after={after}"
+    if reason:
+        detail += f"; reason={reason}"
     conn.execute(
-        "INSERT INTO registry_audit "
-        "(ts_ms, model_name, action, actor, reason, before_state, after_state) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?)",
-        (int(time.time() * 1000), name, action, by, reason or "", str(before), str(after)),
+        "INSERT INTO model_audit "
+        "(model_name, action, by_user, detail) "
+        "VALUES (?, ?, ?, ?)",
+        (name, action, by, detail),
     )
     conn.commit()
 
@@ -74,7 +77,7 @@ def list_models():
               SELECT model_name,
                      recency_weighted_ev, brier_score, calibration_error,
                      ROW_NUMBER() OVER (PARTITION BY model_name
-                                        ORDER BY ts_ms DESC) rn
+                                        ORDER BY ts DESC) rn
                 FROM decay_metrics
           ) dm ON dm.model_name = mr.name AND dm.rn = 1
          ORDER BY mr.is_baseline DESC, mr.name
@@ -95,8 +98,8 @@ def get_model(name: str):
         "ORDER BY ts_contract_open_ms DESC LIMIT 50"
     ).fetchall()
     audit = conn.execute(
-        "SELECT * FROM registry_audit WHERE model_name = ? "
-        "ORDER BY ts_ms DESC LIMIT 25",
+        "SELECT * FROM model_audit WHERE model_name = ? "
+        "ORDER BY ts DESC LIMIT 25",
         (name,),
     ).fetchall()
     return {

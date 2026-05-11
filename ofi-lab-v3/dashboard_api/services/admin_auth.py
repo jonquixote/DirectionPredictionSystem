@@ -58,3 +58,29 @@ def verify_confirmation_token(token: str, *, action: str, target: str) -> dict:
             raise ConfirmationError("token already used")
         _USED_TOKENS.add(token)
     return body
+
+
+def validate_admin_secret(*, env: str) -> None:
+    """Validate that V3_ADMIN_SECRET is set in production mode.
+    
+    In prod, raise ValueError if not set.
+    In dev, log a warning but allow random fallback.
+    
+    Args:
+        env: Environment name ('prod' or other)
+        
+    Raises:
+        ValueError: If env='prod' and V3_ADMIN_SECRET is not set
+    """
+    secret_is_set = os.environ.get("V3_ADMIN_SECRET") is not None
+    
+    if env == "prod" and not secret_is_set:
+        raise ValueError(
+            "V3_ADMIN_SECRET environment variable is not set but V3_ENV=prod. "
+            "Use scripts/generate_admin_secret.sh to create one, then set V3_ADMIN_SECRET in /etc/v3/env"
+        )
+    elif not secret_is_set:
+        import logging
+        logging.getLogger("admin_auth").warning(
+            "V3_ADMIN_SECRET not set — using random tokens (will invalidate on restart)"
+        )

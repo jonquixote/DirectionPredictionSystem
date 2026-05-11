@@ -360,3 +360,33 @@ CREATE TABLE IF NOT EXISTS calibration_summary (
     created_at             TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     updated_at             TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );
+
+-- =========================================================================
+-- model_registry: runtime state of models (paper_active, live_eligible, etc).
+-- =========================================================================
+CREATE TABLE IF NOT EXISTS model_registry (
+    name                   TEXT PRIMARY KEY,
+    is_baseline            INTEGER NOT NULL DEFAULT 0,
+    paper_active           INTEGER NOT NULL DEFAULT 1,
+    live_eligible          INTEGER NOT NULL DEFAULT 0,
+    lifecycle_state        TEXT NOT NULL DEFAULT 'prediction_only',
+    symbol                 TEXT,
+    training_horizon_seconds INTEGER,
+    generation             INTEGER NOT NULL DEFAULT 0,
+    created_at             TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    updated_at             TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+
+-- =========================================================================
+-- model_audit: audit trail of model state changes.
+-- =========================================================================
+CREATE TABLE IF NOT EXISTS model_audit (
+    id                     INTEGER PRIMARY KEY AUTOINCREMENT,
+    model_name             TEXT NOT NULL,
+    action                 TEXT NOT NULL,
+    by_user                TEXT NOT NULL,
+    detail                 TEXT,
+    ts                     TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_model_audit_name ON model_audit(model_name, ts);

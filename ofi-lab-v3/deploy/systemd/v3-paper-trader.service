@@ -1,0 +1,18 @@
+[Unit]
+Description=ofi-lab-v3 paper trader
+After=network.target
+
+[Service]
+Type=simple
+User=v3
+WorkingDirectory=/opt/ofi-lab-v3
+EnvironmentFile=/etc/v3/env
+ExecStart=/opt/ofi-lab-v3/.venv/bin/python -m trading.paper_trader
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=v3-paper
+
+[Install]
+WantedBy=multi-user.target

@@ -6,11 +6,13 @@ Reads from JSONL log files and model metadata — never writes to trading data.
 """
 import asyncio
 import logging
+import os
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Depends
 from fastapi.middleware.cors import CORSMiddleware
 
 from services.auth import verify_credentials
+from services.admin_auth import validate_admin_secret
 from services.live_state import LiveState
 from services.alerts_engine import start_alert_worker
 from ws.broadcaster import ws_router
@@ -43,6 +45,9 @@ async def _refresh_loop():
 async def lifespan(app: FastAPI):
     """Startup / shutdown lifecycle."""
     logger.info("Dashboard API starting...")
+    # Validate admin secret on startup
+    env = os.environ.get("V3_ENV", "dev")
+    validate_admin_secret(env=env)
     LiveState.initialize()
     start_alert_worker()
     task = asyncio.create_task(_refresh_loop())
