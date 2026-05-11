@@ -98,8 +98,10 @@ class SymbolState:
     # Roll measure
     mid_price_history: deque = field(default_factory=lambda: deque(maxlen=ROLL_WINDOW + 2))
 
-    # 1-second rows buffer for rolling features (keep 5 min = 300 rows)
-    rows_1s: deque = field(default_factory=lambda: deque(maxlen=600))
+    # 1-second rows buffer for rolling features + price_at lookup.
+    # Sized to ~40 min (2400 rows) so resolutions up to h1800 horizons can find
+    # close prices without re-reading on-disk parquets.
+    rows_1s: deque = field(default_factory=lambda: deque(maxlen=2400))
 
     # Downsample
     last_output_ts: int = 0
@@ -215,6 +217,32 @@ class LiveFeatureComputer:
             return False
         elapsed_ms = state.last_output_ts - state.first_row_ts
         return elapsed_ms >= self._warmup_seconds * 1000
+
+    def price_at(self, symbol: str, ts_ms: int, tol_ms: int = 2000) -> float:
+        """Return mid_price closest to ts_ms within ±tol_ms.
+
+        Scans the in-memory `rows_1s` buffer (~40 min window).
+        Raises KeyError when no row in tolerance — caller should re-queue.
+        """
+        state = self.states.get(symbol.upper())
+        if not state or not state.rows_1s:
+            raise KeyError(f"price_at: no rows for {symbol}")
+        best = None
+        best_delta = tol_ms + 1
+        # Iterate newest→oldest; bail once cts is far enough below ts_ms.
+        for row in reversed(state.rows_1s):
+            cts = row.get("cts")
+            if cts is None:
+                continue
+            delta = abs(cts - ts_ms)
+            if delta < best_delta:
+                best_delta = delta
+                best = row
+            if cts < ts_ms - tol_ms:
+                break
+        if best is None or best_delta > tol_ms:
+            raise KeyError(f"price_at: no row within ±{tol_ms}ms of {ts_ms} for {symbol}")
+        return float(best["mid_price"])
 
     def on_book_update(
         self,

@@ -378,6 +378,12 @@ def train_final_model(
     lgbm_params: dict,
     output_dir: Path,
     horizon_seconds: int,
+    *,
+    symbol: str = "MULTI",
+    train_days: int = 330,
+    train_window_start: str | None = None,
+    train_window_end: str | None = None,
+    feature_version: str = "v3",
 ) -> dict:
     """
     Train final model on full train+val, evaluate on held-out test.
@@ -478,11 +484,11 @@ def train_final_model(
         "horizon_seconds": horizon_seconds,
         "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         # Fleet-friendly fields for register_model
-        "symbol": args.symbol or "MULTI",
-        "train_days": args.train_days,
-        "train_window_start": train_start,
-        "train_window_end": train_end,
-        "feature_version": args.feature_version,
+        "symbol": symbol,
+        "train_days": train_days,
+        "train_window_start": train_window_start,
+        "train_window_end": train_window_end,
+        "feature_version": feature_version,
     }
     with open(output_dir / "metrics.json", "w") as f:
         json.dump(metrics, f, indent=2)
@@ -703,9 +709,19 @@ def main():
     run_ts = datetime.datetime.now(datetime.timezone.utc).strftime("%Y%m%d_%H%M%S")
     run_dir = models_dir / f"run_{run_ts}"
 
+    # Compute train_days from train window
+    _ts = pd.to_datetime(args.train_start)
+    _te = pd.to_datetime(args.train_end)
+    train_days_val = (_te - _ts).days
+
     metrics = train_final_model(
         df_trainval, df_test, feature_names, LGBM_PARAMS,
         run_dir, horizon,
+        symbol=args.symbol or "MULTI",
+        train_days=train_days_val,
+        train_window_start=args.train_start,
+        train_window_end=args.train_end,
+        feature_version=args.feature_version or "v3",
     )
 
     logger.info("Contract-aligned evaluation: %d/%d test rows (%.1f%%) within ±30s of 5-min boundary",

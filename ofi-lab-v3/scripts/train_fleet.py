@@ -34,7 +34,7 @@ def filter_pending(fleet, state_path: Path):
     return [c for c in fleet if c["name"] not in done]
 
 
-def train_one(cell, *, train_end, feature_dir, output_root, evaluation_windows, db_path=None):
+def train_one(cell, *, train_end, feature_dir, output_root, evaluation_windows, db_path=None, val_days=10, test_days=5):
     """Train a single model cell.
 
     Args:
@@ -64,6 +64,10 @@ def train_one(cell, *, train_end, feature_dir, output_root, evaluation_windows, 
         str(cell["train_days"]),
         "--train-end",
         train_end,
+        "--val-days",
+        str(val_days),
+        "--test-days",
+        str(test_days),
         "--feature-dir",
         feature_dir,
         "--output-dir",
@@ -80,7 +84,18 @@ def train_one(cell, *, train_end, feature_dir, output_root, evaluation_windows, 
             "duration_s": time.time() - t0,
         }
 
-    # Register the trained model
+    # Register the trained model — retrain.py creates {out_dir}/run_TS/ with model.lgb.
+    # Find the newest run_* subdir to point register_model at.
+    run_dirs = sorted(out_dir.glob("run_*"), key=lambda p: p.stat().st_mtime, reverse=True)
+    if not run_dirs:
+        return {
+            "name": cell["name"],
+            "status": "TRAINED_BUT_NO_RUN_DIR",
+            "err": f"no run_* subdir in {out_dir}",
+            "duration_s": time.time() - t0,
+        }
+    artifact_dir = run_dirs[0]
+
     if db_path:
         reg_cmd = [
             sys.executable,
@@ -88,7 +103,7 @@ def train_one(cell, *, train_end, feature_dir, output_root, evaluation_windows, 
             "--db",
             db_path,
             "--artifact-dir",
-            str(out_dir),
+            str(artifact_dir),
             "--evaluation-windows",
             ",".join(map(str, evaluation_windows)),
         ]
@@ -156,6 +171,8 @@ def main():
         default="/data/v3.db",
         help="SQLite database path for registration",
     )
+    p.add_argument("--val-days", type=int, default=10, help="Validation window in days")
+    p.add_argument("--test-days", type=int, default=5, help="Test window in days")
     args = p.parse_args()
 
     symbols = args.symbols.split(",")
@@ -184,6 +201,8 @@ def main():
                 output_root=args.output_root,
                 evaluation_windows=eval_windows,
                 db_path=args.db,
+                val_days=args.val_days,
+                test_days=args.test_days,
             ): c
             for c in pending
         }
