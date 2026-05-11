@@ -9,10 +9,7 @@ try:
 except ModuleNotFoundError:
     from dashboard_api.services.db import get_db
 
-try:
-    from regime.tagger import compute_regime
-except ModuleNotFoundError:
-    from ofi_lab_v3.regime.tagger import compute_regime
+from regime.tagger import compute_regime
 
 router = APIRouter(prefix="/regime", tags=["regime"])
 
