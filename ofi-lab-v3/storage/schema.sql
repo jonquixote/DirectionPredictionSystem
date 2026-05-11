@@ -390,3 +390,19 @@ CREATE TABLE IF NOT EXISTS model_audit (
 );
 
 CREATE INDEX IF NOT EXISTS idx_model_audit_name ON model_audit(model_name, ts);
+
+-- =========================================================================
+-- calibration_map: per-model isotonic regression coefficients.
+--                  Fitted from resolved native predictions; supports provenance via map_hash.
+-- =========================================================================
+CREATE TABLE IF NOT EXISTS calibration_map (
+    model_name      TEXT PRIMARY KEY,
+    x_json          TEXT NOT NULL,
+    y_json          TEXT NOT NULL,
+    fit_at_ms       INTEGER NOT NULL,
+    n_obs           INTEGER NOT NULL,
+    map_hash        TEXT NOT NULL,
+    fit_method      TEXT NOT NULL DEFAULT 'isotonic'
+);
+
+CREATE INDEX IF NOT EXISTS idx_calib_map_hash ON calibration_map(map_hash);
