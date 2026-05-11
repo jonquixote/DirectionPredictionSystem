@@ -72,6 +72,7 @@ def train_one(cell, *, train_end, feature_dir, output_root, evaluation_windows, 
         feature_dir,
         "--output-dir",
         str(out_dir),
+        "--skip-wf",
     ]
     t0 = time.time()
     try:

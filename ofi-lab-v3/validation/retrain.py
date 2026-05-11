@@ -39,6 +39,8 @@ def main() -> int:
                    help="print resolved windows + name and exit 0")
     p.add_argument("--auto-name", action="store_true",
                    help="(default) derive model name from convention")
+    p.add_argument("--skip-wf", action="store_true",
+                   help="skip walk-forward CV (faster fleet training)")
     args = p.parse_args()
 
     train_end = datetime.strptime(args.train_end, "%Y-%m-%d").date()
@@ -75,6 +77,8 @@ def main() -> int:
         "--output-dir", args.output_dir,
         "--model-name", name,
     ]
+    if args.skip_wf:
+        cmd.append("--skip-wf")
     print(f"delegating to: {' '.join(cmd)}")
     return _sp.call(cmd)
 

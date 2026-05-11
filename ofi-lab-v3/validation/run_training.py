@@ -613,6 +613,8 @@ def main():
                         help="Model artifacts directory")
     parser.add_argument("--dry-run", action="store_true",
                         help="Validate data only, no training")
+    parser.add_argument("--skip-wf", action="store_true",
+                        help="Skip walk-forward CV (faster fleet training; final model unchanged)")
     # Fleet training parameters (optional, for register_model integration)
     parser.add_argument("--symbol", type=str, default=None,
                         help="Symbol for fleet training (e.g., BTCUSDT)")
@@ -698,10 +700,13 @@ def main():
     feature_names = FEATURE_COLS.copy()
 
     # ── Phase 4: Walk-forward CV on training set ──
-    wf_results = walk_forward_cv(df_train, feature_names, WF_FOLDS, LGBM_PARAMS)
-
-    mean_auc = np.mean([r["auc_roc"] for r in wf_results])
-    logger.info("Walk-forward CV mean AUC: %.4f", mean_auc)
+    if getattr(args, "skip_wf", False):
+        logger.info("Walk-forward CV skipped (--skip-wf)")
+        wf_results = []
+    else:
+        wf_results = walk_forward_cv(df_train, feature_names, WF_FOLDS, LGBM_PARAMS)
+        mean_auc = np.mean([r["auc_roc"] for r in wf_results])
+        logger.info("Walk-forward CV mean AUC: %.4f", mean_auc)
 
     # ── Phase 5: Final model on train+val, evaluate on test ──
     df_trainval = pd.concat([df_train, df_val], ignore_index=True)
