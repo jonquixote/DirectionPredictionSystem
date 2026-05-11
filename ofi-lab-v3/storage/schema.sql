@@ -308,3 +308,55 @@ CREATE TABLE IF NOT EXISTS decay_evaluations (
 
 CREATE INDEX IF NOT EXISTS idx_decay_eval_model
     ON decay_evaluations(model_name, eval_type, ts);
+
+-- =========================================================================
+-- regime_thresholds: per-symbol volatility/liquidity/trend quartiles.
+-- =========================================================================
+CREATE TABLE IF NOT EXISTS regime_thresholds (
+    symbol                 TEXT PRIMARY KEY,
+    thresholds_json        TEXT NOT NULL,
+    updated_at             TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+
+-- =========================================================================
+-- regime_features_latest: latest feature snapshot per symbol for tagging.
+-- =========================================================================
+CREATE TABLE IF NOT EXISTS regime_features_latest (
+    symbol                 TEXT PRIMARY KEY,
+    vwap_dev_30s_std       REAL,
+    mlofi_60s_std          REAL,
+    relative_spread        REAL,
+    spread_5m_pct          REAL,
+    mlofi_momentum         REAL,
+    vwap_2m_deviation      REAL,
+    ts_updated_ms          INTEGER NOT NULL DEFAULT (cast(strftime('%s','now') as integer) * 1000),
+    updated_at             TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+
+-- =========================================================================
+-- calibration_bins: histogram bins for model calibration curves.
+-- =========================================================================
+CREATE TABLE IF NOT EXISTS calibration_bins (
+    id                     INTEGER PRIMARY KEY AUTOINCREMENT,
+    model_name             TEXT NOT NULL,
+    bin_lo                 REAL NOT NULL,
+    bin_hi                 REAL NOT NULL,
+    observed_freq          REAL NOT NULL,
+    n                      INTEGER NOT NULL,
+    created_at             TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_cal_bins_model
+    ON calibration_bins(model_name, bin_lo);
+
+-- =========================================================================
+-- calibration_summary: per-model calibration metrics.
+-- =========================================================================
+CREATE TABLE IF NOT EXISTS calibration_summary (
+    model_name             TEXT PRIMARY KEY,
+    brier                  REAL,
+    log_loss               REAL,
+    n_obs                  INTEGER,
+    created_at             TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    updated_at             TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);

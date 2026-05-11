@@ -60,6 +60,9 @@ class SQLiteLedger:
         is_weekend: Optional[int] = None,
         relative_spread: Optional[float] = None,
         trade_eligible: bool = True,
+        regime_volatility: Optional[str] = None,
+        regime_liquidity: Optional[str] = None,
+        regime_trend: Optional[str] = None,
     ) -> str:
         """Insert one native + N evaluation rows for a single boundary.
 
@@ -87,9 +90,10 @@ class SQLiteLedger:
                     " pred_proba_raw, pred_proba_calibrated, pred_direction,"
                     " above_threshold, warmup, trade_eligible, platform,"
                     " p_market, p_model_minus_market,"
-                    " utc_hour, day_of_week, is_weekend, relative_spread"
+                    " utc_hour, day_of_week, is_weekend, relative_spread,"
+                    " regime_volatility, regime_liquidity, regime_trend"
                     ") VALUES ("
-                    " ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?"
+                    " ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?"
                     ")",
                     (
                         pid,
@@ -107,6 +111,7 @@ class SQLiteLedger:
                         int(warmup), int(trade_eligible), platform,
                         p_market, p_model_minus_market,
                         utc_hour, day_of_week, is_weekend, relative_spread,
+                        regime_volatility, regime_liquidity, regime_trend,
                     ),
                 )
         assert native_id is not None, "rows must include exactly one native row"

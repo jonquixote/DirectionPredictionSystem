@@ -16,9 +16,7 @@ from services.alerts_engine import start_alert_worker
 from ws.broadcaster import ws_router
 from routers import (
     status, predictions, trades, performance,
-    parquet, features, models_registry, alerts, logs,
-    models_admin, overlap, kill_switch, audit, admin,
-    regime, calibration,
+    parquet, features, models_registry, alerts, logs
 )
 
 logging.basicConfig(
@@ -81,13 +79,6 @@ for router in [
     models_registry.router,
     alerts.router,
     logs.router,
-    models_admin.router,
-    overlap.router,
-    regime.router,
-    calibration.router,
-    kill_switch.router,
-    audit.router,
-    admin.router,
 ]:
     app.include_router(
         router,

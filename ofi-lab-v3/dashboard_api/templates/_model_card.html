@@ -1,0 +1,29 @@
+<div class="model-card {% if model.is_baseline %}baseline{% endif %}"
+     data-name="{{ model.name }}">
+  <header>
+    <h3>{{ model.name }}
+      {% if model.is_baseline %}<span class="badge-baseline">🔒 BASELINE</span>{% endif %}
+    </h3>
+    <span class="lifecycle-{{ model.lifecycle_state }}">{{ model.lifecycle_state }}</span>
+  </header>
+  <dl>
+    <dt>Symbol</dt><dd>{{ model.symbol }}</dd>
+    <dt>Horizon</dt><dd>{{ model.horizon }}s</dd>
+    <dt>Gen</dt><dd>{{ model.generation }}</dd>
+    <dt>EWMA EV</dt><dd>{{ "%.4f"|format(model.ewma_ev or 0) }}</dd>
+    <dt>PSI</dt><dd>{{ "%.3f"|format(model.psi or 0) }}</dd>
+  </dl>
+  <div class="toggles">
+    <label>
+      <input type="checkbox" class="toggle-paper"
+             {% if model.paper_active %}checked{% endif %}> Paper
+    </label>
+    <label>
+      <input type="checkbox" class="toggle-live"
+             {% if model.live_eligible %}checked{% endif %}
+             {% if model.is_baseline %}disabled title="baseline locked"{% endif %}> Live
+    </label>
+    <button class="btn-reload" {% if model.is_baseline %}disabled{% endif %}>Reload</button>
+    <button class="btn-rollback" {% if model.is_baseline %}disabled{% endif %}>Rollback</button>
+  </div>
+</div>

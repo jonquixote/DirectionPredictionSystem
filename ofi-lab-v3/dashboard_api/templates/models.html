@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% block title %}Models{% endblock %}
+{% block head %}
+<link rel="stylesheet" href="/static/css/models.css">
+{% endblock %}
+{% block content %}
+<h1>Model Registry</h1>
+<div id="models-grid">Loading…</div>
+
+<dialog id="confirm-modal">
+  <form method="dialog">
+    <h2 id="confirm-title">Confirm action</h2>
+    <p id="confirm-body"></p>
+    <label>Reason: <input id="confirm-reason" type="text" required></label>
+    <p style="color:#f85149">⚠ This action affects live trading. Type "I CONFIRM" to proceed:</p>
+    <input id="confirm-phrase" type="text" required>
+    <menu>
+      <button value="cancel">Cancel</button>
+      <button id="confirm-go" value="confirm" type="button">Confirm</button>
+    </menu>
+  </form>
+</dialog>
+
+<script src="/static/js/models_admin.js" defer></script>
+{% endblock %}

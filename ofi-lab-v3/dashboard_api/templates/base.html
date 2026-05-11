@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>{% block title %}Dashboard{% endblock %} — v3 Model Admin</title>
+  <style>
+    :root {
+      --bg: #0d1117; --surface: #161b22; --border: #30363d;
+      --text: #e6edf3; --muted: #8b949e; --accent: #58a6ff;
+      --green: #3fb950; --red: #f85149; --yellow: #d29922;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: 'Inter', -apple-system, sans-serif;
+      background: var(--bg); color: var(--text);
+      line-height: 1.6;
+    }
+    nav {
+      background: var(--surface); border-bottom: 1px solid var(--border);
+      padding: 12px 24px; display: flex; gap: 24px; align-items: center;
+    }
+    nav a {
+      color: var(--muted); text-decoration: none; font-size: 14px;
+      transition: color 0.2s;
+    }
+    nav a:hover, nav a.active { color: var(--accent); }
+    nav .brand { color: var(--text); font-weight: 700; font-size: 16px; }
+    main { max-width: 1200px; margin: 0 auto; padding: 24px; }
+    h1 { font-size: 24px; margin-bottom: 20px; }
+    #kill-banner {
+      background: linear-gradient(135deg, #da3633, #f85149);
+      color: #fff; padding: 10px 24px; display: flex; align-items: center;
+      gap: 12px; font-weight: 500;
+    }
+    #kill-banner button {
+      background: rgba(255,255,255,0.2); color: #fff; border: 1px solid rgba(255,255,255,0.3);
+      padding: 4px 12px; border-radius: 6px; cursor: pointer;
+    }
+  </style>
+  {% block head %}{% endblock %}
+</head>
+<body>
+  <div id="kill-banner" hidden>
+    ⛔ Kill switch engaged: <span id="kill-reason"></span>
+    by <span id="kill-by"></span>.
+    <button id="kill-resume">Resume…</button>
+  </div>
+  <nav>
+    <span class="brand">v3 Admin</span>
+    <a href="/">Dashboard</a>
+    <a href="/models">Models</a>
+    <a href="/audit">Audit</a>
+  </nav>
+  <main>
+    {% block content %}{% endblock %}
+  </main>
+  <script src="/static/js/kill_switch_banner.js" defer></script>
+</body>
+</html>

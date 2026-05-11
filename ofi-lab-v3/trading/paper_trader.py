@@ -60,6 +60,7 @@ from storage.pending_queue import PendingResolutionQueue, PendingEntry
 from storage.window_planner import plan_resolution_rows
 from storage.provenance import sha256_file, feature_names_hash, ProvenanceEnvelope, calibration_map_hash
 from execution.calibration import CalibratorRegistry
+from regime.tagger import compute_regime, RegimeTags
 
 EXCHANGE = _os.environ.get("EXCHANGE", "kalshi").lower()
 
@@ -252,6 +253,13 @@ class PaperTrader:
         calib_dir = os.environ.get("KALSHI_CALIBRATION_DIR", "/data")
         self.calibrators = CalibratorRegistry(base_dir=calib_dir)
 
+        self._regime_thresholds_path = os.environ.get(
+            "REGIME_THRESHOLDS_PATH",
+            "/data/regime_thresholds.json",
+        )
+        self._regime_thresholds: dict = {}
+        self._reload_regime_thresholds()
+
         # Compute provenance hashes for each loaded model
         self._model_envelopes: dict[str, dict] = {}
         for name, path in model_paths.items():
@@ -262,6 +270,21 @@ class PaperTrader:
 
         # Boot timestamp for warmup tagging
         self._boot_ts_ms = int(time.time() * 1000)
+
+    def _reload_regime_thresholds(self) -> None:
+        import json
+        p = Path(self._regime_thresholds_path)
+        if p.exists():
+            try:
+                self._regime_thresholds = json.loads(p.read_text())
+            except Exception:
+                self._regime_thresholds = {}
+
+    def _tag_regime(self, symbol: str, regime_features: dict) -> RegimeTags:
+        if not self._regime_thresholds:
+            return RegimeTags(volatility="unknown", liquidity="unknown",
+                              trend="unknown")
+        return compute_regime(symbol, regime_features, self._regime_thresholds)
 
     def _capture_policy_dict(self) -> dict:
         """Snapshot the runtime-mutable filter/threshold/Kelly config.
@@ -335,6 +358,7 @@ class PaperTrader:
         day_of_week: Optional[int] = None,
         is_weekend: Optional[int] = None,
         relative_spread: Optional[float] = None,
+        regime_features: Optional[dict] = None,
     ) -> str:
         """Insert native + evaluation prediction rows for one boundary
         and enqueue each in the pending resolution queue. Returns the
@@ -348,6 +372,7 @@ class PaperTrader:
             evaluation_windows=config.EVALUATION_WINDOWS,
         )
         envelope = self._build_envelope(model_name, platform=platform)
+        tags = self._tag_regime(symbol, regime_features or {})
         native_pid = self.sqlite_ledger.log_prediction_set(
             envelope=envelope,
             symbol=symbol,
@@ -366,6 +391,9 @@ class PaperTrader:
             day_of_week=day_of_week,
             is_weekend=is_weekend,
             relative_spread=relative_spread,
+            regime_volatility=tags.volatility,
+            regime_liquidity=tags.liquidity,
+            regime_trend=tags.trend,
         )
         # Build prediction_id for each row to enqueue. Mirror SQLiteLedger's
         # suffix scheme: <prefix>_<window><n|e>.
@@ -580,6 +608,105 @@ class PaperTrader:
             policy_config_hash=envelope.policy_config_hash,
             calibration_map_hash=envelope.calibration_map_hash,
             registry_load_generation=envelope.registry_load_generation,
+        )
+
+    # ── Plan B integration helpers (T26, T29, T36) ─────────────
+
+    def _evaluate_paper_filters(self, ctx: dict):
+        """Run the paper-tier filter pipeline against a decision context."""
+        from filters.pipeline import FilterPipeline
+        from filters.staleness import build_stale_price_stage, build_stale_book_stage
+        from filters.paper_filter import build_paper_filter_stage
+
+        pipeline = FilterPipeline([
+            build_stale_book_stage(),
+            build_stale_price_stage(
+                max_age_seconds=self.filters.get("max_book_age_seconds", 30),
+            ),
+            build_paper_filter_stage(
+                confidence_threshold=self.filters.get("confidence_threshold", 0.55),
+                ev_threshold=self.filters.get("ev_threshold", 0.0),
+            ),
+        ])
+        return pipeline.run(ctx)
+
+    @property
+    def _decay_writer(self):
+        if not hasattr(self, "_decay_writer_cache"):
+            from storage.decay_writer import DecayWriter
+            self._decay_writer_cache = DecayWriter(self._db_conn)
+        return self._decay_writer_cache
+
+    def refresh_decay_metrics(self, *, window_size: int = 100) -> None:
+        """Compute rolling decay metrics for every (model, symbol, window) and
+        write a snapshot row to ``decay_metrics``.
+        """
+        from storage.decay_metrics import (
+            compute_brier_score, compute_calibration_error,
+            compute_rolling_ev, compute_recency_weighted_ev,
+        )
+        writer = self._decay_writer
+        # Find every distinct (model, symbol, market_window_seconds)
+        triples = self._db_conn.execute(
+            "SELECT DISTINCT model_name, symbol, market_window_seconds"
+            " FROM paper_trades"
+            " WHERE resolution_type = 'native' AND resolved = 1"
+            "   AND warmup = 0"
+        ).fetchall()
+        for t in triples:
+            model_name = t["model_name"]
+            symbol = t["symbol"]
+            window = t["market_window_seconds"]
+            rows = self._db_conn.execute(
+                "SELECT net_pnl, simulated_stake_usdc, pred_proba_calibrated,"
+                " prediction_correct"
+                " FROM paper_trades"
+                " WHERE model_name = ? AND symbol = ? AND market_window_seconds = ?"
+                "   AND resolution_type = 'native' AND resolved = 1 AND warmup = 0"
+                " ORDER BY ts_contract_open_ms DESC LIMIT ?",
+                (model_name, symbol, window, window_size),
+            ).fetchall()
+            if not rows:
+                continue
+            # Reverse to oldest-first for EWMA
+            rows = list(reversed(rows))
+            ev_values = [(r["net_pnl"] or 0.0) / (r["simulated_stake_usdc"] or 1.0)
+                          for r in rows]
+            cal_rows = [
+                (r["pred_proba_calibrated"], bool(r["prediction_correct"] or 0))
+                for r in rows
+            ]
+            win_rate = sum(1 for r in rows if r["prediction_correct"]) / len(rows)
+            writer.write_snapshot(
+                model_name=model_name, symbol=symbol,
+                market_window_seconds=window,
+                window_size=window_size,
+                rolling_ev=compute_rolling_ev(ev_values),
+                recency_weighted_ev=compute_recency_weighted_ev(ev_values, alpha=0.05),
+                rolling_win_rate=win_rate,
+                brier_score=compute_brier_score(cal_rows),
+                calibration_error=compute_calibration_error(cal_rows),
+                sample_count=len(rows),
+            )
+
+    @property
+    def _overlap_writer(self):
+        if not hasattr(self, "_overlap_writer_cache"):
+            from trading.overlap_writer import OverlapWriter
+            self._overlap_writer_cache = OverlapWriter(self._db_conn)
+        return self._overlap_writer_cache
+
+    def record_overlap_for_boundary(
+        self, *, ts_contract_open_ms: int, symbol: str,
+        market_window_seconds: int, scores,
+    ) -> None:
+        gen = self.registry_state.current_generation()
+        self._overlap_writer.record_boundary(
+            ts_contract_open_ms=ts_contract_open_ms,
+            symbol=symbol,
+            market_window_seconds=market_window_seconds,
+            registry_load_generation=gen,
+            scores=scores,
         )
 
     def kalshi_dispatch_eligible(
@@ -1096,6 +1223,7 @@ class PaperTrader:
                     day_of_week=day_of_week,
                     is_weekend=(day_of_week >= 5),
                     relative_spread=features.get("relative_spread"),
+                    regime_features=features,
                 )
                 self._prediction_count += 1
 

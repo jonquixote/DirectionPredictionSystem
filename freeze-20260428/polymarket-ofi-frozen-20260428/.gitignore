@@ -1,0 +1,10 @@
+.env
+*.db
+__pycache__/
+*.pyc
+.pytest_cache/
+*.parquet
+*.zip
+
+# Pilot data
+lag_measurement/pilot_events.db

@@ -1,0 +1,56 @@
+GOLDEN GOOSE FREEZE RECEIPT
+============================
+Date: 2026-04-28
+Operator: Antigravity Agent (on behalf of Johnny)
+
+ARCHIVE CONTENTS
+-----------------
+Container image:    golden-goose-h300v1-frozen-20260428.tar.gz (3.3GB)
+Image MD5:          2c57585cc3c34d1a1e6547e8263c3ee9
+Image SHA256:       7734487ffc5b4ac5903d836f10f51b51f17a00b2f3929f52a6af45e39c0e9315
+
+Model binary MD5:   8c25ce5c0e56fec14989a130094af0f9
+  Verified from:    (1) VPS /data/models/latest_h300/model.lgb
+                    (2) Local artifacts archive extraction
+
+Artifacts archive:  golden-goose-artifacts-20260428.tar.gz (27MB)
+  Contains:         models/latest_h300/ (symlink)
+                    models/run_20260326_092407/ (model.lgb, config_snapshot.json,
+                      feature_names.json, metrics.json, walk_forward_results.json,
+                      calibration.png, shap_importance.png)
+                    models/run_20260326_081107/ (byte-identical twin)
+                    logs/BTC_900s_paper_trader.jsonl
+                    logs/h60_v2_paper_trader.jsonl
+                    logs/paper_trades_h300.jsonl
+                    logs/training_v3_h300.log
+
+Code snapshot:      polymarket-ofi-frozen-20260428/ (171 files, 1.2MB)
+Codebase manifest:  codebase_manifest_20260428.txt (171 files with Unix timestamps)
+
+NOT INCLUDED (remain on VPS only — too large for tonight):
+  /data/parquet/orderbook/  (~62GB raw Bybit L2 data, 329 days)
+  /data/features*/          (~15GB computed feature matrices, 4 versions)
+
+VERIFICATION LOG
+-----------------
+1. Pre-flight:     PASSED — container running, model MD5 confirmed
+2. docker commit:  PASSED — image SHA256:7734487ffc5b
+3. docker save:    PASSED — gzip -9 → 3.3GB, MD5 2c57585cc3c34d1a1e6547e8263c3ee9
+4. Artifacts tar:  PASSED — all model files + trade logs + training logs included
+5. rsync codebase: PASSED — 171 files transferred
+6. SCP to local:   PASSED — image MD5 verified match (server vs local)
+7. Restore test:   PASSED — model.lgb MD5 8c25ce5c0e56fec14989a130094af0f9
+                    verified from artifacts archive extraction
+                    NOTE: /data/ is a volume mount, not inside the image.
+                    The restore procedure requires: docker run -v /data:/data ...
+8. This receipt:   Written 2026-04-28
+
+NOTES
+------
+- btc900s-trader container was killed and removed prior to freeze
+  (docker stop + docker rm, verified gone via docker ps -a)
+- polymarket-ofi-paper-trader container was NOT modified in any way
+- VPS has ~2 weeks remaining — parquet and features must be pulled
+  before decommission (suggest: /Volumes/JOHNNY DISK/ has 31GB free)
+- Docker image was loaded locally for verification, then pruned to
+  reclaim 10.3GB disk space. The .tar.gz archive is the permanent copy.

@@ -1,0 +1,22 @@
+services:
+  training:
+    build: .
+    container_name: polymarket-training
+    volumes:
+      - .:/app
+      - data:/data
+    environment:
+      - PYTHONPATH=/app
+      - DATA_DIR=/data
+    working_dir: /app
+    stdin_open: true
+    tty: true
+    command: ["bash"]
+
+volumes:
+  data:
+    driver: local
+    driver_opts:
+      type: none
+      device: /data
+      o: bind
