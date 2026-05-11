@@ -477,6 +477,12 @@ def train_final_model(
         "test_size": len(df_test),
         "horizon_seconds": horizon_seconds,
         "timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        # Fleet-friendly fields for register_model
+        "symbol": args.symbol or "MULTI",
+        "train_days": args.train_days,
+        "train_window_start": train_start,
+        "train_window_end": train_end,
+        "feature_version": args.feature_version,
     }
     with open(output_dir / "metrics.json", "w") as f:
         json.dump(metrics, f, indent=2)
@@ -601,19 +607,45 @@ def main():
                         help="Model artifacts directory")
     parser.add_argument("--dry-run", action="store_true",
                         help="Validate data only, no training")
+    # Fleet training parameters (optional, for register_model integration)
+    parser.add_argument("--symbol", type=str, default=None,
+                        help="Symbol for fleet training (e.g., BTCUSDT)")
+    parser.add_argument("--train-days", type=int, default=None,
+                        help="Number of training days (for fleet context)")
+    parser.add_argument("--train-start", type=str, default=None,
+                        help="Training start date YYYY-MM-DD (overrides hardcoded if provided)")
+    parser.add_argument("--train-end", type=str, default=None,
+                        help="Training end date YYYY-MM-DD (overrides hardcoded if provided)")
+    parser.add_argument("--val-end", type=str, default=None,
+                        help="Validation end date YYYY-MM-DD (overrides hardcoded if provided)")
+    parser.add_argument("--test-end", type=str, default=None,
+                        help="Test end date YYYY-MM-DD")
+    parser.add_argument("--feature-version", type=str, default="v3",
+                        help="Feature schema version (default: v3)")
+    parser.add_argument("--model-name", type=str, default=None,
+                        help="Model name for logging (optional)")
     args = parser.parse_args()
 
     horizon = args.horizon
     feature_dir = Path(args.feature_dir)
     models_dir = Path(args.output_dir)
 
+    # Use provided train dates or fall back to hardcoded
+    train_end = args.train_end if args.train_end else TRAIN_END
+    val_end = args.val_end if args.val_end else VAL_END
+    train_start = args.train_start  # May be None
+
     logger.info("=" * 60)
     logger.info("LightGBM Baseline Training Pipeline")
     logger.info("Horizon:    %ds", horizon)
     logger.info("Features:   %s", feature_dir)
     logger.info("Output:     %s", models_dir)
-    logger.info("Train end:  %s", TRAIN_END)
-    logger.info("Val end:    %s", VAL_END)
+    logger.info("Train end:  %s", train_end)
+    logger.info("Val end:    %s", val_end)
+    if args.symbol:
+        logger.info("Symbol:     %s", args.symbol)
+    if args.train_days:
+        logger.info("Train days: %d", args.train_days)
     logger.info("Go/no-go:   AUC_contract >= %.2f", GO_NOGO_AUC)
     logger.info("=" * 60)
 
@@ -646,8 +678,8 @@ def main():
         if dropped > 0:
             logger.info("Dropped %d rows on boundary dates: %s", dropped, TRAINING_BOUNDARIES)
 
-    df_train = df[df["date"] <= TRAIN_END].reset_index(drop=True)
-    df_val = df[(df["date"] > TRAIN_END) & (df["date"] <= VAL_END)].reset_index(drop=True)
+    df_train = df[df["date"] <= train_end].reset_index(drop=True)
+    df_val = df[(df["date"] > train_end) & (df["date"] <= val_end)].reset_index(drop=True)
     df_test = df[df["date"] > VAL_END].reset_index(drop=True)
 
     logger.info("Split sizes: train=%d, val=%d, test=%d", len(df_train), len(df_val), len(df_test))
