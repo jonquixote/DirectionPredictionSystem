@@ -4,10 +4,11 @@ After=network.target
 
 [Service]
 Type=simple
-User=v3
-WorkingDirectory=/opt/ofi-lab-v3
+User=johnny
+WorkingDirectory=/home/johnny/ofi-lab-v3
 EnvironmentFile=/etc/v3/env
-ExecStart=/opt/ofi-lab-v3/.venv/bin/python -m trading.paper_trader
+Environment="PYTHONPATH=/home/johnny/ofi-lab-v3"
+ExecStart=/home/johnny/ofi-lab-v3/.venv/bin/python -m trading.paper_trader
 Restart=on-failure
 RestartSec=10
 StandardOutput=journal

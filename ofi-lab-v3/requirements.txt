@@ -32,3 +32,10 @@ pytest>=7.4
 
 # Kalshi auth (RSA-PSS / PKCS1v15 signing)
 cryptography>=42.0
+
+# Dashboard (added during v3 deploy)
+fastapi>=0.115
+uvicorn[standard]>=0.30
+jinja2>=3.1
+python-multipart>=0.0.9
+cachetools>=5.3

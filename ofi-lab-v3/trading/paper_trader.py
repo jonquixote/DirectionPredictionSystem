@@ -1145,6 +1145,18 @@ class PaperTrader:
 
             if near_boundary and boundary_ms > self._last_contract_boundary_ms:
                 self._last_contract_boundary_ms = boundary_ms
+
+                # Kill switch check — skip all prediction + trade work when engaged
+                try:
+                    from dashboard_api.services import kill_switch_state as _ks
+                    if _ks.is_engaged():
+                        logger.warning("kill_switch_engaged_skipping_boundary",
+                                       extra=_ks.read_state() or {})
+                        await asyncio.sleep(1.0)
+                        continue
+                except Exception as _ke:
+                    logger.exception("kill_switch_check_failed", extra={"err": str(_ke)})
+
                 await self._run_predictions(now_ms, boundary_ms)
 
                 # ── Periodic boundary tasks ──────────────────────────────

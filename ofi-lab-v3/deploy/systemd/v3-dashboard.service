@@ -4,10 +4,11 @@ After=network.target
 
 [Service]
 Type=simple
-User=v3
-WorkingDirectory=/opt/ofi-lab-v3
+User=johnny
+WorkingDirectory=/home/johnny/ofi-lab-v3
 EnvironmentFile=/etc/v3/env
-ExecStart=/opt/ofi-lab-v3/.venv/bin/uvicorn dashboard_api.main:app --host 127.0.0.1 --port 8080
+Environment="PYTHONPATH=/home/johnny/ofi-lab-v3:/home/johnny/ofi-lab-v3/dashboard_api"
+ExecStart=/home/johnny/ofi-lab-v3/.venv/bin/uvicorn dashboard_api.main:app --host 127.0.0.1 --port 8081
 Restart=on-failure
 RestartSec=5
 StandardOutput=journal
