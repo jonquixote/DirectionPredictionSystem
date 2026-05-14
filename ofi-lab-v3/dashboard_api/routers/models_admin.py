@@ -85,17 +85,69 @@ def list_models():
     return {"models": [dict(r) for r in rows]}
 
 
+# ── Model selection endpoints (MUST be before /{name} catch-all) ──
+
+@router.get("/model-selection")
+def get_model_selection():
+    conn = _get_conn()
+    try:
+        rows = conn.execute(
+            "SELECT * FROM model_selection ORDER BY symbol, market_window_seconds"
+        ).fetchall()
+        return {"selections": [dict(r) for r in rows]}
+    except Exception:
+        return {"selections": []}
+
+
+@router.put("/model-selection/{symbol}/{market_window_seconds}")
+def set_model_selection(symbol: str, market_window_seconds: int, body: dict):
+    import json as _json
+    conn = _get_conn()
+    strategy = body.get("strategy", "all")
+    selected_model_name = body.get("selected_model_name")
+    committee_config_json = _json.dumps(body.get("committee_config", {}))
+    conn.execute(
+        "INSERT OR REPLACE INTO model_selection "
+        "(symbol, market_window_seconds, strategy, selected_model_name, "
+        "committee_config_json, updated_by) VALUES (?,?,?,?,?,?)",
+        (symbol, market_window_seconds, strategy, selected_model_name,
+         committee_config_json, "dashboard"),
+    )
+    conn.commit()
+    return {"ok": True}
+
+
+# ── Model detail (catch-all — must be AFTER specific routes) ──
+
 @router.get("/{name}")
 def get_model(name: str):
     conn = _get_conn()
-    row = conn.execute(
-        "SELECT * FROM model_registry WHERE name = ?", (name,)
-    ).fetchone()
+    row = conn.execute("""
+        SELECT mr.*,
+               dm.recency_weighted_ev as ewma_ev,
+               dm.brier_score as ewma_brier,
+               dm.calibration_error as psi
+          FROM model_registry mr
+          LEFT JOIN (
+              SELECT model_name, recency_weighted_ev, brier_score, calibration_error,
+                     ROW_NUMBER() OVER (PARTITION BY model_name ORDER BY ts DESC) as rn
+                FROM decay_metrics
+          ) dm ON dm.model_name = mr.name AND dm.rn = 1
+         WHERE mr.name = ?
+    """, (name,)).fetchone()
     if not row:
         raise HTTPException(404, f"model {name} not found")
+    row_dict = dict(row)
+    symbol = row_dict.get("symbol")
     overlap = conn.execute(
-        "SELECT * FROM model_overlap "
-        "ORDER BY ts_contract_open_ms DESC LIMIT 50"
+        "SELECT * FROM model_overlap WHERE symbol = ? "
+        "ORDER BY ts_contract_open_ms DESC LIMIT 50",
+        (symbol,),
+    ).fetchall()
+    cal_rows = conn.execute(
+        "SELECT bin_lo, bin_hi, observed_freq, n FROM calibration_bins "
+        "WHERE model_name = ? ORDER BY bin_lo",
+        (name,),
     ).fetchall()
     audit = conn.execute(
         "SELECT * FROM model_audit WHERE model_name = ? "
@@ -103,9 +155,9 @@ def get_model(name: str):
         (name,),
     ).fetchall()
     return {
-        **dict(row),
+        **row_dict,
         "overlap": [dict(o) for o in overlap],
-        "calibration_summary": [],
+        "calibration_summary": [dict(r) for r in cal_rows],
         "recent_audit": [dict(a) for a in audit],
     }
 

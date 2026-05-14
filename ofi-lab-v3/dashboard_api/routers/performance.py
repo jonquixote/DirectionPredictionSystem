@@ -1,7 +1,7 @@
 """Performance endpoints — summary, rolling, heatmap, divergence, calibration, funnel, suppression."""
 from __future__ import annotations
 from fastapi import APIRouter, Query
-from services.jsonl_reader import get_store
+from services.sqlite_store import get_store
 from services.metrics import (
     compute_realized_net, wilson_ci, rolling_accuracy_series,
     calibration_curve, z_test, divergence_bucket_stats,
@@ -590,3 +590,53 @@ async def performance_timeline(
         timeline.append(daily_snapshots[day_str])
         
     return {"data": timeline}
+
+
+@router.get("/performance/portfolio")
+async def portfolio_performance(
+    model: str | None = None,
+    symbol: str | None = None,
+    from_ms: int | None = None,
+    to_ms: int | None = None,
+):
+    """Aggregate portfolio-level performance metrics."""
+    from services.metrics import portfolio_metrics
+    store = get_store()
+    resolved = store.get_resolved_trades(model=model, symbol=symbol)
+    if from_ms:
+        resolved = [t for t in resolved if t.get("ts_model_ran_ms", 0) >= from_ms]
+    if to_ms:
+        resolved = [t for t in resolved if t.get("ts_model_ran_ms", 0) <= to_ms]
+    return portfolio_metrics(resolved)
+
+
+@router.get("/performance/threshold-sweep")
+async def threshold_sweep_performance(
+    model: str | None = None,
+    symbol: str | None = None,
+    from_ms: int | None = None,
+    to_ms: int | None = None,
+):
+    """Win rate and ROI at each confidence threshold level."""
+    from services.metrics import threshold_sweep
+    store = get_store()
+    resolved = store.get_resolved_trades(model=model, symbol=symbol)
+    if from_ms:
+        resolved = [t for t in resolved if t.get("ts_model_ran_ms", 0) >= from_ms]
+    if to_ms:
+        resolved = [t for t in resolved if t.get("ts_model_ran_ms", 0) <= to_ms]
+    return {"sweep": threshold_sweep(resolved)}
+
+
+@router.get("/performance/pareto")
+async def pareto_frontier_endpoint(
+    model: str | None = None,
+    symbol: str | None = None,
+):
+    """Efficient frontier (non-dominated threshold/win-rate/ROI points)."""
+    from services.metrics import threshold_sweep, pareto_frontier
+    store = get_store()
+    resolved = store.get_resolved_trades(model=model, symbol=symbol)
+    sweep = threshold_sweep(resolved)
+    return {"frontier": pareto_frontier(sweep)}
+

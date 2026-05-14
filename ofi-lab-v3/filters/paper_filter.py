@@ -22,7 +22,7 @@ def build_paper_filter_stage(
             )
         # 2. EV gate (universal)
         ev = ctx.get("ev", 0.0)
-        if ev <= ev_threshold:
+        if ev < ev_threshold:
             return FilterDecision.block(
                 reason="negative_ev",
                 threshold=ev_threshold, input_value=ev,

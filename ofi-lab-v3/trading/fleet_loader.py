@@ -18,18 +18,24 @@ def load_active_fleet(conn: sqlite3.Connection) -> list[dict]:
     rows = conn.execute(
         """
         SELECT name, symbol, training_horizon_seconds, artifact_path,
-               feature_names_path, evaluation_windows, generation, is_baseline,
-               lifecycle_state
-          FROM model_registry
-         WHERE paper_active = 1 AND lifecycle_state != 'suspended'
-         ORDER BY is_baseline DESC, training_horizon_seconds, name
-    """
+        feature_names_path, evaluation_windows, generation, is_baseline,
+        lifecycle_state, filter_config_json, platform_active_json
+        FROM model_registry
+        WHERE paper_active = 1 AND lifecycle_state != 'suspended'
+        ORDER BY is_baseline DESC, training_horizon_seconds, name
+        """
     ).fetchall()
     out = []
     for r in rows:
         d = dict(r)
         d["evaluation_windows"] = json.loads(
             d["evaluation_windows"] or "[300,900,1800]"
+        )
+        d["filter_config"] = json.loads(
+            d.pop("filter_config_json", None) or "{}"
+        )
+        d["platform_active"] = json.loads(
+            d.pop("platform_active_json", None) or '{"paper":true,"kalshi":false,"polymarket":false}'
         )
         out.append(d)
     return out

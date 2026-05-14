@@ -176,6 +176,8 @@ class PaperTrader:
             "kelly_bankroll_usdc": fc.get("kelly_bankroll_usdc", FILTER_KELLY_BANKROLL_USDC),
             "pause_trading": fc.get("pause_trading", FILTER_PAUSE_TRADING),
             "per_symbol_confidence": fc.get("per_symbol_confidence", dict(FILTER_PER_SYMBOL_CONFIDENCE)),
+            "ev_threshold": fc.get("ev_threshold", 0.0),
+            "max_book_age_seconds": fc.get("max_book_age_seconds", 30),
         }
         if confidence_threshold is not None:
             self.filters["confidence_threshold"] = confidence_threshold
@@ -620,10 +622,23 @@ class PaperTrader:
     # ── Plan B integration helpers (T26, T29, T36) ─────────────
 
     def _evaluate_paper_filters(self, ctx: dict):
-        """Run the paper-tier filter pipeline against a decision context."""
+        """Run the paper-tier filter pipeline against a decision context.
+
+        Per-model overrides: if ctx contains ``confidence_threshold`` or
+        ``ev_threshold``, those values take precedence over the global
+        ``self.filters`` defaults (wired by Step 5 of Plan A).
+        """
         from filters.pipeline import FilterPipeline
         from filters.staleness import build_stale_price_stage, build_stale_book_stage
         from filters.paper_filter import build_paper_filter_stage
+
+        # Per-model overrides flow through ctx; fall back to global filters
+        confidence_threshold = ctx.get(
+            "confidence_threshold", self.filters.get("confidence_threshold", 0.55)
+        )
+        ev_threshold = ctx.get(
+            "ev_threshold", self.filters.get("ev_threshold", 0.0)
+        )
 
         pipeline = FilterPipeline([
             build_stale_book_stage(),
@@ -631,8 +646,8 @@ class PaperTrader:
                 max_age_seconds=self.filters.get("max_book_age_seconds", 30),
             ),
             build_paper_filter_stage(
-                confidence_threshold=self.filters.get("confidence_threshold", 0.55),
-                ev_threshold=self.filters.get("ev_threshold", 0.0),
+                confidence_threshold=confidence_threshold,
+                ev_threshold=ev_threshold,
             ),
         ])
         return pipeline.run(ctx)
@@ -737,10 +752,8 @@ class PaperTrader:
     ) -> bool:
         """Registry-driven Kalshi gate.
 
-        Replaces v2 hardcoded check
-        ``model_name == 'h300' and symbol == 'BTCUSDT' and duration == 900``.
-        Plan B replaces config.PAPER_TRADING["model_metadata"] with
-        model_registry.json — call site stays the same.
+        Checks both config.PAPER_TRADING["model_metadata"] (kalshi_dispatch_enabled)
+        and model_registry.platform_active_json (kalshi must be true).
         """
         meta = config.PAPER_TRADING["model_metadata"].get(model_name)
         if meta is None:
@@ -749,9 +762,17 @@ class PaperTrader:
             return False
         if symbol != meta["symbol"]:
             return False
-        # Only native horizon dispatches.
         if market_window_seconds != meta["training_horizon_seconds"]:
             return False
+        row = self._db_conn.execute(
+            "SELECT platform_active_json FROM model_registry WHERE name=?",
+            (model_name,),
+        ).fetchone()
+        if row and row["platform_active_json"]:
+            import json as _json
+            pa = _json.loads(row["platform_active_json"])
+            if not pa.get("kalshi", False):
+                return False
         return True
 
     def _direction_for(self, prediction_id: str) -> str:
@@ -1229,9 +1250,34 @@ class PaperTrader:
                 except Exception as e:
                     logger.warning("p_market query failed for %s: %s", symbol, e)
 
+            # ── Step 6: compute blocked models via ModelSelector ──
+            blocked_models: set = set()
+            try:
+                from trading.model_selector import ModelSelector
+                selector = ModelSelector(self._db_conn)
+                # Group candidates by (symbol, horizon)
+                _candidates_by_sh: dict = {}
+                for mn in self.models:
+                    mm = config.PAPER_TRADING["model_metadata"].get(mn, {})
+                    ms = mm.get("symbol", symbol)
+                    mh = mm.get("training_horizon_seconds", 300)
+                    if ms == symbol:
+                        _candidates_by_sh.setdefault((ms, mh), []).append(mn)
+                for (s, h), cands in _candidates_by_sh.items():
+                    sel = selector.select(s, h, cands)
+                    blocked_models.update(sel.blocked)
+            except Exception as e:
+                logger.debug("ModelSelector not available, skipping: %s", e)
+
             # Score with each model
             for model_name, model in self.models.items():
                 meta = config.PAPER_TRADING["model_metadata"][model_name]
+
+                # Step 6: skip models blocked by model_selection strategy
+                if model_name in blocked_models:
+                    logger.debug("[%s] blocked by model_selection strategy", model_name)
+                    continue
+
                 features = {col: bar.get(col, 0.0) for col in self.feature_names[model_name]}
                 feature_vec = np.array(
                     [features[col] for col in self.feature_names[model_name]],
@@ -1297,6 +1343,27 @@ class PaperTrader:
                 self._prediction_count += 1
 
                 # C3: Wire _evaluate_paper_filters to gate trade emission
+                calibrated_p = max(pred_proba_calibrated, 1 - pred_proba_calibrated)
+                ev = 0.0
+                if p_market is not None and 0 < p_market < 1:
+                    from execution.ev import compute_ev_polymarket
+                    ev_result = compute_ev_polymarket(
+                        calibrated_p=calibrated_p,
+                        p_market=p_market,
+                        stake=SIMULATED_STAKE_USDC,
+                    )
+                    ev = ev_result.ev
+                blackout_hours = list(H60_BLACKOUT_HOURS) if model_name in H60_BLACKOUT_MODELS else []
+                book_age = (ts_model_ran_ms - bar.get("ts_ms", ts_model_ran_ms)) / 1000.0
+
+                # ── Step 5: resolve per-model filter_config overrides ──
+                _model_fc = meta.get("filter_config", {})
+                if isinstance(_model_fc, str):
+                    _model_fc = json.loads(_model_fc)
+                effective_ct = _model_fc.get("confidence_threshold", _ct)
+                effective_ev_thresh = _model_fc.get("ev_threshold",
+                    self.filters.get("ev_threshold", 0.0))
+
                 filter_ctx = {
                     "prediction_id": prediction_id,
                     "model_name": model_name,
@@ -1307,16 +1374,24 @@ class PaperTrader:
                     "pred_direction": pred_direction,
                     "above_threshold": above_threshold,
                     "warmup": in_warmup,
-                    "confidence_threshold": _ct,
+                    "confidence_threshold": effective_ct,
+                    "ev_threshold": effective_ev_thresh,
                     "active_filter_mode": _active_filter_mode,
                     "p_market": p_market,
                     "regime_features": features,
+                    "calibrated_p": calibrated_p,
+                    "ev": ev,
+                    "utc_hour": utc_hour,
+                    "blackout_hours": blackout_hours,
+                    "model_conflict": False,
+                    "book_age_seconds": book_age,
+                    "book_has_quotes": bar.get("has_quotes", True),
                 }
                 verdict = self._evaluate_paper_filters(filter_ctx)
                 if not verdict.passed:
                     logger.info("paper_filter_blocked",
-                                extra={"reasons": verdict.reasons,
-                                       "prediction_id": prediction_id})
+                            extra={"reason": verdict.reason,
+                                   "prediction_id": prediction_id})
                     self._record_compact_decision(
                         prediction_id=prediction_id,
                         outcome="gated",

@@ -1,7 +1,7 @@
 """GET /api/trades, GET /api/resolutions — paper trade records."""
 from __future__ import annotations
 from fastapi import APIRouter, Query
-from services.jsonl_reader import get_store
+from services.sqlite_store import get_store
 from services.metrics import (
     compute_realized_net, realized_net_breakdown, SYSTEM_FEE,
 )

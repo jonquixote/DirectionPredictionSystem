@@ -38,6 +38,22 @@ def init_schema(conn) -> None:
     ``CREATE TABLE`` and ``CREATE INDEX`` are not natively idempotent,
     so the SQL file uses ``CREATE TABLE IF NOT EXISTS`` and
     ``CREATE INDEX IF NOT EXISTS`` for safe re-application.
+
+    Also runs in-place ALTER TABLE migrations for new columns on
+    existing tables (safe to re-run — checks column existence first).
     """
     sql = _SCHEMA_PATH.read_text(encoding="utf-8")
     conn.executescript(sql)
+    _run_migrations(conn)
+
+
+def _run_migrations(conn) -> None:
+    _add_column_if_missing(conn, "model_registry", "filter_config_json", "TEXT DEFAULT '{}'")
+    _add_column_if_missing(conn, "model_registry", "platform_active_json",
+                           "TEXT DEFAULT '{\"paper\":true,\"kalshi\":false,\"polymarket\":false}'")
+
+
+def _add_column_if_missing(conn, table: str, column: str, col_type: str) -> None:
+    existing = {r[1] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+    if column not in existing:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")

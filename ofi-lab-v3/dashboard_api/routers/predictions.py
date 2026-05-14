@@ -1,7 +1,7 @@
 """GET /api/predictions — paginated, filtered prediction records."""
 from __future__ import annotations
 from fastapi import APIRouter, Query
-from services.jsonl_reader import get_store
+from services.sqlite_store import get_store
 from services.metrics import compute_realized_net, SYSTEM_FEE
 
 router = APIRouter(tags=["predictions"])

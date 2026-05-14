@@ -251,3 +251,148 @@ def divergence_bucket_stats(trades: list[dict], fee: float = SYSTEM_FEE) -> list
         })
 
     return results
+
+
+def portfolio_metrics(trades: list[dict], fee: float = SYSTEM_FEE) -> dict:
+    """Compute portfolio-level performance metrics from resolved trades."""
+    if not trades:
+        return {
+            "total_trades": 0, "total_ne": 0.0, "total_roi_pct": 0.0,
+            "profit_factor": 0.0, "max_drawdown": 0.0, "sharpe_ratio": None,
+            "sortino_ratio": None, "win_rate": 0.0, "avg_trade_ne": 0.0,
+        }
+    net_values = []
+    for t in trades:
+        direction = t.get("pred_direction", "up")
+        correct = t.get("prediction_correct")
+        p_market = t.get("p_market") or 0.5
+        if correct is None or p_market is None:
+            continue
+        ne = compute_realized_net(direction, correct, p_market, fee)
+        if ne is not None:
+            net_values.append(ne)
+
+    n = len(net_values)
+    if n == 0:
+        return {
+            "total_trades": 0, "total_ne": 0.0, "total_roi_pct": 0.0,
+            "profit_factor": 0.0, "max_drawdown": 0.0, "sharpe_ratio": None,
+            "sortino_ratio": None, "win_rate": 0.0, "avg_trade_ne": 0.0,
+        }
+
+    total_ne = sum(net_values)
+    roi_pct = (total_ne / n) * 100
+
+    wins_sum = sum(v for v in net_values if v > 0)
+    losses_sum = sum(abs(v) for v in net_values if v < 0)
+    profit_factor = wins_sum / losses_sum if losses_sum > 0 else (float('inf') if wins_sum > 0 else 0.0)
+
+    cumulative = []
+    running = 0.0
+    for v in net_values:
+        running += v
+        cumulative.append(running)
+    peak = 0.0
+    max_dd = 0.0
+    for c in cumulative:
+        if c > peak:
+            peak = c
+        dd = peak - c
+        if dd > max_dd:
+            max_dd = dd
+
+    import numpy as np
+    sharpe = None
+    sortino = None
+    if n > 1:
+        mean_ne = float(np.mean(net_values))
+        std_ne = float(np.std(net_values, ddof=1))
+        trades_per_year = 105120
+        sharpe = (mean_ne / std_ne) * math.sqrt(trades_per_year) if std_ne > 0 else None
+        downside = [v for v in net_values if v < 0]
+        downside_std = float(np.std(downside, ddof=1)) if len(downside) > 1 else std_ne
+        sortino = (mean_ne / downside_std) * math.sqrt(trades_per_year) if downside_std > 0 else None
+
+    win_count = sum(1 for v in net_values if v > 0)
+    return {
+        "total_trades": n,
+        "total_ne": round(total_ne, 6),
+        "total_roi_pct": round(roi_pct, 4),
+        "profit_factor": round(profit_factor, 4) if profit_factor != float('inf') else None,
+        "max_drawdown": round(max_dd, 6),
+        "sharpe_ratio": round(sharpe, 4) if sharpe is not None else None,
+        "sortino_ratio": round(sortino, 4) if sortino is not None else None,
+        "win_rate": round(win_count / n, 4) if n > 0 else 0.0,
+        "avg_trade_ne": round(total_ne / n, 6) if n > 0 else 0.0,
+    }
+
+
+def threshold_sweep(
+    trades: list[dict],
+    thresholds: list[float] | None = None,
+    fee: float = SYSTEM_FEE,
+) -> list[dict]:
+    """Compute win_rate and ROI at each confidence threshold."""
+    if thresholds is None:
+        thresholds = [0.50 + i * 0.01 for i in range(31)]  # 0.50 to 0.80
+    results = []
+    for t_val in thresholds:
+        filtered = [
+            tr for tr in trades
+            if tr.get("prediction_correct") is not None and
+               max(tr.get("pred_proba_calibrated", tr.get("pred_proba", 0.5)),
+                   1 - tr.get("pred_proba_calibrated", tr.get("pred_proba", 0.5))) >= t_val
+        ]
+        if not filtered:
+            results.append({"threshold": t_val, "win_rate": None, "roi_pct": None, "n_trades": 0})
+            continue
+        net_values = []
+        wins = 0
+        for tr in filtered:
+            direction = tr.get("pred_direction", "up")
+            correct = tr.get("prediction_correct")
+            p_market = tr.get("p_market") or 0.5
+            if p_market is None:
+                continue
+            ne = compute_realized_net(direction, correct, p_market, fee)
+            if ne is not None:
+                net_values.append(ne)
+                if ne > 0:
+                    wins += 1
+        n = len(net_values)
+        wr = wins / n if n > 0 else 0.0
+        roi = (sum(net_values) / n) * 100 if n > 0 else 0.0
+        results.append({
+            "threshold": round(t_val, 2),
+            "win_rate": round(wr, 4),
+            "roi_pct": round(roi, 4),
+            "n_trades": n,
+        })
+    return results
+
+
+def pareto_frontier(sweep_results: list[dict]) -> list[dict]:
+    """Extract non-dominated points from threshold sweep results."""
+    valid = [p for p in sweep_results if p["n_trades"] > 0 and p["win_rate"] is not None]
+    if not valid:
+        return []
+
+    frontier = []
+    for p in valid:
+        dominated = False
+        for q in valid:
+            if q is p:
+                continue
+            q_wr = q["win_rate"] or 0
+            q_roi = q.get("roi_pct", 0) or 0
+            p_wr = p["win_rate"] or 0
+            p_roi = p.get("roi_pct", 0) or 0
+            if q_wr >= p_wr and q_roi >= p_roi and (q_wr > p_wr or q_roi > p_roi):
+                dominated = True
+                break
+        if not dominated:
+            frontier.append(p)
+
+    frontier.sort(key=lambda p: (p["win_rate"] or 0))
+    return frontier
+

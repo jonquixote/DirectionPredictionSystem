@@ -20,8 +20,13 @@ from routers import (
     status, predictions, trades, performance,
     parquet, features, models_registry, alerts, logs,
     models_admin, overlap, kill_switch, audit, admin,
-    regime, calibration,
+    regime, calibration, baseline,
 )
+try:
+    from routers import training as training_router
+    _has_training = True
+except ImportError:
+    _has_training = False
 
 logging.basicConfig(
     level=logging.INFO,
@@ -76,7 +81,7 @@ app.add_middleware(
 )
 
 # Register REST routers
-for router in [
+_routers = [
     status.router,
     predictions.router,
     trades.router,
@@ -93,7 +98,11 @@ for router in [
     kill_switch.router,
     audit.router,
     admin.router,
-]:
+    baseline.router,  # cutover baseline — gates predictions page
+]
+if _has_training:
+    _routers.append(training_router.router)
+for router in _routers:
     app.include_router(
         router,
         prefix="/api",

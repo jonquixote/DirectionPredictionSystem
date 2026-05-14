@@ -7,7 +7,7 @@ from __future__ import annotations
 import logging
 import time
 from datetime import datetime, timezone
-from services.jsonl_reader import get_store
+from services.sqlite_store import get_store
 from services.metrics import (
     compute_realized_net, wilson_ci, rolling_accuracy_series, z_test, SYSTEM_FEE,
 )

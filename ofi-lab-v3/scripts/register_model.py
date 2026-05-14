@@ -76,8 +76,10 @@ def register_model(
             "(name, is_baseline, paper_active, live_eligible, lifecycle_state, "
             "symbol, training_horizon_seconds, generation, artifact_path, "
             "feature_names_path, artifact_hash, train_window_start, "
-            "train_window_end, train_days, feature_version, evaluation_windows) "
-            "VALUES (?, 0, 1, 0, 'active', ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "train_window_end, train_days, feature_version, evaluation_windows, "
+            "filter_config_json, platform_active_json) "
+            "VALUES (?, 0, 1, 0, 'active', ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, '{}', "
+            "'{\"paper\":true,\"kalshi\":false,\"polymarket\":false}')",
             (
                 name,
                 symbol,

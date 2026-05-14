@@ -380,9 +380,11 @@ CREATE TABLE IF NOT EXISTS model_registry (
     train_window_end       TEXT,
     train_days             INTEGER,
     feature_version        TEXT DEFAULT 'v3',
-    evaluation_windows     TEXT DEFAULT '[300,900,1800]',
-    created_at             TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-    updated_at             TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+    evaluation_windows TEXT DEFAULT '[300,900,1800]',
+    filter_config_json TEXT DEFAULT '{}',
+    platform_active_json TEXT DEFAULT '{"paper":true,"kalshi":false,"polymarket":false}',
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );
 
 CREATE INDEX IF NOT EXISTS idx_reg_symbol_horizon ON model_registry(symbol, training_horizon_seconds);
@@ -416,3 +418,15 @@ CREATE TABLE IF NOT EXISTS calibration_map (
 );
 
 CREATE INDEX IF NOT EXISTS idx_calib_map_hash ON calibration_map(map_hash);
+
+-- =========================================================================
+-- model_selection: per-(symbol, window) strategy for committee/selection.
+-- =========================================================================
+CREATE TABLE IF NOT EXISTS model_selection (
+    symbol TEXT NOT NULL,
+    market_window_seconds INTEGER NOT NULL,
+    strategy TEXT NOT NULL DEFAULT 'all',
+    selected_model_name TEXT,
+    committee_config_json TEXT DEFAULT '{}',
+    PRIMARY KEY (symbol, market_window_seconds)
+);
