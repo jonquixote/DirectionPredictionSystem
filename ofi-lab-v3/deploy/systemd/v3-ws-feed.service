@@ -1,0 +1,20 @@
+[Unit]
+Description=ofi-lab-v3 WebSocket feed
+After=network.target
+Before=v3-paper-trader.service
+
+[Service]
+Type=simple
+User=johnny
+WorkingDirectory=/home/johnny/ofi-lab-v3
+EnvironmentFile=/etc/v3/env
+Environment="PYTHONPATH=/home/johnny/ofi-lab-v3"
+ExecStart=/home/johnny/ofi-lab-v3/.venv/bin/python -m api.ws_feed_service
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=v3-ws-feed
+
+[Install]
+WantedBy=multi-user.target
