@@ -11,23 +11,27 @@ def test_replay_writes_well_formed_rows(tmp_path, synthetic_minute_bars_path,
     db = tmp_path / "v3.db"
     res = subprocess.run(
         [sys.executable, str(script),
-         "--features-parquet", synthetic_minute_bars_path,
-         "--model-path", tiny_model_path,
-         "--db", str(db),
-         "--max-rows", "10"],
+        "--features-parquet", synthetic_minute_bars_path,
+        "--model-path", tiny_model_path,
+        "--db", str(db),
+        "--max-rows", "10"],
         capture_output=True, text=True,
     )
     assert res.returncode == 0, res.stderr
     conn = sqlite3.connect(str(db))
     conn.row_factory = sqlite3.Row
     n = conn.execute("SELECT count(*) FROM predictions").fetchone()[0]
-    # 10 boundaries × 4 rows (1 native + 3 evaluation) = 40
-    assert n == 40
+    # Alignment gate: only windows that evenly divide the boundary emit rows.
+    # 10 × 5-min boundaries: 2×3 + 2×2 + 6×1 = 16 evaluation rows
+    assert n == 16
     natives = conn.execute(
         "SELECT count(*) FROM predictions WHERE resolution_type='native'"
     ).fetchone()[0]
-    assert natives == 10
-    # Every row has full provenance hashes (length 64)
+    assert natives == 0, "native rows should not be emitted post-refactor"
+    evaluations = conn.execute(
+        "SELECT count(*) FROM predictions WHERE resolution_type='evaluation'"
+    ).fetchone()[0]
+    assert evaluations == 16
     rows = conn.execute(
         "SELECT model_artifact_hash, feature_names_hash,"
         " policy_config_hash, calibration_map_hash FROM predictions"

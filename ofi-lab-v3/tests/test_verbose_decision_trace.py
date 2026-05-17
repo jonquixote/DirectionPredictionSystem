@@ -1,5 +1,7 @@
 import json
 
+_BASE = 1_735_689_600_000
+
 
 def make_trader(tmp_path, monkeypatch, tiny_model_path):
     monkeypatch.setenv("STORAGE_DB_PATH", str(tmp_path / "v3.db"))
@@ -16,8 +18,8 @@ def test_verbose_trace_captures_every_filter(tmp_path, monkeypatch, tiny_model_p
     t = make_trader(tmp_path, monkeypatch, tiny_model_path)
     pid = t._emit_prediction_rows(
         model_name="900s_btc_v3_20260315", symbol="BTCUSDT",
-        boundary_ms=1_700_000_000_000,
-        ts_model_ran_ms=1_700_000_000_000,
+        boundary_ms=_BASE,
+        ts_model_ran_ms=_BASE,
         pred_proba_raw=0.51, pred_proba_calibrated=0.50,
         pred_direction="up", above_threshold=False, warmup=False,
         platform="paper", price_at_open=60_000.0,

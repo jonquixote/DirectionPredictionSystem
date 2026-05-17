@@ -28,7 +28,7 @@ def test_only_dispatch_enabled_models_dispatch(tmp_path, monkeypatch, tiny_model
     ) is False
 
 
-def test_dispatch_only_on_native_horizon(tmp_path, monkeypatch, tiny_model_path):
+def test_dispatch_only_on_model_horizon(tmp_path, monkeypatch, tiny_model_path):
     t = make_trader_two_models(tmp_path, monkeypatch, tiny_model_path)
     # Even baseline rejects evaluation-window dispatch
     assert t.kalshi_dispatch_eligible(

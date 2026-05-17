@@ -7,6 +7,8 @@ from storage.registry_state import RegistryState
 from storage.sqlite_ledger import SQLiteLedger
 from storage.window_planner import plan_resolution_rows
 
+_BASE = 1_735_689_600_000
+
 
 @pytest.fixture
 def ledger(tmp_path):
@@ -37,15 +39,14 @@ def _envelope(**overrides):
     return ProvenanceEnvelope(**base)
 
 
-def test_log_prediction_inserts_one_native_plus_evaluations(ledger):
+def test_log_prediction_inserts_evaluation_rows_only(ledger):
     led, conn = ledger
-    boundary = 1_700_000_000_000
-    rows = plan_resolution_rows(boundary, 900, [300, 900, 1800, 3600])
+    rows = plan_resolution_rows(_BASE, 900, [300, 900, 1800])
     pid = led.log_prediction_set(
         envelope=_envelope(),
         symbol="BTCUSDT",
-        ts_model_ran_ms=boundary - 1000,
-        ts_contract_open_ms=boundary,
+        ts_model_ran_ms=_BASE - 1000,
+        ts_contract_open_ms=_BASE,
         rows=rows,
         pred_proba_raw=0.54,
         pred_proba_calibrated=0.51,
@@ -58,27 +59,21 @@ def test_log_prediction_inserts_one_native_plus_evaluations(ledger):
         relative_spread=0.00012,
     )
     inserted = conn.execute("SELECT * FROM predictions").fetchall()
-    assert len(inserted) == 4
-    by_window = {r["market_window_seconds"]: r for r in inserted}
-    assert by_window[900]["resolution_type"] == "native"
-    for w in (300, 1800, 3600):
-        assert by_window[w]["resolution_type"] == "evaluation"
-    # All rows share the same group prediction_id prefix and base
-    # provenance.
+    assert len(inserted) == 3
+    for r in inserted:
+        assert r["resolution_type"] == "evaluation"
     base_ids = {r["prediction_id"].rsplit("_", 1)[0] for r in inserted}
     assert len(base_ids) == 1
-    assert pid == sorted(r["prediction_id"] for r in inserted
-                          if r["resolution_type"] == "native")[0]
+    assert pid.endswith("_300e")
 
 
 def test_idempotent_index_blocks_double_score_at_same_generation(ledger):
     import sqlite3
     led, conn = ledger
-    boundary = 1_700_000_000_000
-    rows = plan_resolution_rows(boundary, 900, [900])
+    rows = plan_resolution_rows(_BASE, 900, [900])
     led.log_prediction_set(
         envelope=_envelope(), symbol="BTCUSDT",
-        ts_model_ran_ms=boundary, ts_contract_open_ms=boundary,
+        ts_model_ran_ms=_BASE, ts_contract_open_ms=_BASE,
         rows=rows, pred_proba_raw=0.5, pred_proba_calibrated=0.5,
         pred_direction="up", above_threshold=False, warmup=False,
         platform="paper",
@@ -86,7 +81,7 @@ def test_idempotent_index_blocks_double_score_at_same_generation(ledger):
     with pytest.raises(sqlite3.IntegrityError):
         led.log_prediction_set(
             envelope=_envelope(), symbol="BTCUSDT",
-            ts_model_ran_ms=boundary, ts_contract_open_ms=boundary,
+            ts_model_ran_ms=_BASE, ts_contract_open_ms=_BASE,
             rows=rows, pred_proba_raw=0.6, pred_proba_calibrated=0.6,
             pred_direction="up", above_threshold=False, warmup=False,
             platform="paper",
@@ -95,12 +90,11 @@ def test_idempotent_index_blocks_double_score_at_same_generation(ledger):
 
 def test_new_generation_can_rescore_same_boundary(ledger):
     led, conn = ledger
-    boundary = 1_700_000_000_000
-    rows = plan_resolution_rows(boundary, 900, [900])
+    rows = plan_resolution_rows(_BASE, 900, [900])
     led.log_prediction_set(
         envelope=_envelope(registry_load_generation=0),
         symbol="BTCUSDT",
-        ts_model_ran_ms=boundary, ts_contract_open_ms=boundary,
+        ts_model_ran_ms=_BASE, ts_contract_open_ms=_BASE,
         rows=rows, pred_proba_raw=0.5, pred_proba_calibrated=0.5,
         pred_direction="up", above_threshold=False, warmup=False,
         platform="paper",
@@ -108,21 +102,21 @@ def test_new_generation_can_rescore_same_boundary(ledger):
     led.log_prediction_set(
         envelope=_envelope(registry_load_generation=1),
         symbol="BTCUSDT",
-        ts_model_ran_ms=boundary, ts_contract_open_ms=boundary,
+        ts_model_ran_ms=_BASE, ts_contract_open_ms=_BASE,
         rows=rows, pred_proba_raw=0.6, pred_proba_calibrated=0.6,
         pred_direction="up", above_threshold=False, warmup=False,
         platform="paper",
     )
     n = conn.execute("SELECT count(*) AS n FROM predictions").fetchone()["n"]
-    assert n == 2  # one row each generation
+    assert n == 2
 
 
 def test_warmup_flag_is_persisted(ledger):
     led, conn = ledger
-    rows = plan_resolution_rows(1_000_000, 900, [900])
+    rows = plan_resolution_rows(_BASE, 900, [900])
     led.log_prediction_set(
         envelope=_envelope(), symbol="BTCUSDT",
-        ts_model_ran_ms=1_000_000, ts_contract_open_ms=1_000_000,
+        ts_model_ran_ms=_BASE, ts_contract_open_ms=_BASE,
         rows=rows, pred_proba_raw=0.5, pred_proba_calibrated=0.5,
         pred_direction="up", above_threshold=False, warmup=True,
         platform="paper",
@@ -133,11 +127,10 @@ def test_warmup_flag_is_persisted(ledger):
 
 def test_log_paper_trade_links_to_prediction(ledger):
     led, conn = ledger
-    rows = plan_resolution_rows(1_700_000_000_000, 900, [900])
+    rows = plan_resolution_rows(_BASE, 900, [900])
     pid = led.log_prediction_set(
         envelope=_envelope(), symbol="BTCUSDT",
-        ts_model_ran_ms=1_700_000_000_000,
-        ts_contract_open_ms=1_700_000_000_000,
+        ts_model_ran_ms=_BASE, ts_contract_open_ms=_BASE,
         rows=rows, pred_proba_raw=0.55, pred_proba_calibrated=0.53,
         pred_direction="up", above_threshold=True, warmup=False,
         platform="paper",
@@ -147,12 +140,11 @@ def test_log_paper_trade_links_to_prediction(ledger):
         envelope=_envelope(),
         symbol="BTCUSDT",
         market_window_seconds=900,
-        resolution_type="native",
-        ts_model_ran_ms=1_700_000_000_000,
-        ts_contract_open_ms=1_700_000_000_000,
-        ts_resolve_at_ms=1_700_000_000_000 + 900_000,
-        pred_proba_raw=0.55,
-        pred_proba_calibrated=0.53,
+        resolution_type="evaluation",
+        ts_model_ran_ms=_BASE,
+        ts_contract_open_ms=_BASE,
+        ts_resolve_at_ms=_BASE + 900_000,
+        pred_proba_raw=0.55, pred_proba_calibrated=0.53,
         pred_direction="up",
         confidence_threshold_used=0.52,
         simulated_stake_usdc=10.0,
@@ -176,10 +168,10 @@ def test_log_paper_trade_links_to_prediction(ledger):
 
 def test_log_compact_decision_writes_inline_fields(ledger):
     led, conn = ledger
-    rows = plan_resolution_rows(1_000_000, 900, [900])
+    rows = plan_resolution_rows(_BASE, 900, [900])
     pid = led.log_prediction_set(
         envelope=_envelope(), symbol="BTCUSDT",
-        ts_model_ran_ms=1_000_000, ts_contract_open_ms=1_000_000,
+        ts_model_ran_ms=_BASE, ts_contract_open_ms=_BASE,
         rows=rows, pred_proba_raw=0.55, pred_proba_calibrated=0.53,
         pred_direction="up", above_threshold=False, warmup=False,
         platform="paper",
@@ -201,79 +193,87 @@ def test_log_compact_decision_writes_inline_fields(ledger):
     assert row["decision_reason"] == "below_confidence"
 
 
-def test_record_native_resolution_updates_prediction_and_calibration(ledger):
+def test_record_resolution_with_feed_calibrator_writes_calibration(ledger):
     led, conn = ledger
-    rows = plan_resolution_rows(1_000_000, 900, [900])
-    pid = led.log_prediction_set(
+    rows = plan_resolution_rows(_BASE, 900, [300, 900])
+    led.log_prediction_set(
         envelope=_envelope(), symbol="BTCUSDT",
-        ts_model_ran_ms=1_000_000, ts_contract_open_ms=1_000_000,
+        ts_model_ran_ms=_BASE, ts_contract_open_ms=_BASE,
         rows=rows, pred_proba_raw=0.55, pred_proba_calibrated=0.53,
         pred_direction="up", above_threshold=True, warmup=False,
         platform="paper",
     )
-    led.record_native_resolution(
-        prediction_id=pid,
-        ts_resolved_ms=1_900_000,
+    canonical_pid = conn.execute(
+        "SELECT prediction_id FROM predictions WHERE market_window_seconds=300"
+    ).fetchone()["prediction_id"]
+    led.record_resolution(
+        prediction_id=canonical_pid,
+        ts_resolved_ms=_BASE + 300_000,
         price_at_open=60_000.0,
         price_at_close=60_100.0,
         contract_result="up",
         prediction_correct=True,
+        feed_calibrator=True,
     )
     row = conn.execute(
         "SELECT resolved, contract_result, prediction_correct,"
         " price_at_open, price_at_close FROM predictions WHERE prediction_id=?",
-        (pid,)).fetchone()
+        (canonical_pid,)).fetchone()
     assert row["resolved"] == 1
     assert row["contract_result"] == "up"
     assert row["prediction_correct"] == 1
     assert row["price_at_open"] == 60_000.0
     cal = conn.execute(
         "SELECT * FROM calibration_outcomes WHERE prediction_id=?",
-        (pid,)).fetchone()
+        (canonical_pid,)).fetchone()
     assert cal is not None
-    assert cal["resolution_type"] == "native"
+    assert cal["resolution_type"] == "evaluation"
     assert cal["won"] == 1
 
 
-def test_record_evaluation_resolution_does_not_write_calibration(ledger):
+def test_record_resolution_without_feed_calibrator_no_calibration(ledger):
     led, conn = ledger
-    rows = plan_resolution_rows(1_000_000, 900, [300, 900])
+    rows = plan_resolution_rows(_BASE, 900, [300, 900])
     led.log_prediction_set(
         envelope=_envelope(), symbol="BTCUSDT",
-        ts_model_ran_ms=1_000_000, ts_contract_open_ms=1_000_000,
+        ts_model_ran_ms=_BASE, ts_contract_open_ms=_BASE,
         rows=rows, pred_proba_raw=0.55, pred_proba_calibrated=0.53,
         pred_direction="up", above_threshold=False, warmup=False,
         platform="paper",
     )
     eval_pid = conn.execute(
-        "SELECT prediction_id FROM predictions WHERE resolution_type='evaluation'"
+        "SELECT prediction_id FROM predictions WHERE market_window_seconds=900"
     ).fetchone()["prediction_id"]
-    led.record_evaluation_resolution(
-        prediction_id=eval_pid, ts_resolved_ms=1_300_000,
-        price_at_open=60_000.0, price_at_close=60_050.0,
-        contract_result="up", prediction_correct=True,
+    led.record_resolution(
+        prediction_id=eval_pid,
+        ts_resolved_ms=_BASE + 900_000,
+        price_at_open=60_000.0,
+        price_at_close=60_050.0,
+        contract_result="up",
+        prediction_correct=True,
+        feed_calibrator=False,
     )
     cal = conn.execute(
         "SELECT count(*) AS n FROM calibration_outcomes"
     ).fetchone()
-    assert cal["n"] == 0  # evaluation rows must never feed calibration
+    assert cal["n"] == 0
 
 
 def test_record_trade_resolution_updates_pnl(ledger):
     led, conn = ledger
-    rows = plan_resolution_rows(1_000_000, 900, [900])
+    rows = plan_resolution_rows(_BASE, 900, [900])
     pid = led.log_prediction_set(
         envelope=_envelope(), symbol="BTCUSDT",
-        ts_model_ran_ms=1_000_000, ts_contract_open_ms=1_000_000,
+        ts_model_ran_ms=_BASE, ts_contract_open_ms=_BASE,
         rows=rows, pred_proba_raw=0.55, pred_proba_calibrated=0.53,
         pred_direction="up", above_threshold=True, warmup=False,
         platform="paper",
     )
     tid = led.log_paper_trade(
         prediction_id=pid, envelope=_envelope(), symbol="BTCUSDT",
-        market_window_seconds=900, resolution_type="native",
-        ts_model_ran_ms=1_000_000, ts_contract_open_ms=1_000_000,
-        ts_resolve_at_ms=1_900_000,
+        market_window_seconds=900, resolution_type="evaluation",
+        ts_model_ran_ms=_BASE, ts_contract_open_ms=_BASE,
+        ts_resolve_at_ms=_BASE + 900_000,
         pred_proba_raw=0.55, pred_proba_calibrated=0.53,
         pred_direction="up", confidence_threshold_used=0.52,
         simulated_stake_usdc=10.0, decision_outcome="executed",
@@ -282,7 +282,7 @@ def test_record_trade_resolution_updates_pnl(ledger):
         order_type="maker", warmup=False, platform="paper",
     )
     led.record_trade_resolution(
-        trade_id=tid, ts_resolved_ms=1_900_000,
+        trade_id=tid, ts_resolved_ms=_BASE + 900_000,
         price_at_close=60_100.0, contract_result="up",
         prediction_correct=True, gross_pnl=8.07,
         fee_paid=0.18, net_pnl=7.89,

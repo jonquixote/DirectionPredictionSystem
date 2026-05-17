@@ -11,6 +11,8 @@ import pytest
 from storage.calibrator_registry import CalibratorRegistry, MIN_N_FOR_FIT
 from storage.db import open_database, init_schema
 
+_BASE = 1_735_689_600_000
+
 _pred_counter = 0
 
 
@@ -35,18 +37,16 @@ def seed_predictions_for_calibration(
 ) -> None:
     """Seed resolved predictions with outcome labels for calibration fitting."""
     global _pred_counter
-    now_ms = int(time.time() * 1000)
     for i in range(n):
         raw_proba = 0.45 + (i % 100) / 100.0
         raw_proba = min(1.0, max(0.0, raw_proba))
 
-        # Synthetic outcome: correlated with raw_proba
         outcome_is_up = 1 if raw_proba > 0.55 else 0
         direction = "up" if raw_proba > 0.5 else "down"
         prediction_correct = 1 if (direction == "up" and outcome_is_up) or (direction == "down" and not outcome_is_up) else 0
 
-        ts_contract_open = now_ms + i * 1000
         _pred_counter += 1
+        ts_contract_open = _BASE + _pred_counter * 300_000
 
         db.execute(
             "INSERT INTO predictions "
@@ -71,8 +71,8 @@ def seed_predictions_for_calibration(
                 "",
                 "BTCUSDT",
                 300,
-                "native",
-                now_ms,
+                "evaluation",
+                ts_contract_open,
                 ts_contract_open,
                 ts_contract_open + 300000,
                 raw_proba,
@@ -110,7 +110,6 @@ class TestCalibratorWiring:
 
         _, hash_from_calibrate = registry.calibrate("h300_btc", 0.55)
 
-        # Query database directly
         row = db.execute(
             "SELECT map_hash FROM calibration_map WHERE model_name=?",
             ("h300_btc",),
@@ -133,7 +132,6 @@ class TestCalibratorWiring:
         assert row is not None
         model_name, x_json, y_json, fit_at_ms, n_obs, map_hash, fit_method = row
 
-        # Verify each field
         assert model_name == "h300_btc"
         assert isinstance(x_json, str)
         assert isinstance(y_json, str)
@@ -142,7 +140,6 @@ class TestCalibratorWiring:
         assert len(map_hash) == 16
         assert fit_method == "isotonic"
 
-        # Verify JSON is valid
         x_arr = json.loads(x_json)
         y_arr = json.loads(y_json)
         assert isinstance(x_arr, list)
@@ -177,7 +174,6 @@ class TestCalibratorWiring:
             ("h300_btc",),
         ).fetchone()
 
-        # Wait a tiny bit and add more data
         time.sleep(0.01)
         seed_predictions_for_calibration(db, "h300_btc", 50)
         registry.refit("h300_btc")
@@ -187,9 +183,7 @@ class TestCalibratorWiring:
             ("h300_btc",),
         ).fetchone()
 
-        # n_obs should have increased
         assert second_row[1] == first_row[1] + 50, "n_obs should reflect additional predictions"
-        # fit_at_ms should be more recent
         assert second_row[2] >= first_row[2], "fit_at_ms should be updated"
 
     def test_get_hash_returns_none_for_unfitted_model(self, registry):
@@ -211,14 +205,12 @@ class TestCalibratorWiring:
         seed_predictions_for_calibration(db, "h300_btc", MIN_N_FOR_FIT)
         registry.refit("h300_btc")
 
-        # Test extreme inputs
         for raw in [0.0, 0.1, 0.5, 0.9, 1.0]:
             cal, _ = registry.calibrate("h300_btc", raw)
             assert 0.0 <= cal <= 1.0, f"calibrated probability {cal} not in [0, 1]"
 
     def test_hash_in_prediction_row_schema(self, db):
         """calibration_map_hash column exists in predictions table."""
-        # This is a schema-level test to ensure the column is present
         columns = [col[1] for col in db.execute("PRAGMA table_info(predictions)").fetchall()]
         assert "calibration_map_hash" in columns, "predictions table should have calibration_map_hash column"
 
@@ -227,16 +219,13 @@ class TestCalibratorWiring:
         seed_predictions_for_calibration(db, "h300_btc", MIN_N_FOR_FIT)
         registry.refit("h300_btc")
 
-        # Simulate paper_trader logic
         model_name = "h300_btc"
         raw_proba = 0.58
         pred_direction = "up"
 
-        # Step 1: calibrate
         cal_proba, calib_hash = registry.calibrate(model_name, raw_proba)
 
-        # Step 2: create prediction row with hash
-        now_ms = int(time.time() * 1000)
+        ts_contract_open = _BASE + 999_999 * 300_000
         db.execute(
             "INSERT INTO predictions "
             "(prediction_id, model_name, model_artifact_hash, feature_names_hash, "
@@ -257,13 +246,13 @@ class TestCalibratorWiring:
                 1,
                 "policy_hash",
                 1,
-                calib_hash or "",  # Store the hash (or empty if None)
+                calib_hash or "",
                 "BTCUSDT",
                 300,
-                "native",
-                now_ms,
-                now_ms,
-                now_ms + 300000,
+                "evaluation",
+                ts_contract_open,
+                ts_contract_open,
+                ts_contract_open + 300000,
                 raw_proba,
                 cal_proba,
                 pred_direction,
@@ -274,7 +263,6 @@ class TestCalibratorWiring:
         )
         db.commit()
 
-        # Step 3: verify row was stored with hash
         row = db.execute(
             "SELECT pred_proba_raw, pred_proba_calibrated, calibration_map_hash "
             "FROM predictions WHERE prediction_id=?",
@@ -282,6 +270,6 @@ class TestCalibratorWiring:
         ).fetchone()
 
         assert row is not None
-        assert row[0] == raw_proba  # raw proba stored
-        assert row[1] == cal_proba  # calibrated proba stored
-        assert row[2] == calib_hash  # hash stored
+        assert row[0] == raw_proba
+        assert row[1] == cal_proba
+        assert row[2] == calib_hash

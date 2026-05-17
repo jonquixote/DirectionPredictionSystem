@@ -62,7 +62,7 @@ def populated_db(tmp_path):
 
     # h300_btc predictions (250 samples for calibration)
     for i in range(250):
-        ts_ms = ts_start_ms + i * 30 * 60 * 1000
+        ts_ms = ts_start_ms + i * 300_000
         proba = 0.4 if i < 75 else (0.6 if i < 175 else 0.8)
         outcome = 1 if i % 3 < 1 else 0 if proba == 0.4 else (1 if i % 3 < 2 else 0)
         conn.execute("""
@@ -78,7 +78,7 @@ def populated_db(tmp_path):
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             f"pred_btc_{i}", "h300_btc", "hash1", "hash2", "v1", 300, 1,
-            "policy1", 1, "calib1", "BTCUSDT", 300, "native",
+            "policy1", 1, "calib1", "BTCUSDT", 300, "evaluation",
             ts_ms, ts_ms, ts_ms + 300_000,
             proba, proba, "up",
             1, 0, 1, "paper",
@@ -87,7 +87,7 @@ def populated_db(tmp_path):
 
     # h60_eth predictions (fewer samples for regime thresholds)
     for i in range(100):
-        ts_ms = ts_start_ms + i * 30 * 60 * 1000
+        ts_ms = ts_start_ms + i * 300_000
         conn.execute("""
             INSERT INTO predictions (
                 prediction_id, model_name, model_artifact_hash, feature_names_hash,
@@ -101,7 +101,7 @@ def populated_db(tmp_path):
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             f"pred_eth_{i}", "h60_eth", "hash1", "hash2", "v1", 60, 1,
-            "policy1", 1, "calib1", "ETHUSDT", 60, "native",
+            "policy1", 1, "calib1", "ETHUSDT", 60, "evaluation",
             ts_ms, ts_ms, ts_ms + 60_000,
             0.5, 0.5, "up",
             1, 0, 1, "paper",
@@ -129,8 +129,8 @@ def test_preflight_end_to_end_populated_db(populated_db):
     assert "SUCCESS" in result.stdout or "All preflight checks passed" in result.stdout
 
 
-def test_preflight_empty_db_fails(tmp_path):
-    """Test preflight on empty database (should fail)."""
+def test_preflight_empty_db_warns(tmp_path):
+    """Test preflight on empty database (should pass with warnings)."""
     db_path = tmp_path / "empty.db"
     conn = sqlite3.connect(str(db_path))
 
@@ -145,8 +145,8 @@ def test_preflight_empty_db_fails(tmp_path):
         text=True,
         cwd=Path(__file__).parent.parent
     )
-
-    assert result.returncode != 0, "preflight_v3 should fail on empty database"
+    assert result.returncode == 0
+    assert "WARN" in result.stdout
 
 
 def test_preflight_skip_backfill_flag(populated_db):

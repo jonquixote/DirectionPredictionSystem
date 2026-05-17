@@ -169,14 +169,14 @@ def test_reload_prunes_pending_queue_for_removed_models(tmp_path):
             prediction_id=f"{name}_p", boundary_ms=1_000_000,
             model_name=name, symbol="BTCUSDT", market_window_seconds=900,
             registry_load_generation=0, ts_resolve_at_ms=1_900_000,
-            resolution_type="native", price_at_open=60_000.0,
+            resolution_type="evaluation", price_at_open=60_000.0,
         ))
     # Old generation entry from a now-removed model
     queue.enqueue(PendingEntry(
         prediction_id="ghost_p", boundary_ms=1_000_000,
         model_name="ghost_model", symbol="BTCUSDT", market_window_seconds=900,
         registry_load_generation=0, ts_resolve_at_ms=1_900_000,
-        resolution_type="native", price_at_open=60_000.0,
+        resolution_type="evaluation", price_at_open=60_000.0,
     ))
     queue.persist()
 

@@ -2,57 +2,59 @@ import pytest
 
 from storage.window_planner import plan_resolution_rows, ResolutionRow
 
+_BASE = 1_735_689_600_000
 
-def test_h300_baseline_emits_native_900_plus_three_evaluations():
+
+def test_all_rows_are_evaluation():
     rows = plan_resolution_rows(
-        boundary_ms=1_700_000_000_000,
+        boundary_ms=_BASE,
         training_horizon_seconds=900,
-        evaluation_windows=[300, 900, 1800, 3600],
+        evaluation_windows=[300, 900, 1800],
     )
-    # 1 native + 3 evaluation (900 excluded from evaluation set)
-    assert len(rows) == 4
-    native = [r for r in rows if r.resolution_type == "native"]
-    evals = [r for r in rows if r.resolution_type == "evaluation"]
-    assert len(native) == 1
-    assert native[0].market_window_seconds == 900
-    assert native[0].ts_resolve_at_ms == 1_700_000_000_000 + 900_000
-    eval_windows = sorted(r.market_window_seconds for r in evals)
-    assert eval_windows == [300, 1800, 3600]
+    assert all(r.resolution_type == "evaluation" for r in rows)
 
 
-def test_h60_emits_native_60_plus_four_evaluations():
+def test_alignment_gate_at_five_min_boundary():
     rows = plan_resolution_rows(
-        boundary_ms=1_700_000_000_000,
-        training_horizon_seconds=60,
-        evaluation_windows=[300, 900, 1800, 3600],
+        boundary_ms=_BASE,
+        training_horizon_seconds=900,
+        evaluation_windows=[300, 900, 1800],
     )
-    assert len(rows) == 5
-    native = next(r for r in rows if r.resolution_type == "native")
-    assert native.market_window_seconds == 60
-    assert native.ts_resolve_at_ms == 1_700_000_000_000 + 60_000
+    windows = sorted(r.market_window_seconds for r in rows)
+    assert windows == [300, 900, 1800]
 
 
-def test_native_horizon_already_in_evaluation_set_is_not_duplicated():
+def test_900_and_1800_excluded_at_non_aligned_boundary():
+    boundary = _BASE + 300_000
     rows = plan_resolution_rows(
-        boundary_ms=1_700_000_000_000,
-        training_horizon_seconds=300,
-        evaluation_windows=[300, 900],
+        boundary_ms=boundary,
+        training_horizon_seconds=900,
+        evaluation_windows=[300, 900, 1800],
     )
-    # Native at 300, evaluation at 900 only.
-    assert len(rows) == 2
-    assert sum(1 for r in rows if r.market_window_seconds == 300) == 1
+    windows = sorted(r.market_window_seconds for r in rows)
+    assert windows == [300]
+
+
+def test_1800_excluded_at_15_min_boundary():
+    boundary = _BASE + 900_000
+    rows = plan_resolution_rows(
+        boundary_ms=boundary,
+        training_horizon_seconds=900,
+        evaluation_windows=[300, 900, 1800],
+    )
+    windows = sorted(r.market_window_seconds for r in rows)
+    assert windows == [300, 900]
 
 
 def test_resolve_at_ms_is_per_window():
     rows = plan_resolution_rows(
-        boundary_ms=2_000_000,
+        boundary_ms=_BASE,
         training_horizon_seconds=900,
         evaluation_windows=[300, 1800],
     )
     by_w = {r.market_window_seconds: r.ts_resolve_at_ms for r in rows}
-    assert by_w[900] == 2_000_000 + 900_000
-    assert by_w[300] == 2_000_000 + 300_000
-    assert by_w[1800] == 2_000_000 + 1_800_000
+    assert by_w[300] == _BASE + 300_000
+    assert by_w[1800] == _BASE + 1_800_000
 
 
 def test_invalid_horizon_rejected():

@@ -33,7 +33,7 @@ def seeded_db(tmp_path, monkeypatch):
             (pred_id, "h60_xrp", "XRPUSDT",
              f"hash_{i}", f"fname_{i}", "v1", 60,
              f"policy_{i}", 1, f"cal_{i}",
-             900, "native",
+             900, "evaluation",
              i*900_000, i*900_000, i*900_000 + 900_000,
              0.55, 0.55, "up", 1, "paper", 1),
         )
@@ -53,7 +53,7 @@ def seeded_db(tmp_path, monkeypatch):
              f"hash_{i}", f"policy_{i}", 1, f"cal_{i}", "v1", 60,
              1, 900,
              i*900_000, i*900_000, i*900_000 + 900_000,
-             0.55, 0.55, "up", 0.55, "native", 0,
+             0.55, 0.55, "up", 0.55, "evaluation", 0,
              "executed", "paper", 1),
         )
     db_conn.commit()

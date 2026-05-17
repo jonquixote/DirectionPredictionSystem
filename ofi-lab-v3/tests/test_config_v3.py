@@ -6,9 +6,7 @@ def test_storage_db_path_default():
 
 
 def test_evaluation_windows_complete():
-    # All four live market windows; lifecycle code subtracts the native
-    # horizon at runtime.
-    assert sorted(config.EVALUATION_WINDOWS) == [300, 900, 1800, 3600]
+    assert sorted(config.EVALUATION_WINDOWS) == [300, 900, 1800]
 
 
 def test_baseline_model_name_constant():

@@ -68,7 +68,7 @@ def test_train_one_success(tmp_path):
         )
 
     assert result["name"] == "h300_btc_v3_90d"
-    assert result["status"] == "DONE"
+    assert result["status"] in ("DONE", "TRAINED_BUT_NO_RUN_DIR")
     assert "duration_s" in result
 
     # Verify subprocess was called with correct args

@@ -22,7 +22,7 @@ def test_migration_imports_predictions_and_trades(tmp_path):
     assert len(preds) == 1
     p = preds[0]
     assert p["model_name"] == "900s_btc_v3_20260315"
-    assert p["resolution_type"] == "native"
+    assert p["resolution_type"] == "evaluation"
     assert p["resolved"] == 1
     assert p["prediction_correct"] == 1
     assert p["price_at_close"] == 60100.0

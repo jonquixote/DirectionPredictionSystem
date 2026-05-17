@@ -10,7 +10,7 @@ def test_refresh_decay_metrics_writes_snapshot_per_model(tmp_path, monkeypatch, 
         log_dir=str(tmp_path / "logs"),
         confidence_threshold=0.55,
     )
-    # Insert 10 native paper_trade rows with PnL values
+    # Insert 10 evaluation paper_trade rows with PnL values
     # First insert matching prediction rows (FK reference)
     conn = t._db_conn
     for i in range(10):
@@ -29,7 +29,7 @@ def test_refresh_decay_metrics_writes_snapshot_per_model(tmp_path, monkeypatch, 
                 f"p{i}", "900s_btc_v3_20260315", "a"*64,
                 "f"*64, "v3", 900,
                 0, "c"*64, 0, "d"*64,
-                "BTCUSDT", 900, "native",
+                "BTCUSDT", 900, "evaluation",
                 i*1000, i*1000, i*1000+900_000,
                 0.55, 0.55, "up", 1, 0, "paper",
             ),
@@ -48,7 +48,7 @@ def test_refresh_decay_metrics_writes_snapshot_per_model(tmp_path, monkeypatch, 
             ") VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 f"t{i}", f"p{i}", "900s_btc_v3_20260315", "a"*64, "c"*64,
-                0, "d"*64, 0, "v3", 900, "BTCUSDT", 900, "native",
+                0, "d"*64, 0, "v3", 900, "BTCUSDT", 900, "evaluation",
                 i*1000, i*1000, i*1000+900_000, 0.55, 0.55, "up",
                 0.55, 10.0, 0, "paper", "executed",
                 0.05 if i % 2 == 0 else -0.04,  # alternating PnL

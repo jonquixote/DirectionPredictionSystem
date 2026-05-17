@@ -18,9 +18,9 @@ EXPECTED_TABLES = {
 
 EXPECTED_INDEXES_INCLUDE = {
     "idx_pred_idempotent",
-    "idx_pred_native_for_decay",
+    "idx_pred_eval_for_decay",
     "idx_trace_pid",
-    "idx_cal_native",
+    "idx_cal_eval",
     "idx_audit_generation",
     "idx_policy_version",
     "idx_overlap_symbol_window",

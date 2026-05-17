@@ -50,7 +50,7 @@ def synthetic_minute_bars_path(tmp_path_factory) -> str:
     data = {col: rng.normal(size=n).tolist() for col in V3_FEATURE_COLS}
     sc_idx = V3_FEATURE_COLS.index("symbol_cat")
     data["symbol_cat"] = rng.integers(0, 3, size=n).tolist()
-    data["ts_ms"] = [1_700_000_000_000 + i * 60_000 for i in range(n)]
+    data["ts_ms"] = [1_735_689_600_000 + i * 300_000 for i in range(n)]
     data["mid_price"] = [60_000.0 + i for i in range(n)]
     table = pa.table(data)
     pq.write_table(table, str(out_path))
