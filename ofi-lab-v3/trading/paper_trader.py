@@ -1348,14 +1348,20 @@ class PaperTrader:
                 pred_proba = float(model.predict(feature_vec)[0])
                 pred_direction = "up" if pred_proba > 0.5 else "down"
 
-                # Try to get calibrated prediction from CalibratorRegistry
+                # Try to get calibrated prediction from CalibratorRegistry.
+                # Use the 300s calibrator as canonical for the gate check; it is
+                # the standard native window.  KeyError means no calibrator file
+                # has been written yet (normal at cold start) — fall back to
+                # identity.  All other exceptions propagate so real bugs are visible.
                 pred_proba_calibrated = pred_proba
                 try:
-                    calibrator = self.calibrators.get(model_name)
-                    if calibrator:
-                        pred_proba_calibrated = calibrator.calibrate(pred_proba)
-                except Exception as e:
-                    logger.debug("calibration_failed for %s: %s", model_name, e)
+                    calibrator = self.calibrators.get(model_name, symbol, 300)
+                    pred_proba_calibrated = calibrator.calibrate(pred_proba)
+                except KeyError:
+                    logger.info(
+                        "calibrator_missing: no calibrator registered for %s/%s/300 — using raw proba",
+                        model_name, symbol,
+                    )
 
                 # In APFS mode, lower the confidence floor so APFS
                 # can evaluate the full prediction range.
@@ -1603,17 +1609,26 @@ class PaperTrader:
                         if duration == 900 and not is_15m_boundary and not suppress_reason:
                             suppress_reason = "non_15m_boundary"
 
+                        # Per-duration calibration: each duration has its own
+                        # calibration map file.  Falls back to the gate-check
+                        # calibrated value when no per-duration file exists.
+                        try:
+                            dur_cal = self.calibrators.get(model_name, symbol, duration)
+                            dur_pred_proba_calibrated = dur_cal.calibrate(pred_proba)
+                        except KeyError:
+                            dur_pred_proba_calibrated = pred_proba_calibrated
+
                         self.sqlite_ledger.log_paper_trade(
                             prediction_id=prediction_id,
                             envelope=self._build_envelope(model_name, platform="paper"),
                             symbol=symbol,
-            market_window_seconds=duration,
-            resolution_type="evaluation",
+                            market_window_seconds=duration,
+                            resolution_type="evaluation",
                             ts_model_ran_ms=ts_model_ran_ms,
                             ts_contract_open_ms=boundary_ms,
                             ts_resolve_at_ms=boundary_ms + duration * 1000,
                             pred_proba_raw=pred_proba,
-                            pred_proba_calibrated=pred_proba,
+                            pred_proba_calibrated=dur_pred_proba_calibrated,
                             pred_direction=pred_direction,
                             confidence_threshold_used=self.filters["confidence_threshold"],
                             simulated_stake_usdc=stake,
