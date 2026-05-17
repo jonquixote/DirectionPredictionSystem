@@ -145,7 +145,7 @@ def evaluate_lifecycle_transitions(conn, *, now_ms: int) -> list[Transition]:
 
         # Fetch decay metrics for this model
         metrics = conn.execute(
-            "SELECT * FROM decay_metrics WHERE model_name = ? ORDER BY ts_ms DESC LIMIT 1",
+            "SELECT * FROM decay_metrics WHERE model_name = ? ORDER BY ts DESC LIMIT 1",
             (model_name,)
         ).fetchone()
 

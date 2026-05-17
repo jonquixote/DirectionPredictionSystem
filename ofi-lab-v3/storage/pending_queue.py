@@ -23,7 +23,7 @@ class PendingEntry:
     market_window_seconds: int
     registry_load_generation: int
     ts_resolve_at_ms: int
-    resolution_type: str   # 'native' | 'evaluation'
+    resolution_type: str  # 'evaluation'
     price_at_open: float
     # Note: no full features dict here — Steering 10i. Verbose features
     # live in decision_traces.

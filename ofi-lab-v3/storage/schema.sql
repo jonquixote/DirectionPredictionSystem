@@ -2,7 +2,7 @@
 -- Every CREATE uses IF NOT EXISTS so init_schema is idempotent.
 
 -- =========================================================================
--- predictions: every model score, both native and evaluation rows.
+-- predictions: every model score, all evaluation rows.
 -- =========================================================================
 CREATE TABLE IF NOT EXISTS predictions (
     -- Identity
@@ -87,8 +87,8 @@ CREATE INDEX IF NOT EXISTS idx_pred_unresolved        ON predictions(resolved) W
 CREATE INDEX IF NOT EXISTS idx_pred_warmup            ON predictions(warmup);
 CREATE INDEX IF NOT EXISTS idx_pred_resolution_type   ON predictions(resolution_type);
 CREATE INDEX IF NOT EXISTS idx_pred_generation        ON predictions(model_name, registry_load_generation);
-CREATE INDEX IF NOT EXISTS idx_pred_native_for_decay  ON predictions(model_name, symbol, resolution_type, ts_contract_open_ms)
-    WHERE resolution_type = 'native' AND resolved = 1;
+CREATE INDEX IF NOT EXISTS idx_pred_eval_for_decay ON predictions(model_name, symbol, resolution_type, ts_contract_open_ms)
+WHERE resolution_type = 'evaluation' AND resolved = 1;
 
 -- Idempotency: prevent duplicate scoring on hot reload re-entry.
 CREATE UNIQUE INDEX IF NOT EXISTS idx_pred_idempotent ON predictions(
@@ -161,8 +161,8 @@ CREATE TABLE IF NOT EXISTS paper_trades (
 CREATE INDEX IF NOT EXISTS idx_trade_model            ON paper_trades(model_name, symbol);
 CREATE INDEX IF NOT EXISTS idx_trade_unresolved       ON paper_trades(resolved) WHERE resolved = 0;
 CREATE INDEX IF NOT EXISTS idx_trade_resolution_type  ON paper_trades(resolution_type);
-CREATE INDEX IF NOT EXISTS idx_trade_native_for_decay ON paper_trades(model_name, symbol, resolution_type, ts_contract_open_ms)
-    WHERE resolution_type = 'native' AND resolved = 1;
+CREATE INDEX IF NOT EXISTS idx_trade_eval_for_decay ON paper_trades(model_name, symbol, resolution_type, ts_contract_open_ms)
+WHERE resolution_type = 'evaluation' AND resolved = 1;
 
 -- =========================================================================
 -- decision_traces: verbose forensic trace, append-only, linked by prediction_id.
@@ -201,7 +201,7 @@ CREATE INDEX IF NOT EXISTS idx_trace_pid ON decision_traces(prediction_id);
 CREATE INDEX IF NOT EXISTS idx_trace_ts  ON decision_traces(ts);
 
 -- =========================================================================
--- calibration_outcomes: one row per native resolution, used for refit + decay.
+-- calibration_outcomes: one row per evaluation resolution, used for refit + decay.
 -- =========================================================================
 CREATE TABLE IF NOT EXISTS calibration_outcomes (
     id                     INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -219,7 +219,7 @@ CREATE TABLE IF NOT EXISTS calibration_outcomes (
 );
 
 CREATE INDEX IF NOT EXISTS idx_cal_model ON calibration_outcomes(model_name, symbol, market_window_seconds);
-CREATE INDEX IF NOT EXISTS idx_cal_native ON calibration_outcomes(model_name, resolution_type) WHERE resolution_type = 'native';
+CREATE INDEX IF NOT EXISTS idx_cal_eval ON calibration_outcomes(model_name, resolution_type) WHERE resolution_type = 'evaluation';
 
 -- =========================================================================
 -- registry_audit: append-only log of registry generation increments.
@@ -405,7 +405,7 @@ CREATE INDEX IF NOT EXISTS idx_model_audit_name ON model_audit(model_name, ts);
 
 -- =========================================================================
 -- calibration_map: per-model isotonic regression coefficients.
---                  Fitted from resolved native predictions; supports provenance via map_hash.
+-- Fitted from resolved evaluation predictions; supports provenance via map_hash.
 -- =========================================================================
 CREATE TABLE IF NOT EXISTS calibration_map (
     model_name      TEXT PRIMARY KEY,

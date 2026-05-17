@@ -1,12 +1,11 @@
 """Multi-window resolution row planner.
 
-Every prediction emits one ``resolution_type='native'`` row at the
-model's native training horizon and zero or more
-``resolution_type='evaluation'`` rows at the other live market windows.
-Lifecycle, decay, calibration, and rolling-EV queries filter on
-``resolution_type='native'`` so evaluation rows never contaminate core
-model statistics.
+Every prediction emits one or more ``resolution_type='evaluation'``
+rows at market-window boundaries aligned to each window's duration.
+A 300s row is emitted at every 5-min boundary; 900s rows only at
+:00/:15/:30/:45; 1800s rows only at :00/:30.  No native rows exist.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -16,7 +15,7 @@ from typing import Iterable, List
 @dataclass(frozen=True)
 class ResolutionRow:
     market_window_seconds: int
-    resolution_type: str  # 'native' | 'evaluation'
+    resolution_type: str
     ts_resolve_at_ms: int
 
 
@@ -27,16 +26,11 @@ def plan_resolution_rows(
 ) -> List[ResolutionRow]:
     if training_horizon_seconds <= 0:
         raise ValueError("training_horizon_seconds must be positive")
-    rows: List[ResolutionRow] = [
-        ResolutionRow(
-            market_window_seconds=training_horizon_seconds,
-            resolution_type="native",
-            ts_resolve_at_ms=boundary_ms + training_horizon_seconds * 1000,
-        )
-    ]
+    boundary_sec = boundary_ms // 1000
+    rows: List[ResolutionRow] = []
     for w in evaluation_windows:
-        if w == training_horizon_seconds:
-            continue  # native already emitted
+        if boundary_sec % w != 0:
+            continue
         rows.append(
             ResolutionRow(
                 market_window_seconds=w,

@@ -14,10 +14,13 @@ from __future__ import annotations
 import sqlite3
 import threading
 import uuid
+import logging
 from datetime import datetime, timezone
 from typing import Iterable, Optional
 
 from storage.provenance import ProvenanceEnvelope
+
+logger = logging.getLogger(__name__)
 from storage.window_planner import ResolutionRow
 
 
@@ -64,18 +67,19 @@ class SQLiteLedger:
         regime_liquidity: Optional[str] = None,
         regime_trend: Optional[str] = None,
     ) -> str:
-        """Insert one native + N evaluation rows for a single boundary.
+        """Insert evaluation rows for a single boundary.
 
-        Returns the **native** row's ``prediction_id``. Evaluation rows
-        share the same prefix with a window suffix.
+        Returns the first row's ``prediction_id`` (the 300s eval row,
+        which serves as the canonical prediction for downstream linking).
+        All rows share the same prefix with a window+type suffix.
         """
         prefix = _new_id_prefix()
-        native_id: Optional[str] = None
+        canonical_id: Optional[str] = None
         with self._lock:
             for row in rows:
                 pid = f"{prefix}_{row.market_window_seconds}{row.resolution_type[0]}"
-                if row.resolution_type == "native":
-                    native_id = pid
+                if canonical_id is None:
+                    canonical_id = pid
                 self._conn.execute(
                     "INSERT INTO predictions ("
                     " prediction_id, model_name, model_artifact_hash,"
@@ -93,11 +97,10 @@ class SQLiteLedger:
                     " utc_hour, day_of_week, is_weekend, relative_spread,"
                     " regime_volatility, regime_liquidity, regime_trend"
                     ") VALUES ("
-                    " ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?"
+        " ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?"
                     ")",
                     (
-                        pid,
-                        envelope.model_name, envelope.model_artifact_hash,
+                        pid, envelope.model_name, envelope.model_artifact_hash,
                         envelope.feature_names_hash, envelope.feature_version,
                         envelope.training_horizon_seconds,
                         envelope.train_window_start, envelope.train_window_end,
@@ -114,12 +117,12 @@ class SQLiteLedger:
                         regime_volatility, regime_liquidity, regime_trend,
                     ),
                 )
-        assert native_id is not None, "rows must include exactly one native row"
-        return native_id
+            assert canonical_id is not None, "rows must include at least one row"
+            return canonical_id
 
-    # ------------------------------------------------------------------
-    # Paper trades
-    # ------------------------------------------------------------------
+        # ------------------------------------------------------------------
+        # Paper trades
+        # ------------------------------------------------------------------
     def log_paper_trade(
         self,
         *,
@@ -165,9 +168,9 @@ class SQLiteLedger:
                 " warmup, platform,"
                 " decision_outcome, decision_reason,"
                 " ev_estimate, kelly_fraction_capped,"
-                " final_size_usdc, order_type"
-                ") VALUES ("
-                " ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?"
+" final_size_usdc, order_type"
+        ") VALUES ("
+        " ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?"
                 ")",
                 (
                     trade_id, prediction_id,
@@ -221,7 +224,7 @@ class SQLiteLedger:
     # ------------------------------------------------------------------
     # Resolution writers
     # ------------------------------------------------------------------
-    def record_native_resolution(
+    def record_resolution(
         self,
         *,
         prediction_id: str,
@@ -230,13 +233,8 @@ class SQLiteLedger:
         price_at_close: float,
         contract_result: str,
         prediction_correct: bool,
+        feed_calibrator: bool = False,
     ) -> None:
-        """Resolve a native row and append a calibration outcome.
-
-        Calibration outcomes are written **only** for native rows.
-        Evaluation rows resolve via ``record_evaluation_resolution`` and
-        never touch ``calibration_outcomes``.
-        """
         with self._lock, self._conn:
             row = self._conn.execute(
                 "SELECT model_name, symbol, market_window_seconds,"
@@ -246,67 +244,32 @@ class SQLiteLedger:
                 (prediction_id,),
             ).fetchone()
             if row is None:
-                raise ValueError(f"unknown prediction_id {prediction_id!r}")
-            if row["resolution_type"] != "native":
-                raise ValueError(
-                    f"record_native_resolution called on "
-                    f"{row['resolution_type']!r} row {prediction_id!r}"
-                )
+                logger.warning("record_resolution: unknown prediction_id %r, skipping", prediction_id)
+                return
             self._conn.execute(
                 "UPDATE predictions SET"
-                "  resolved = 1, ts_resolved_ms = ?,"
-                "  price_at_open = ?, price_at_close = ?,"
-                "  contract_result = ?, prediction_correct = ?"
+                " resolved = 1, ts_resolved_ms = ?,"
+                " price_at_open = ?, price_at_close = ?,"
+                " contract_result = ?, prediction_correct = ?"
                 " WHERE prediction_id = ?",
                 (ts_resolved_ms, price_at_open, price_at_close,
                  contract_result, int(prediction_correct), prediction_id),
             )
-            self._conn.execute(
-                "INSERT INTO calibration_outcomes ("
-                " ts, prediction_id, model_name, symbol,"
-                " market_window_seconds, resolution_type,"
-                " side_conf, won, warmup,"
-                " regime_volatility, regime_liquidity"
-                ") VALUES (?,?,?,?,?,?,?,?,?,?,?)",
-                (_utc_iso_seconds(ts_resolved_ms), prediction_id,
-                 row["model_name"], row["symbol"],
-                 row["market_window_seconds"], "native",
-                 float(row["pred_proba_calibrated"]),
-                 int(prediction_correct), row["warmup"],
-                 row["regime_volatility"], row["regime_liquidity"]),
-            )
-
-    def record_evaluation_resolution(
-        self,
-        *,
-        prediction_id: str,
-        ts_resolved_ms: int,
-        price_at_open: float,
-        price_at_close: float,
-        contract_result: str,
-        prediction_correct: bool,
-    ) -> None:
-        with self._lock, self._conn:
-            row = self._conn.execute(
-                "SELECT resolution_type FROM predictions WHERE prediction_id = ?",
-                (prediction_id,),
-            ).fetchone()
-            if row is None:
-                raise ValueError(f"unknown prediction_id {prediction_id!r}")
-            if row["resolution_type"] != "evaluation":
-                raise ValueError(
-                    f"record_evaluation_resolution called on "
-                    f"{row['resolution_type']!r} row {prediction_id!r}"
-                )
-            self._conn.execute(
-                "UPDATE predictions SET"
-                "  resolved = 1, ts_resolved_ms = ?,"
-                "  price_at_open = ?, price_at_close = ?,"
-                "  contract_result = ?, prediction_correct = ?"
-                " WHERE prediction_id = ?",
-                (ts_resolved_ms, price_at_open, price_at_close,
-                 contract_result, int(prediction_correct), prediction_id),
-            )
+            if feed_calibrator:
+                self._conn.execute(
+                    "INSERT INTO calibration_outcomes ("
+                    " ts, prediction_id, model_name, symbol,"
+                    " market_window_seconds, resolution_type,"
+                    " side_conf, won, warmup,"
+                    " regime_volatility, regime_liquidity"
+                    ") VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+                    (_utc_iso_seconds(ts_resolved_ms), prediction_id,
+                     row["model_name"], row["symbol"],
+                     row["market_window_seconds"], row["resolution_type"],
+                     float(row["pred_proba_calibrated"]),
+                     int(prediction_correct), row["warmup"],
+                     row["regime_volatility"], row["regime_liquidity"]),
+        )
 
     def record_trade_resolution(
         self,

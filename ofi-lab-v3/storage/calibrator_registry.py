@@ -1,6 +1,6 @@
 """Per-model probability calibration via isotonic regression.
 
-Calibrators fit from resolved native predictions in `predictions` table.
+Calibrators fit from resolved evaluation predictions in `predictions` table.
 Cold start (insufficient data) → passthrough (returns raw probability).
 Refit triggered every N new resolved predictions per model.
 Hash exposed for provenance tracking.
@@ -30,7 +30,7 @@ class CalibratorRegistry:
     """Per-model isotonic calibration with database persistence.
 
     Maps raw model probability to empirically observed outcome frequency.
-    Fit from resolved native predictions; monotonic via isotonic regression.
+    Fit from resolved evaluation predictions; monotonic via isotonic regression.
     """
 
     def __init__(self, conn: sqlite3.Connection):
@@ -99,18 +99,18 @@ class CalibratorRegistry:
         entry = self._cache.get(model_name)
         last_fit_ms = entry["fit_at_ms"] if entry else 0
 
-        # Count new resolved native predictions since last fit
+        # Count new resolved evaluation predictions since last fit
         n_new = self._conn.execute(
             "SELECT COUNT(*) as cnt FROM predictions "
-            "WHERE model_name=? AND resolution_type='native' AND resolved=1 "
-            "AND ts_resolve_at_ms > ?",
+        "WHERE model_name=? AND resolution_type='evaluation' AND resolved=1 "
+        "AND ts_resolve_at_ms > ?",
             (model_name, last_fit_ms),
         ).fetchone()[0]
 
         # Total resolved for this model
         n_total = self._conn.execute(
             "SELECT COUNT(*) as cnt FROM predictions "
-            "WHERE model_name=? AND resolution_type='native' AND resolved=1",
+            "WHERE model_name=? AND resolution_type='evaluation' AND resolved=1",
             (model_name,),
         ).fetchone()[0]
 
@@ -126,19 +126,19 @@ class CalibratorRegistry:
         return self.refit(model_name)
 
     def refit(self, model_name: str) -> bool:
-        """Refit isotonic calibration from resolved native predictions.
-
+        """Refit isotonic calibration from resolved evaluation predictions.
+        
         Returns True if refit succeeded, False if insufficient data or sklearn missing.
         """
         if not _HAS_SKLEARN:
             logger.warning("calibrator_refit: sklearn not available for %s", model_name)
             return False
 
-        # Fetch resolved native predictions with direction and correctness
+        # Fetch resolved evaluation predictions with direction and correctness
         self._conn.row_factory = sqlite3.Row
         rows = self._conn.execute(
-            "SELECT pred_proba_raw, pred_direction, prediction_correct FROM predictions "
-            "WHERE model_name=? AND resolution_type='native' AND resolved=1 "
+            "SELECT pred_proba_raw, pred_direction, prediction_correct, ts_resolve_at_ms FROM predictions "
+            "WHERE model_name=? AND resolution_type='evaluation' AND resolved=1 "
             "ORDER BY ts_resolve_at_ms",
             (model_name,),
         ).fetchall()
@@ -180,7 +180,7 @@ class CalibratorRegistry:
         y_knots = [float(v) for v in iso.y_thresholds_]
 
         # Compute hash for provenance
-        fit_at_ms = int(time.time() * 1000)
+        fit_at_ms = max(row["ts_resolve_at_ms"] for row in rows)
         map_hash = hashlib.sha256(
             json.dumps(
                 {"x": x_knots, "y": y_knots, "n": len(rows)},
@@ -216,7 +216,7 @@ class CalibratorRegistry:
         }
 
         logger.info(
-            "calibrator_refit: %s fitted with %d resolved native predictions, hash=%s",
+            "calibrator_refit: %s fitted with %d resolved evaluation predictions, hash=%s",
             model_name, len(rows), map_hash,
         )
         return True

@@ -50,7 +50,35 @@ def init_schema(conn) -> None:
 def _run_migrations(conn) -> None:
     _add_column_if_missing(conn, "model_registry", "filter_config_json", "TEXT DEFAULT '{}'")
     _add_column_if_missing(conn, "model_registry", "platform_active_json",
-                           "TEXT DEFAULT '{\"paper\":true,\"kalshi\":false,\"polymarket\":false}'")
+        "TEXT DEFAULT '{\"paper\":true,\"kalshi\":false,\"polymarket\":false}'")
+    _migrate_native_to_eval_indexes(conn)
+
+
+def _migrate_native_to_eval_indexes(conn) -> None:
+    existing = {r[0] for r in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='index'"
+    ).fetchall()}
+    if "idx_pred_native_for_decay" in existing:
+        conn.execute("DROP INDEX idx_pred_native_for_decay")
+        conn.execute(
+            "CREATE INDEX idx_pred_eval_for_decay"
+            " ON predictions(model_name, symbol, resolution_type, ts_contract_open_ms)"
+            " WHERE resolution_type = 'evaluation' AND resolved = 1"
+        )
+    if "idx_trade_native_for_decay" in existing:
+        conn.execute("DROP INDEX idx_trade_native_for_decay")
+        conn.execute(
+            "CREATE INDEX idx_trade_eval_for_decay"
+            " ON paper_trades(model_name, symbol, resolution_type, ts_contract_open_ms)"
+            " WHERE resolution_type = 'evaluation' AND resolved = 1"
+        )
+    if "idx_cal_native" in existing:
+        conn.execute("DROP INDEX idx_cal_native")
+        conn.execute(
+            "CREATE INDEX idx_cal_eval"
+            " ON calibration_outcomes(model_name, resolution_type)"
+            " WHERE resolution_type = 'evaluation'"
+        )
 
 
 def _add_column_if_missing(conn, table: str, column: str, col_type: str) -> None:
