@@ -65,6 +65,7 @@ from regime.tagger import compute_regime, RegimeTags
 from trading.metric_writers import MetricWriters
 from trading.provenance_builder import ProvenanceBuilder
 from trading.resolution_checker import ResolutionChecker
+from trading.kalshi_dispatcher import KalshiDispatcher
 
 EXCHANGE = _os.environ.get("EXCHANGE", "kalshi").lower()
 
@@ -345,6 +346,9 @@ class PaperTrader:
         # Provenance + audit-trail builder (extracted from PaperTrader D.3)
         self.provenance_builder = ProvenanceBuilder(trader=self)
 
+        # Kalshi live order dispatch (extracted from PaperTrader D.4)
+        self.kalshi_dispatcher = KalshiDispatcher(trader=self)
+
         # Boot timestamp for warmup tagging
         self._boot_ts_ms = int(time.time() * 1000)
 
@@ -616,30 +620,11 @@ class PaperTrader:
     def kalshi_dispatch_eligible(
         self, *, model_name: str, symbol: str, market_window_seconds: int,
     ) -> bool:
-        """Registry-driven Kalshi gate.
-
-        Checks self._model_meta (kalshi_dispatch_enabled, built from
-        model_registry + config fallback) and model_registry.platform_active_json.
-        """
-        meta = self._model_meta.get(model_name)
-        if meta is None:
-            return False
-        if not meta.get("kalshi_dispatch_enabled", False):
-            return False
-        if symbol != meta["symbol"]:
-            return False
-        if market_window_seconds != meta["training_horizon_seconds"]:
-            return False
-        row = self._db_conn.execute(
-            "SELECT platform_active_json FROM model_registry WHERE name=?",
-            (model_name,),
-        ).fetchone()
-        if row and row["platform_active_json"]:
-            import json as _json
-            pa = _json.loads(row["platform_active_json"])
-            if not pa.get("kalshi", False):
-                return False
-        return True
+        return self.kalshi_dispatcher.is_eligible(
+            model_name=model_name,
+            symbol=symbol,
+            market_window_seconds=market_window_seconds,
+        )
 
     def _direction_for(self, prediction_id: str) -> str:
         return self.resolution_checker.direction_for(prediction_id)
@@ -800,196 +785,21 @@ class PaperTrader:
         )
         return round(stake, 2)
 
-    async def _dispatch_kalshi_live(
-        self,
-        *,
-        symbol: str,
-        duration_sec: int,
-        boundary_ms: int,
-        pred_proba: float,
-        pred_direction: str,
-        paper_stake_usd: float = SIMULATED_STAKE_USDC,
-        features: Optional[dict] = None,
-        model_name: str = "h300",
-    ) -> None:
-        """
-        Dispatch a finalized signal to Kalshi for live execution.
+    async def _dispatch_kalshi_live(self, **kwargs) -> None:
+        return await self.kalshi_dispatcher.dispatch_live(**kwargs)
 
-        Called only on 15-minute boundaries (enforced at the call site) so
-        the model's 900s prediction window aligns exactly with the Kalshi
-        15M contract window.
-
-        All gating (kill switch, allow-list, confidence, sizing) lives in
-        KalshiLiveTrader. This method only:
-          1. Fetches the currently open KXBTC15M market.
-          2. Fetches the orderbook midpoint for the YES outcome.
-          3. Maps pred_direction → Kalshi side (up→yes, down→no).
-          4. Awaits maybe_place_order, which records to the live ledger
-             regardless of whether an order is placed.
-          5. On ZERO_CONTRACTS, retries up to 5× with 2s delays to let
-             market makers post quotes after the dead zone clears.
-
-        Errors are caught and logged so paper trading is never disrupted.
-        """
-        if self._kalshi_trader is None or self._kalshi_trader._rest is None:
-            return
-        try:
-            # Refresh calibration map if it changed on disk
-            self._kalshi_trader._calibrator.reload()
-
-            ticker = await self._resolve_kalshi_ticker_for_boundary(boundary_ms, duration_sec)
-            if ticker is None:
-                logger.info(
-                    "kalshi dispatch: no market matches boundary close_unix=%d",
-                    boundary_ms // 1000 + duration_sec,
-                )
-                return
-
-            side = "yes" if pred_direction == "up" else "no"
-            max_attempts = 5
-            for attempt in range(max_attempts):
-                ob = await self._kalshi_trader._rest.get_orderbook(ticker)
-                yes_levels = ob.get("yes") or []
-                no_levels = ob.get("no") or []
-                yes_mid = self._midpoint_from_levels(yes_levels, no_levels)
-                if yes_mid is None:
-                    if attempt < max_attempts - 1:
-                        logger.info("kalshi dispatch: empty book for %s, retry %d/%d",
-                                    ticker, attempt + 1, max_attempts)
-                        await asyncio.sleep(2)
-                        continue
-                    logger.info("kalshi dispatch: empty book for %s after %d attempts",
-                                ticker, max_attempts)
-                    return
-                # Defense: reject extreme-priced markets
-                if yes_mid < 0.05 or yes_mid > 0.95:
-                    logger.info(
-                        "kalshi dispatch: skipping extreme price yes_mid=%.4f on %s",
-                        yes_mid, ticker,
-                    )
-                    return
-
-                logger.info(
-                    "kalshi dispatch: %s %s on %s (conf=%.4f, yes_mid=%.2f, attempt=%d)",
-                    side.upper(), pred_direction, ticker, pred_proba, yes_mid, attempt + 1,
-                )
-                result = await self._kalshi_trader.maybe_place_order(
-                    symbol=symbol,
-                    duration_sec=duration_sec,
-                    boundary_ts=boundary_ms // 1000,
-                    model_p=pred_proba,
-                    side=side,
-                    ticker=ticker,
-                    market_yes_price=yes_mid,
-                    paper_stake_usd=paper_stake_usd,
-                    features=features,
-                    model_name=model_name,
-                    pred_direction=pred_direction,
-                )
-
-                # If ZERO_CONTRACTS, the market price may shift — retry
-                if result.reason == "GATED_ZERO_CONTRACTS" and attempt < max_attempts - 1:
-                    logger.info(
-                        "kalshi dispatch: ZERO_CONTRACTS on %s, retrying in 2s (%d/%d)",
-                        ticker, attempt + 1, max_attempts,
-                    )
-                    await asyncio.sleep(2)
-                    continue
-
-                # Any other result (PLACED, GATED_*, ERROR) — stop retrying
-                break
-
-        except Exception as e:
-            logger.warning("kalshi dispatch error (paper continues): %s", e)
-
-    async def _resolve_kalshi_ticker_for_boundary(self, boundary_ms: int, market_window_seconds: int = 900) -> str | None:
-        """Return the Kalshi ticker whose close_time matches the contract that
-        spans (boundary_ms, boundary_ms + market_window_seconds].
-
-        Kalshi rollover quirk (empirically measured 2026-05-03 23:14-23:15 UTC):
-          - At boundary T, the OLD contract (close=T) stays in the active list
-            for ~39 seconds AFTER T.
-          - The NEW contract (close=T+market_window_seconds) is NOT in the active list during
-            that window — neither active nor reachable via no-status-filter
-            queries.
-          - At ~T+39s, Kalshi flips: OLD disappears, NEW appears as active.
-
-        So we retry every 4 seconds for up to 60 seconds, looking for an
-        exact close_time match against (boundary_ts + market_window_seconds). Once found we
-        return the ticker and trading still has ~14 min remaining.
-        """
-        if self._kalshi_trader is None or self._kalshi_trader._rest is None:
-            return None
-        target_close_unix = boundary_ms // 1000 + market_window_seconds
-
-        from datetime import datetime
-        max_attempts = 16  # 16 × 4 sec = 64 sec total window
-        for attempt in range(max_attempts):
-            try:
-                markets = await self._kalshi_trader._rest.get_active_tickers(
-                    series_ticker=self._kalshi_trader.config.series_ticker,
-                )
-            except Exception as e:
-                logger.warning("kalshi ticker discovery failed (attempt %d): %s", attempt, e)
-                await asyncio.sleep(4)
-                continue
-
-            for m in markets or []:
-                close_iso = m.get("close_time")
-                if not close_iso:
-                    continue
-                try:
-                    close_unix = int(datetime.fromisoformat(
-                        close_iso.replace("Z", "+00:00")
-                    ).timestamp())
-                except (ValueError, TypeError):
-                    continue
-                if close_unix == target_close_unix:
-                    if attempt > 0:
-                        logger.info(
-                            "kalshi resolver: matched %s after %d retries (~%ds)",
-                            m.get("ticker"), attempt, attempt * 4,
-                        )
-                    return m.get("ticker")
-
-            # No match yet — log the gap once and keep retrying
-            if attempt == 0:
-                observed = [m.get("ticker") for m in (markets or [])[:3]]
-                logger.info(
-                    "kalshi resolver: waiting for rollover, target_close=%s, observed=%s",
-                    datetime.fromtimestamp(target_close_unix).isoformat(),
-                    observed,
-                )
-            await asyncio.sleep(4)
-
-        logger.warning(
-            "kalshi resolver: gave up after %ds, no market with close_unix=%d",
-            max_attempts * 4, target_close_unix,
+    async def _resolve_kalshi_ticker_for_boundary(
+        self, boundary_ms: int, market_window_seconds: int = 900,
+    ) -> str | None:
+        return await self.kalshi_dispatcher.resolve_ticker_for_boundary(
+            symbol="",
+            duration_sec=market_window_seconds,
+            boundary_ms=boundary_ms,
         )
-        return None
 
     @staticmethod
     def _midpoint_from_levels(yes_levels: list, no_levels: list) -> float | None:
-        """Compute YES-side midpoint from Kalshi orderbook levels.
-
-        Levels are normalised by kalshi.py to [[price_float, size_float], ...].
-        Prices are in [0, 1] (dollar fraction).
-
-        YES best bid  = max price across yes_levels with size > 0
-        YES best ask  = 1.0 - max(no_levels price) (Kalshi reciprocal)
-        Midpoint      = (yes_bid + yes_ask) / 2
-        """
-        yes_bid = max((lvl[0] for lvl in yes_levels if lvl[1] > 0), default=None)
-        no_bid = max((lvl[0] for lvl in no_levels if lvl[1] > 0), default=None)
-        if yes_bid is None and no_bid is None:
-            return None
-        if yes_bid is None:
-            assert no_bid is not None
-            return 1.0 - no_bid
-        if no_bid is None:
-            return yes_bid
-        yes_ask = 1.0 - no_bid
-        return (yes_bid + yes_ask) / 2.0
+        return KalshiDispatcher.midpoint_from_levels(yes_levels, no_levels)
 
     def _on_book_update(self, symbol: str, bids: list, asks: list) -> None:
         """Callback fired on each L2 update from WebSocket."""
