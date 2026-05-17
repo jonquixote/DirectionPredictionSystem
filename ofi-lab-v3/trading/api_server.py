@@ -490,6 +490,21 @@ async def resume(request):
     return web.json_response({"pause_trading": False})
 
 
+async def _post_reload_meta_inner(request):
+    """POST /reload_meta — re-read filter_config_json for all registered models.
+
+    Triggers an immediate reload without waiting for the next 16-boundary cycle.
+    Auth-gated (same bearer token as other mutating endpoints).
+    """
+    trader = _get_trader(request)
+    try:
+        trader._reload_model_meta()
+        return web.json_response({"status": "reloaded"})
+    except Exception as e:
+        logger.exception("reload_meta_failed: %s", e)
+        return web.json_response({"status": "error", "detail": str(e)}, status=500)
+
+
 # ── GET /status ────────────────────────────────────────────────
 
 async def get_status(request):
@@ -1293,6 +1308,9 @@ def create_api_app(trader: "PaperTrader") -> web.Application:
     app.router.add_post("/kalshi/enable", require_auth(_post_kalshi_enable_inner))
     app.router.add_post("/kalshi/disable", require_auth(_post_kalshi_disable_inner))
     app.router.add_patch("/kalshi/config", require_auth(_patch_kalshi_config_inner))
+
+    # Model meta reload (internal — triggers immediate filter_config refresh)
+    app.router.add_post("/reload_meta", require_auth(_post_reload_meta_inner))
 
     logger.info("API app created with %d routes", len(app.router.routes()))
     return app

@@ -376,6 +376,46 @@ class PaperTrader:
             return self._model_meta[model_name]
         raise KeyError(f"no metadata for model '{model_name}'")
 
+    def _reload_model_meta(self) -> None:
+        """Re-read filter_config_json for every registered model.
+
+        Called every 16 boundaries from _contract_boundary_loop, or on demand
+        via runtime API POST /reload_meta. Updates self._model_meta in place.
+        Only filter_config is updated; symbol/horizon/etc. are left unchanged
+        (those require a full restart to pick up).
+        """
+        if not getattr(self, "_db_conn", None):
+            return
+        try:
+            rows = self._db_conn.execute(
+                "SELECT name, filter_config_json FROM model_registry"
+            ).fetchall()
+        except Exception as e:
+            logger.warning("reload_model_meta SQL failed: %s", e)
+            return
+        changed = []
+        for row in rows:
+            name = row["name"] if hasattr(row, "keys") else row[0]
+            fc_json = row["filter_config_json"] if hasattr(row, "keys") else row[1]
+            if name not in self._model_meta:
+                continue
+            try:
+                new_fc = json.loads(fc_json or "{}")
+            except json.JSONDecodeError:
+                logger.warning("model %s has invalid filter_config_json — skipping", name)
+                continue
+            old_fc = self._model_meta[name].get("filter_config", {})
+            if isinstance(old_fc, str):
+                try:
+                    old_fc = json.loads(old_fc)
+                except json.JSONDecodeError:
+                    old_fc = {}
+            if new_fc != old_fc:
+                self._model_meta[name]["filter_config"] = new_fc
+                changed.append(name)
+        if changed:
+            logger.info("reloaded filter_config for %d models: %s", len(changed), changed)
+
     def _capture_policy_dict(self) -> dict:
         # provenance_builder is not yet available during early __init__
         # (called at line 256, before the builder is instantiated at ~355).
@@ -714,6 +754,17 @@ class PaperTrader:
         elapsed_ms = int(time.time() * 1000) - self._first_data_time_ms
         return elapsed_ms < MAD_WARMUP_SECONDS * 1000
 
+    def _is_model_in_warmup(self, warmup_seconds: int) -> bool:
+        """Per-model warmup check using a caller-supplied warmup duration.
+
+        Falls back to True (warmup active) when no data has arrived yet.
+        Use _is_in_warmup() for the global MAD_WARMUP_SECONDS check.
+        """
+        if self._first_data_time_ms is None:
+            return True
+        elapsed_ms = int(time.time() * 1000) - self._first_data_time_ms
+        return elapsed_ms < warmup_seconds * 1000
+
     def _compute_stake(
         self,
         model_name: str,
@@ -855,8 +906,12 @@ class PaperTrader:
                     except Exception as e:
                         logger.exception("decay_refresh_failed", extra={"err": str(e)})
 
-                # C6: Evaluate lifecycle FSM every 16 boundaries
+                # C6: Evaluate lifecycle FSM every 16 boundaries + reload model meta
                 if self._boundary_count % self._lifecycle_interval == 0:
+                    try:
+                        self._reload_model_meta()
+                    except Exception as e:
+                        logger.exception("reload_model_meta_failed", extra={"err": str(e)})
                     try:
                         transitions = evaluate_lifecycle_transitions(self._db_conn, now_ms=now_ms)
                         for t in transitions:
@@ -984,6 +1039,8 @@ class PaperTrader:
                 _active_filter_mode = "apfs" if _apfs_active else "confidence_gate"
 
                 ts_model_ran_ms = int(time.time() * 1000)
+                # Per-model warmup resolved below after _model_fc is populated.
+                # Set a provisional value (will be overridden at ~line 1042).
                 in_warmup = self._is_in_warmup()
 
                 # Compute metadata for prediction record
@@ -1041,6 +1098,10 @@ class PaperTrader:
                 effective_ct = _model_fc.get("confidence_threshold", _ct)
                 effective_ev_thresh = _model_fc.get("ev_threshold",
                     self.filters.get("ev_threshold", 0.0))
+
+                # Per-model warmup override (overrides provisional value set above)
+                effective_warmup_s = _model_fc.get("warmup_seconds", MAD_WARMUP_SECONDS)
+                in_warmup = self._is_model_in_warmup(effective_warmup_s)
 
                 filter_ctx = {
                     "prediction_id": prediction_id,
@@ -1121,174 +1182,124 @@ class PaperTrader:
                         )
                     continue
 
-                # UTC blackout: suppress H60 trades during overnight hours
-            if (model_name in H60_BLACKOUT_MODELS or meta.get("training_horizon_seconds") == 60) and utc_hour in H60_BLACKOUT_HOURS:
-                if above_threshold:
-                    self._record_compact_decision(
-                                prediction_id=prediction_id,
-                                outcome="suppressed",
-                                reason="utc_blackout",
-                                ev_estimate=None,
-                                kelly_fraction_capped=None,
-                                final_size_usdc=0.0,
-                                order_type="skipped",
-                            )
-                    logger.info(
-                        "[%s] %s: proba=%.4f dir=%s SUPPRESSED (utc_blackout %02d:00)",
-                        model_name, symbol, pred_proba, pred_direction, utc_hour,
+                # ── UTC blackout (per-model) ──────────────────────────────
+                # effective_blackout_hours: per-model override via filter_config_json,
+                # falling back to the H60-family default (already resolved above as
+                # `blackout_hours`).
+                effective_blackout_hours = _model_fc.get("blackout_hours", blackout_hours)
+                if effective_blackout_hours and utc_hour in effective_blackout_hours:
+                    if above_threshold:
+                        self._record_compact_decision(
+                            prediction_id=prediction_id,
+                            outcome="suppressed",
+                            reason="utc_blackout",
+                            ev_estimate=ev,
+                            kelly_fraction_capped=None,
+                            final_size_usdc=0.0,
+                            order_type="skipped",
+                        )
+                        logger.info(
+                            "[%s] %s: proba=%.4f dir=%s SUPPRESSED (utc_blackout %02d:00)",
+                            model_name, symbol, pred_proba, pred_direction, utc_hour,
+                        )
+                    continue
+
+                # ── Trade passes all filters — execute ───────────────────
+                if not above_threshold:
+                    logger.debug(
+                        "[%s] %s: proba=%.4f (below threshold)",
+                        model_name, symbol, pred_proba,
                     )
-                continue
+                    continue
 
-                # (Kalshi dispatch moved AFTER paper trade logic so Kalshi
-                #  trades if and only if the paper trader trades. See below.)
-
-                # ── Run filter pipeline ────────────────────────
-                rel_spread = features.get("relative_spread", None)
-                filter_reason = self._check_filters(
+                # Compute stake (Kelly or flat depending on config)
+                stake = self._compute_stake(
                     model_name=model_name,
                     pred_proba=pred_proba,
                     pred_direction=pred_direction,
                     p_market=p_market,
-                    relative_spread=rel_spread,
-                    symbol=symbol,
                 )
 
-            if filter_reason:
                 self._record_compact_decision(
                     prediction_id=prediction_id,
-                    outcome="suppressed",
-                    reason=filter_reason,
-                    ev_estimate=None,
+                    outcome="executed",
+                    reason=None,
+                    ev_estimate=ev,
                     kelly_fraction_capped=None,
-                    final_size_usdc=0.0,
-                    order_type="skipped",
+                    final_size_usdc=stake,
+                    order_type="maker",
                 )
-                logger.info(
-                    "[%s] %s: proba=%.4f dir=%s SUPPRESSED (%s)",
-                    model_name, symbol, pred_proba, pred_direction, filter_reason,
-                )
-                continue
-            else:
-                self._record_compact_decision(
-                    prediction_id=prediction_id,
-                    outcome="suppressed",
-                    reason="below_confidence",
-                    ev_estimate=None,
-                    kelly_fraction_capped=None,
-                    final_size_usdc=0.0,
-                    order_type="skipped",
-                )
-                logger.debug(
-                    "[%s] %s: proba=%.4f (below_confidence)",
-                    model_name, symbol, pred_proba,
-                )
-                continue
 
-                # ── Trade passes all filters — execute ────────
-                if above_threshold:
-                    # Compute stake (Kelly or flat depending on config)
-                    stake = self._compute_stake(
-                        model_name=model_name,
-                        pred_proba=pred_proba,
+                boundary_sec = boundary_ms // 1000
+                is_15m_boundary = (boundary_sec % 900 == 0)
+
+                for duration in CONTRACT_DURATIONS:
+                    suppressed_durs = H300_SUPPRESS_DURATIONS.get(model_name, set())
+                    suppress_reason = "contract_mismatch" if duration in suppressed_durs else None
+
+                    if duration == 900 and not is_15m_boundary and not suppress_reason:
+                        suppress_reason = "non_15m_boundary"
+
+                    # Per-duration calibration (fall back to gate-check calibrated)
+                    try:
+                        dur_cal = self.calibrators.get(model_name, symbol, duration)
+                        dur_pred_proba_calibrated = dur_cal.calibrate(pred_proba)
+                    except KeyError:
+                        dur_pred_proba_calibrated = pred_proba_calibrated
+
+                    self.sqlite_ledger.log_paper_trade(
+                        prediction_id=prediction_id,
+                        envelope=self._build_envelope(model_name, platform="paper"),
+                        symbol=symbol,
+                        market_window_seconds=duration,
+                        resolution_type="evaluation",
+                        ts_model_ran_ms=ts_model_ran_ms,
+                        ts_contract_open_ms=boundary_ms,
+                        ts_resolve_at_ms=boundary_ms + duration * 1000,
+                        pred_proba_raw=pred_proba,
+                        pred_proba_calibrated=dur_pred_proba_calibrated,
                         pred_direction=pred_direction,
+                        confidence_threshold_used=effective_ct,
+                        simulated_stake_usdc=stake,
+                        decision_outcome="executed" if not suppress_reason else "suppressed",
+                        decision_reason=suppress_reason,
+                        ev_estimate=ev,
+                        kelly_fraction_capped=None,
+                        final_size_usdc=stake,
+                        order_type=None,
+                        warmup=in_warmup,
+                        platform="paper",
                         p_market=p_market,
                     )
 
-                    # Record the compact decision for executed trade
-                    self._record_compact_decision(
-                        prediction_id=prediction_id,
-                        outcome="executed",
-                        reason=None,
-                        ev_estimate=None,
-                        kelly_fraction_capped=None,
-                        final_size_usdc=stake,
-                        order_type="maker",
-                    )
+                    if suppress_reason:
+                        continue
 
-                    boundary_sec = boundary_ms // 1000
-                    is_15m_boundary = (boundary_sec % 900 == 0)
+                    self._trade_count += 1
 
-                    for duration in CONTRACT_DURATIONS:
-                        # Check if this duration is suppressed for this model
-                        suppressed_durs = H300_SUPPRESS_DURATIONS.get(model_name, set())
-                        suppress_reason = "contract_mismatch" if duration in suppressed_durs else None
+                    # Kalshi live dispatch (only on 15-min boundaries for h300 BTC 900s)
+                    if self.kalshi_dispatch_eligible(
+                        model_name=model_name,
+                        symbol=symbol,
+                        market_window_seconds=duration,
+                    ):
+                        if not self.is_in_warmup(ts_model_ran_ms):
+                            asyncio.create_task(self._dispatch_kalshi_live(
+                                symbol=symbol,
+                                duration_sec=duration,
+                                boundary_ms=boundary_ms,
+                                pred_proba=pred_proba,
+                                pred_direction=pred_direction,
+                                paper_stake_usd=stake,
+                                features=features,
+                                model_name=model_name,
+                            ))
 
-                        # 900s trades must only occur on 15-minute boundaries
-                        # (xx:00, xx:15, xx:30, xx:45) to align with Kalshi 15M
-                        # contract windows. Suppress at xx:05, xx:10, etc.
-                        if duration == 900 and not is_15m_boundary and not suppress_reason:
-                            suppress_reason = "non_15m_boundary"
-
-                        # Per-duration calibration: each duration has its own
-                        # calibration map file.  Falls back to the gate-check
-                        # calibrated value when no per-duration file exists.
-                        try:
-                            dur_cal = self.calibrators.get(model_name, symbol, duration)
-                            dur_pred_proba_calibrated = dur_cal.calibrate(pred_proba)
-                        except KeyError:
-                            dur_pred_proba_calibrated = pred_proba_calibrated
-
-                        self.sqlite_ledger.log_paper_trade(
-                            prediction_id=prediction_id,
-                            envelope=self._build_envelope(model_name, platform="paper"),
-                            symbol=symbol,
-                            market_window_seconds=duration,
-                            resolution_type="evaluation",
-                            ts_model_ran_ms=ts_model_ran_ms,
-                            ts_contract_open_ms=boundary_ms,
-                            ts_resolve_at_ms=boundary_ms + duration * 1000,
-                            pred_proba_raw=pred_proba,
-                            pred_proba_calibrated=dur_pred_proba_calibrated,
-                            pred_direction=pred_direction,
-                            confidence_threshold_used=self.filters["confidence_threshold"],
-                            simulated_stake_usdc=stake,
-                            decision_outcome="executed" if not suppress_reason else "suppressed",
-                            decision_reason=suppress_reason,
-                            ev_estimate=None,
-                            kelly_fraction_capped=None,
-                            final_size_usdc=stake,
-                            order_type=None,
-                            warmup=in_warmup,
-                            platform="paper",
-                            p_market=p_market,
-                        )
-
-                        if suppress_reason:
-                            # Suppressed: logged but not scheduled for resolution
-                            continue
-
-                        self._trade_count += 1
-
-                        # ── Live Kalshi dispatch ────────────────────────
-                        # Dispatch to Kalshi when paper trade is placed on a
-                        # 15-min boundary for h300 BTCUSDT 900s. This ensures
-                        # Kalshi trades 1:1 with paper trades.
-                        if self.kalshi_dispatch_eligible(
-                            model_name=model_name,
-                            symbol=symbol,
-                            market_window_seconds=duration,
-                        ):
-                            if not self.is_in_warmup(ts_model_ran_ms):
-                                asyncio.create_task(self._dispatch_kalshi_live(
-                                    symbol=symbol,
-                                    duration_sec=duration,
-                                    boundary_ms=boundary_ms,
-                                    pred_proba=pred_proba,
-                                    pred_direction=pred_direction,
-                                    paper_stake_usd=stake,
-                                    features=features,
-                                    model_name=model_name,
-                                ))
-
-                    logger.info(
-                        "[%s] %s %s: proba=%.4f dir=%s TRADE",
-                        model_name, symbol, "🔼" if pred_direction == "up" else "🔽",
-                        pred_proba, pred_direction,
-                    )
-                else:
-                    logger.debug(
-                        "[%s] %s: proba=%.4f (below threshold)", model_name, symbol, pred_proba,
-                    )
+                logger.info(
+                    "[%s] %s %s: proba=%.4f dir=%s TRADE",
+                    model_name, symbol, "🔼" if pred_direction == "up" else "🔽",
+                    pred_proba, pred_direction,
+                )
 
             logger.debug("[DIAG] %s: guard_skip=%d blocked_skip=%d predicted=%d", symbol, _diag_guard_skip, _diag_blocked_skip, _diag_predicted)
 

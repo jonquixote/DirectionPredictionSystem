@@ -18,6 +18,26 @@ from trading.resolution_checker import ResolutionChecker
 # Helpers
 # ---------------------------------------------------------------------------
 
+def _run(coro):
+    """Run an async coro in a fresh event loop.
+
+    Python 3.10+ asyncio.run() closes and discards the loop without restoring
+    the thread's current-loop reference. Subsequent tests that use
+    asyncio.get_event_loop() raise RuntimeError. Mirrors the helper in
+    test_kalshi_dispatcher.py.
+    """
+    try:
+        prev = asyncio.get_event_loop()
+    except RuntimeError:
+        prev = None
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    try:
+        return loop.run_until_complete(coro)
+    finally:
+        loop.close()
+        asyncio.set_event_loop(prev)
+
 def _make_checker(
     *,
     db_conn=None,
@@ -128,7 +148,7 @@ class TestCheckPredictions:
             pending_queue=pending_queue,
         )
 
-        asyncio.get_event_loop().run_until_complete(checker.check_predictions(1_700_000_600_000))
+        _run(checker.check_predictions(1_700_000_600_000))
 
         sqlite_ledger.record_resolution.assert_called_once()
         call_kwargs = sqlite_ledger.record_resolution.call_args.kwargs
@@ -169,7 +189,7 @@ class TestCheckPredictions:
             pending_queue=pending_queue,
         )
 
-        asyncio.get_event_loop().run_until_complete(checker.check_predictions(1_700_000_600_000))
+        _run(checker.check_predictions(1_700_000_600_000))
 
         # calibrators.get() should only be called once (for 300s entry)
         calibrators.get.assert_called_once()
@@ -188,7 +208,7 @@ class TestCheckPredictions:
             sqlite_ledger=sqlite_ledger,
         )
 
-        asyncio.get_event_loop().run_until_complete(checker.check_predictions(1_700_000_600_000))
+        _run(checker.check_predictions(1_700_000_600_000))
 
         sqlite_ledger.record_resolution.assert_not_called()
 
@@ -213,7 +233,7 @@ class TestCheckPredictions:
             pending_queue=pending_queue,
         )
 
-        asyncio.get_event_loop().run_until_complete(checker.check_predictions(1_700_000_600_000))
+        _run(checker.check_predictions(1_700_000_600_000))
 
         sqlite_ledger.record_resolution.assert_not_called()
         pending_queue.remove.assert_called_once_with("pred_btc_300e")
@@ -285,7 +305,7 @@ class TestCheckTrades:
             sqlite_ledger=sqlite_ledger,
         )
 
-        asyncio.get_event_loop().run_until_complete(checker.check_trades(1_700_000_600_000))
+        _run(checker.check_trades(1_700_000_600_000))
 
         sqlite_ledger.record_trade_resolution.assert_called_once()
         call_kwargs = sqlite_ledger.record_trade_resolution.call_args.kwargs
