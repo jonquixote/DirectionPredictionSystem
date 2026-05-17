@@ -63,6 +63,7 @@ from storage.lifecycle import evaluate_lifecycle_transitions
 from execution.calibration import CalibratorRegistry
 from regime.tagger import compute_regime, RegimeTags
 from trading.metric_writers import MetricWriters
+from trading.provenance_builder import ProvenanceBuilder
 from trading.resolution_checker import ResolutionChecker
 
 EXCHANGE = _os.environ.get("EXCHANGE", "kalshi").lower()
@@ -341,6 +342,9 @@ class PaperTrader:
             registry_state=self.registry_state,
         )
 
+        # Provenance + audit-trail builder (extracted from PaperTrader D.3)
+        self.provenance_builder = ProvenanceBuilder(trader=self)
+
         # Boot timestamp for warmup tagging
         self._boot_ts_ms = int(time.time() * 1000)
 
@@ -369,56 +373,25 @@ class PaperTrader:
         raise KeyError(f"no metadata for model '{model_name}'")
 
     def _capture_policy_dict(self) -> dict:
-        """Snapshot the runtime-mutable filter/threshold/Kelly config.
-
-        Canonical input to PolicySnapshot.capture(). Any field that
-        influences a trade decision and can change at runtime must
-        appear here.
-        """
-        f = self.filters
-        return {
-            "confidence_threshold": f.get("confidence_threshold"),
-            "per_symbol_confidence": f.get("per_symbol_confidence", {}),
-            "kelly_fraction": f.get("kelly_fraction"),
-            "ev_threshold": f.get("ev_threshold", 0.0),
-            "circuit_breaker_drawdown": f.get("circuit_breaker_drawdown"),
-            "clob_divergence_min_edge": f.get("clob_divergence_min_edge"),
-            "filter_mode": f.get("filter_mode"),
-            "blackout_hours_utc": list(f.get("blackout_hours_utc", [])),
-        }
+        # provenance_builder is not yet available during early __init__
+        # (called at line 256, before the builder is instantiated at ~355).
+        # Fall back to direct filter access so __init__ ordering is preserved.
+        if not hasattr(self, "provenance_builder"):
+            f = self.filters
+            return {
+                "confidence_threshold": f.get("confidence_threshold"),
+                "per_symbol_confidence": f.get("per_symbol_confidence", {}),
+                "kelly_fraction": f.get("kelly_fraction"),
+                "ev_threshold": f.get("ev_threshold", 0.0),
+                "circuit_breaker_drawdown": f.get("circuit_breaker_drawdown"),
+                "clob_divergence_min_edge": f.get("clob_divergence_min_edge"),
+                "filter_mode": f.get("filter_mode"),
+                "blackout_hours_utc": list(f.get("blackout_hours_utc", [])),
+            }
+        return self.provenance_builder.capture_policy_dict()
 
     def _build_envelope(self, model_name: str, platform: str) -> ProvenanceEnvelope:
-        """Construct the provenance envelope for the next prediction.
-
-        Re-captures the policy snapshot (cheap; only writes a new audit row
-        if the canonical form changed) and re-hashes the active calibration
-        map for the model so any out-of-band refit flows through.
-        """
-        meta = self._get_meta(model_name)
-        art_hash = self._model_envelopes[model_name]["model_artifact_hash"]
-        fname_hash = self._model_envelopes[model_name]["feature_names_hash"]
-        policy_v, policy_h = self.policy_snapshot.capture(
-            self._capture_policy_dict(), initiated_by="prediction"
-        )
-        cal = self.calibrators.get(model_name, meta["symbol"],
-                                    meta["training_horizon_seconds"])
-        cal_map = {"method": "binmap", "bins": list(cal._bins)}
-        cal_h = calibration_map_hash(cal_map)
-        return ProvenanceEnvelope(
-            model_name=model_name,
-            model_artifact_hash=art_hash,
-            feature_names_hash=fname_hash,
-            feature_version=meta["feature_version"],
-            training_horizon_seconds=meta["training_horizon_seconds"],
-            train_window_start=meta["train_window_start"],
-            train_window_end=meta["train_window_end"],
-            train_cutoff=meta["train_cutoff"],
-            registry_load_generation=self.registry_state.current_generation(),
-            policy_config_hash=policy_h,
-            decision_policy_version=policy_v,
-            calibration_map_hash=cal_h,
-            platform=platform,
-        )
+        return self.provenance_builder.build_envelope(model_name, platform=platform)
 
     def _emit_prediction_rows(
         self,
@@ -532,11 +505,10 @@ class PaperTrader:
         final_size_usdc: Optional[float],
         order_type: Optional[str],
     ) -> None:
-        """UPDATE the prediction row with the inline compact-decision fields."""
-        self.sqlite_ledger.log_compact_decision(
+        return self.provenance_builder.record_compact_decision(
             prediction_id=prediction_id,
-            decision_outcome=outcome,
-            decision_reason=reason,
+            outcome=outcome,
+            reason=reason,
             ev_estimate=ev_estimate,
             kelly_fraction_capped=kelly_fraction_capped,
             final_size_usdc=final_size_usdc,
@@ -559,26 +531,19 @@ class PaperTrader:
         warmup: bool,
         consensus_data: Optional[dict],
     ) -> None:
-        """Adapter from v2 filter dict to FilterEval rows.
-
-        ``filter_inputs`` shape: {name: (threshold, input_value, passed)}.
-        """
-        filters = [
-            FilterEval(name=n, threshold=t, input_value=v, passed=bool(p))
-            for n, (t, v, p) in filter_inputs.items()
-        ]
-        self.decision_trace.write(
+        return self.provenance_builder.write_verbose_trace_for_v2_filters(
             prediction_id=prediction_id,
-            filters=filters,
-            kelly_raw=kelly_raw, kelly_capped=kelly_capped,
+            envelope=envelope,
+            filter_inputs=filter_inputs,
+            kelly_raw=kelly_raw,
+            kelly_capped=kelly_capped,
             bankroll_used=bankroll_used,
             per_trade_cap_usdc=per_trade_cap_usdc,
-            fee_model=fee_model, fee_amount=fee_amount,
+            fee_model=fee_model,
+            fee_amount=fee_amount,
             platform_gate=platform_gate,
-            warmup=warmup, consensus_data=consensus_data,
-            policy_config_hash=envelope.policy_config_hash,
-            calibration_map_hash=envelope.calibration_map_hash,
-            registry_load_generation=envelope.registry_load_generation,
+            warmup=warmup,
+            consensus_data=consensus_data,
         )
 
     # ── Plan B integration helpers (T26, T29, T36) ─────────────
