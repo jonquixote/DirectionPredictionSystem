@@ -94,9 +94,9 @@ PAPER_TRADING = {
         "h300": "/data/models/latest_h300/model.lgb",
     },
     "confidence_threshold": 0.55,
-    "trade_symbols": ["BTCUSDT", "SOLUSDT"],                  # ETH excluded from trades
-    "prediction_symbols": ["BTCUSDT", "ETHUSDT", "SOLUSDT"],  # ETH still logged
-    "contract_durations": [300, 900],
+    "trade_symbols": ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT"],
+    "prediction_symbols": ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT"],
+    "contract_durations": [300, 900, 1800],
     "simulated_stake_usdc": 10.00,
     "min_warmup_seconds": 120,
     "log_dir": "/data/logs",
@@ -104,6 +104,7 @@ PAPER_TRADING = {
         "BTCUSDT": [58_000, 110_000],
         "ETHUSDT": [1_400, 4_200],
         "SOLUSDT": [90, 220],
+        "XRPUSDT": [1.0, 5.0],
     },
 }
 
@@ -251,10 +252,8 @@ ENSEMBLE_SEEDS = [42, 137, 256, 512, 1024]
 
 STORAGE_DB_PATH = "/data/v3.db"
 
-# Live market windows that v3 tracks evaluation rows for. The native
-# horizon for a given model is *excluded* from this set at scheduling
-# time so a 900s model only generates evaluation rows at 300/1800/3600.
-EVALUATION_WINDOWS = [300, 900, 1800, 3600]
+# Live market windows that v3 tracks evaluation rows for.
+EVALUATION_WINDOWS = [300, 900, 1800]
 
 # Golden baseline model. Plan B enforces baseline-removal protection in
 # the registry; Plan A only references the name.

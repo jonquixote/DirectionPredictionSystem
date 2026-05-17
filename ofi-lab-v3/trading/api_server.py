@@ -501,13 +501,12 @@ async def get_status(request):
         "paused": trader.filters.get("pause_trading", False),
         "predictions_total": trader._prediction_count,
         "trades_total": trader._trade_count,
-        "pending_trade_resolutions": len(trader._pending_resolutions),
-        "pending_pred_resolutions": len(trader._pending_pred_resolutions),
+        "pending_resolutions": len(trader.pending_queue._entries) if hasattr(trader, "pending_queue") else 0,
         "running_pnl": {k: round(v, 2) for k, v in trader._running_pnl.items()},
         "models": list(trader.models.keys()),
         "symbols": {
             "prediction": list(trader.feature_computer.symbols),
-            "trade": ["BTCUSDT", "SOLUSDT"],  # from TRADE_SYMBOLS
+            "trade": list(trader.feature_computer.symbols),
         },
         "uptime_seconds": (now_ms - trader._start_time_ms) // 1000,
         "warmup_complete": not trader._is_in_warmup(),

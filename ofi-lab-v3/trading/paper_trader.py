@@ -74,11 +74,11 @@ logger = logging.getLogger("paper_trader")
 
 # ── Configuration ──────────────────────────────────────────────
 
-PREDICTION_SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]  # all symbols get predictions
-TRADE_SYMBOLS = ["BTCUSDT", "SOLUSDT"]                   # ETH excluded from trades
+PREDICTION_SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT"]
+TRADE_SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT"]
 # CONFIDENCE_THRESHOLD removed — use self.filters["confidence_threshold"] (dynamic, dashboard-controllable)
 # Legacy references point to the filters dict; see _run_predictions().
-CONTRACT_DURATIONS = [300, 900]  # seconds
+CONTRACT_DURATIONS = [300, 900, 1800]
 SIMULATED_STAKE_USDC = 10.0
 POLYMARKET_FEE_COEFFICIENT = 0.072  # crypto taker fee: fee = shares * price * 0.072 * p * (1-p)
 MIN_FEATURE_WARMUP_SECONDS = 120   # feature buffer fill
@@ -87,7 +87,7 @@ MAD_WARMUP_SECONDS = 1800          # 30 minutes for MAD normalization convergenc
 # UTC blackout: H60 models suppress paper trades during these hours
 # (predictions still logged for all models at all hours)
 H60_BLACKOUT_HOURS = set(range(21, 24)) | set(range(0, 4))  # 21:00-03:59 UTC
-H60_BLACKOUT_MODELS = {"h60", "h60_v2", "h60_v3"}  # all H60 variants
+H60_BLACKOUT_MODELS = {"h60", "h60_v2", "h60_v3"}
 
 # H300: suppress 300s contracts (5-min too short for signal to materialize)
 H300_SUPPRESS_DURATIONS = {"h300": {300}}  # model -> set of suppressed durations
@@ -269,6 +269,54 @@ class PaperTrader:
         self._regime_thresholds: dict = {}
         self._reload_regime_thresholds()
 
+        # ── Model metadata: registry-first, config fallback ────────
+        self._model_meta: dict[str, dict] = {}
+        _cfg_meta = config.PAPER_TRADING.get("model_metadata", {})
+        for name in model_paths:
+            reg = self._db_conn.execute(
+                "SELECT symbol, training_horizon_seconds, feature_version, "
+                "train_window_start, train_window_end, train_days, "
+                "platform_active_json, filter_config_json FROM model_registry WHERE name=?",
+                (name,),
+            ).fetchone()
+            if reg:
+                pa = {}
+                if reg["platform_active_json"]:
+                    try:
+                        import json as _json
+                        pa = _json.loads(reg["platform_active_json"])
+                    except Exception:
+                        pa = {}
+                fc = {}
+                if reg["filter_config_json"]:
+                    try:
+                        import json as _json
+                        fc = _json.loads(reg["filter_config_json"])
+                    except Exception:
+                        fc = {}
+                self._model_meta[name] = {
+                    "symbol": reg["symbol"],
+                    "training_horizon_seconds": reg["training_horizon_seconds"],
+                    "feature_version": reg["feature_version"] or "v3",
+                    "train_window_start": reg["train_window_start"] or "",
+                    "train_window_end": reg["train_window_end"] or "",
+                    "train_cutoff": reg["train_window_end"] or "",
+                    "kalshi_dispatch_enabled": pa.get("kalshi", False),
+                    "filter_config": fc,
+                }
+            elif name in _cfg_meta:
+                self._model_meta[name] = dict(_cfg_meta[name])
+            else:
+                self._model_meta[name] = {
+                    "symbol": "BTCUSDT",
+                    "training_horizon_seconds": 300,
+                    "feature_version": "v3",
+                    "train_window_start": "",
+                    "train_window_end": "",
+                    "train_cutoff": "",
+                    "kalshi_dispatch_enabled": False,
+                }
+
         # Compute provenance hashes for each loaded model
         self._model_envelopes: dict[str, dict] = {}
         for name, path in model_paths.items():
@@ -294,6 +342,15 @@ class PaperTrader:
             return RegimeTags(volatility="unknown", liquidity="unknown",
                               trend="unknown")
         return compute_regime(symbol, regime_features, self._regime_thresholds)
+
+    def _get_meta(self, model_name: str) -> dict:
+        if model_name in self._model_meta:
+            return self._model_meta[model_name]
+        cfg_meta = config.PAPER_TRADING.get("model_metadata", {}).get(model_name)
+        if cfg_meta:
+            self._model_meta[model_name] = dict(cfg_meta)
+            return self._model_meta[model_name]
+        raise KeyError(f"no metadata for model '{model_name}'")
 
     def _capture_policy_dict(self) -> dict:
         """Snapshot the runtime-mutable filter/threshold/Kelly config.
@@ -321,7 +378,7 @@ class PaperTrader:
         if the canonical form changed) and re-hashes the active calibration
         map for the model so any out-of-band refit flows through.
         """
-        meta = config.PAPER_TRADING["model_metadata"][model_name]
+        meta = self._get_meta(model_name)
         art_hash = self._model_envelopes[model_name]["model_artifact_hash"]
         fname_hash = self._model_envelopes[model_name]["feature_names_hash"]
         policy_v, policy_h = self.policy_snapshot.capture(
@@ -369,11 +426,11 @@ class PaperTrader:
         relative_spread: Optional[float] = None,
         regime_features: Optional[dict] = None,
     ) -> str:
-        """Insert native + evaluation prediction rows for one boundary
+        """Insert evaluation prediction rows for one boundary
         and enqueue each in the pending resolution queue. Returns the
-        native row's prediction_id.
+        canonical (300s eval) row's prediction_id.
         """
-        meta = config.PAPER_TRADING["model_metadata"][model_name]
+        meta = self._get_meta(model_name)
         horizon = meta["training_horizon_seconds"]
         rows = plan_resolution_rows(
             boundary_ms=boundary_ms,
@@ -382,7 +439,7 @@ class PaperTrader:
         )
         envelope = self._build_envelope(model_name, platform=platform)
         tags = self._tag_regime(symbol, regime_features or {})
-        native_pid = self.sqlite_ledger.log_prediction_set(
+        canonical_pid = self.sqlite_ledger.log_prediction_set(
             envelope=envelope,
             symbol=symbol,
             ts_model_ran_ms=ts_model_ran_ms,
@@ -404,9 +461,9 @@ class PaperTrader:
             regime_liquidity=tags.liquidity,
             regime_trend=tags.trend,
         )
-        # Build prediction_id for each row to enqueue. Mirror SQLiteLedger's
-        # suffix scheme: <prefix>_<window><n|e>.
-        prefix = native_pid.rsplit("_", 1)[0]
+    # Build prediction_id for each row to enqueue. Mirror SQLiteLedger's
+    # suffix scheme: <prefix>_<window>e.
+        prefix = canonical_pid.rsplit("_", 1)[0]
         for r in rows:
             suffix = f"{r.market_window_seconds}{r.resolution_type[0]}"
             pid = f"{prefix}_{suffix}"
@@ -422,13 +479,14 @@ class PaperTrader:
                 price_at_open=price_at_open,
             ))
         self.pending_queue.persist()
-        return native_pid
+        return canonical_pid
 
     async def _check_prediction_resolutions_v3(self, now_ms: int) -> None:
         """Walk the pending queue and resolve every ripe row.
 
-        Native rows update calibration_outcomes via SQLiteLedger;
-        evaluation rows do not. Each resolved row is removed from the
+        300s eval rows also feed calibration_outcomes and the
+        per-model calibrator. Other eval rows are resolved without
+        calibration feedback. Each resolved row is removed from the
         queue. The queue is persisted at the end so a crash mid-loop
         leaves the partially-resolved state recoverable.
         """
@@ -441,24 +499,30 @@ class PaperTrader:
                     entry.symbol, entry.ts_resolve_at_ms,
                 )
             except KeyError:
-                # Price not yet available for this exact ts; leave queued.
+                continue
+            check = self._db_conn.execute(
+                "SELECT 1 FROM predictions WHERE prediction_id = ?",
+                (entry.prediction_id,),
+            ).fetchone()
+            if check is None:
+                self.pending_queue.remove(entry.prediction_id)
                 continue
             result, correct = self._compute_outcome(
                 direction=self._direction_for(entry.prediction_id),
                 price_open=entry.price_at_open,
                 price_close=close_price,
             )
-            if entry.resolution_type == "native":
-                self.sqlite_ledger.record_native_resolution(
-                    prediction_id=entry.prediction_id,
-                    ts_resolved_ms=entry.ts_resolve_at_ms,
-                    price_at_open=entry.price_at_open,
-                    price_at_close=close_price,
-                    contract_result=result,
-                    prediction_correct=correct,
-                )
-                # Feed per-model calibrator (only for native, only when not
-                # warmup)
+            feed_cal = entry.market_window_seconds == 300
+            self.sqlite_ledger.record_resolution(
+                prediction_id=entry.prediction_id,
+                ts_resolved_ms=entry.ts_resolve_at_ms,
+                price_at_open=entry.price_at_open,
+                price_at_close=close_price,
+                contract_result=result,
+                prediction_correct=correct,
+                feed_calibrator=feed_cal,
+            )
+            if feed_cal:
                 row = self._db_conn.execute(
                     "SELECT pred_proba_raw, warmup, model_name, symbol,"
                     " market_window_seconds FROM predictions"
@@ -471,15 +535,6 @@ class PaperTrader:
                         row["market_window_seconds"],
                     )
                     cal.record_outcome(float(row["pred_proba_raw"]), bool(correct))
-            else:
-                self.sqlite_ledger.record_evaluation_resolution(
-                    prediction_id=entry.prediction_id,
-                    ts_resolved_ms=entry.ts_resolve_at_ms,
-                    price_at_open=entry.price_at_open,
-                    price_at_close=close_price,
-                    contract_result=result,
-                    prediction_correct=correct,
-                )
             self.pending_queue.remove(entry.prediction_id)
         self.pending_queue.persist()
 
@@ -672,7 +727,7 @@ class PaperTrader:
         triples = self._db_conn.execute(
             "SELECT DISTINCT model_name, symbol, market_window_seconds"
             " FROM paper_trades"
-            " WHERE resolution_type = 'native' AND resolved = 1"
+            " WHERE resolution_type = 'evaluation' AND resolved = 1"
             "   AND warmup = 0"
         ).fetchall()
         for t in triples:
@@ -684,7 +739,7 @@ class PaperTrader:
                 " prediction_correct"
                 " FROM paper_trades"
                 " WHERE model_name = ? AND symbol = ? AND market_window_seconds = ?"
-                "   AND resolution_type = 'native' AND resolved = 1 AND warmup = 0"
+        " AND resolution_type = 'evaluation' AND resolved = 1 AND warmup = 0"
                 " ORDER BY ts_contract_open_ms DESC LIMIT ?",
                 (model_name, symbol, window, window_size),
             ).fetchall()
@@ -752,10 +807,10 @@ class PaperTrader:
     ) -> bool:
         """Registry-driven Kalshi gate.
 
-        Checks both config.PAPER_TRADING["model_metadata"] (kalshi_dispatch_enabled)
-        and model_registry.platform_active_json (kalshi must be true).
+        Checks self._model_meta (kalshi_dispatch_enabled, built from
+        model_registry + config fallback) and model_registry.platform_active_json.
         """
-        meta = config.PAPER_TRADING["model_metadata"].get(model_name)
+        meta = self._model_meta.get(model_name)
         if meta is None:
             return False
         if not meta.get("kalshi_dispatch_enabled", False):
@@ -1250,15 +1305,18 @@ class PaperTrader:
                 except Exception as e:
                     logger.warning("p_market query failed for %s: %s", symbol, e)
 
+            _diag_guard_skip = 0
+            _diag_blocked_skip = 0
+            _diag_predicted = 0
+
             # ── Step 6: compute blocked models via ModelSelector ──
             blocked_models: set = set()
             try:
                 from trading.model_selector import ModelSelector
                 selector = ModelSelector(self._db_conn)
-                # Group candidates by (symbol, horizon)
                 _candidates_by_sh: dict = {}
                 for mn in self.models:
-                    mm = config.PAPER_TRADING["model_metadata"].get(mn, {})
+                    mm = self._model_meta.get(mn, {})
                     ms = mm.get("symbol", symbol)
                     mh = mm.get("training_horizon_seconds", 300)
                     if ms == symbol:
@@ -1266,16 +1324,19 @@ class PaperTrader:
                 for (s, h), cands in _candidates_by_sh.items():
                     sel = selector.select(s, h, cands)
                     blocked_models.update(sel.blocked)
+                logger.debug("[DIAG] %s: sh_groups=%d blocked=%d total_models=%d", symbol, len(_candidates_by_sh), len(blocked_models), len(self.models))
             except Exception as e:
-                logger.debug("ModelSelector not available, skipping: %s", e)
+                logger.debug("[DIAG] %s: ModelSelector failed: %s", symbol, e)
 
-            # Score with each model
             for model_name, model in self.models.items():
-                meta = config.PAPER_TRADING["model_metadata"][model_name]
+                meta = self._get_meta(model_name)
 
-                # Step 6: skip models blocked by model_selection strategy
+                if meta.get("symbol") != symbol:
+                    _diag_guard_skip += 1
+                    continue
+
                 if model_name in blocked_models:
-                    logger.debug("[%s] blocked by model_selection strategy", model_name)
+                    _diag_blocked_skip += 1
                     continue
 
                 features = {col: bar.get(col, 0.0) for col in self.feature_names[model_name]}
@@ -1341,6 +1402,7 @@ class PaperTrader:
                     regime_features=features,
                 )
                 self._prediction_count += 1
+                _diag_predicted += 1
 
                 # C3: Wire _evaluate_paper_filters to gate trade emission
                 calibrated_p = max(pred_proba_calibrated, 1 - pred_proba_calibrated)
@@ -1353,7 +1415,7 @@ class PaperTrader:
                         stake=SIMULATED_STAKE_USDC,
                     )
                     ev = ev_result.ev
-                blackout_hours = list(H60_BLACKOUT_HOURS) if model_name in H60_BLACKOUT_MODELS else []
+                blackout_hours = list(H60_BLACKOUT_HOURS) if (model_name in H60_BLACKOUT_MODELS or meta.get("training_horizon_seconds") == 60) else []
                 book_age = (ts_model_ran_ms - bar.get("ts_ms", ts_model_ran_ms)) / 1000.0
 
                 # ── Step 5: resolve per-model filter_config overrides ──
@@ -1444,47 +1506,22 @@ class PaperTrader:
                     continue
 
                 # UTC blackout: suppress H60 trades during overnight hours
-                if model_name in H60_BLACKOUT_MODELS and utc_hour in H60_BLACKOUT_HOURS:
-                    if above_threshold:
-                        # Log the suppression to the ledger so outcome is still tracked
-                        self.sqlite_ledger.log_paper_trade(
-                            prediction_id=prediction_id,
-                            envelope=self._build_envelope(model_name, platform="paper"),
-                            symbol=symbol,
-                            market_window_seconds=meta["training_horizon_seconds"],  # native horizon
-                            resolution_type="native",
-                            ts_model_ran_ms=ts_model_ran_ms,
-                            ts_contract_open_ms=boundary_ms,
-                            ts_resolve_at_ms=boundary_ms + meta["training_horizon_seconds"] * 1000,
-                            pred_proba_raw=pred_proba,
-                            pred_proba_calibrated=pred_proba,
-                            pred_direction=pred_direction,
-                            confidence_threshold_used=self.filters["confidence_threshold"],
-                            simulated_stake_usdc=SIMULATED_STAKE_USDC,
-                            decision_outcome="suppressed",
-                            decision_reason="utc_blackout",
-                            ev_estimate=None,
-                            kelly_fraction_capped=None,
-                            final_size_usdc=SIMULATED_STAKE_USDC,
-                            order_type=None,
-                            warmup=in_warmup,
-                            platform="paper",
-                            p_market=p_market,
-                        )
-                        self._record_compact_decision(
-                            prediction_id=prediction_id,
-                            outcome="suppressed",
-                            reason="utc_blackout",
-                            ev_estimate=None,
-                            kelly_fraction_capped=None,
-                            final_size_usdc=0.0,
-                            order_type="skipped",
-                        )
-                        logger.info(
-                            "[%s] %s: proba=%.4f dir=%s SUPPRESSED (utc_blackout %02d:00)",
-                            model_name, symbol, pred_proba, pred_direction, utc_hour,
-                        )
-                    continue
+            if (model_name in H60_BLACKOUT_MODELS or meta.get("training_horizon_seconds") == 60) and utc_hour in H60_BLACKOUT_HOURS:
+                if above_threshold:
+                    self._record_compact_decision(
+                                prediction_id=prediction_id,
+                                outcome="suppressed",
+                                reason="utc_blackout",
+                                ev_estimate=None,
+                                kelly_fraction_capped=None,
+                                final_size_usdc=0.0,
+                                order_type="skipped",
+                            )
+                    logger.info(
+                        "[%s] %s: proba=%.4f dir=%s SUPPRESSED (utc_blackout %02d:00)",
+                        model_name, symbol, pred_proba, pred_direction, utc_hour,
+                    )
+                continue
 
                 # (Kalshi dispatch moved AFTER paper trade logic so Kalshi
                 #  trades if and only if the paper trader trades. See below.)
@@ -1500,62 +1537,36 @@ class PaperTrader:
                     symbol=symbol,
                 )
 
-                if filter_reason:
-                    # Filter fired — log the suppressed trade for analysis, don't schedule resolution
-                    if filter_reason != "below_confidence":
-                        # Only log a trade entry for non-confidence filters
-                        # (below_confidence means we wouldn't have traded anyway)
-                        self.sqlite_ledger.log_paper_trade(
-                            prediction_id=prediction_id,
-                            envelope=self._build_envelope(model_name, platform="paper"),
-                            symbol=symbol,
-                            market_window_seconds=meta["training_horizon_seconds"],  # native horizon
-                            resolution_type="native",
-                            ts_model_ran_ms=ts_model_ran_ms,
-                            ts_contract_open_ms=boundary_ms,
-                            ts_resolve_at_ms=boundary_ms + meta["training_horizon_seconds"] * 1000,
-                            pred_proba_raw=pred_proba,
-                            pred_proba_calibrated=pred_proba,
-                            pred_direction=pred_direction,
-                            confidence_threshold_used=self.filters["confidence_threshold"],
-                            simulated_stake_usdc=SIMULATED_STAKE_USDC,
-                            decision_outcome="suppressed",
-                            decision_reason=filter_reason,
-                            ev_estimate=None,
-                            kelly_fraction_capped=None,
-                            final_size_usdc=SIMULATED_STAKE_USDC,
-                            order_type=None,
-                            warmup=in_warmup,
-                            platform="paper",
-                            p_market=p_market,
-                        )
-                        self._record_compact_decision(
-                            prediction_id=prediction_id,
-                            outcome="suppressed",
-                            reason=filter_reason,
-                            ev_estimate=None,
-                            kelly_fraction_capped=None,
-                            final_size_usdc=0.0,
-                            order_type="skipped",
-                        )
-                        logger.info(
-                            "[%s] %s: proba=%.4f dir=%s SUPPRESSED (%s)",
-                            model_name, symbol, pred_proba, pred_direction, filter_reason,
-                        )
-                    else:
-                        self._record_compact_decision(
-                            prediction_id=prediction_id,
-                            outcome="suppressed",
-                            reason="below_confidence",
-                            ev_estimate=None,
-                            kelly_fraction_capped=None,
-                            final_size_usdc=0.0,
-                            order_type="skipped",
-                        )
-                        logger.debug(
-                            "[%s] %s: proba=%.4f (below_confidence)", model_name, symbol, pred_proba,
-                        )
-                    continue
+            if filter_reason:
+                self._record_compact_decision(
+                    prediction_id=prediction_id,
+                    outcome="suppressed",
+                    reason=filter_reason,
+                    ev_estimate=None,
+                    kelly_fraction_capped=None,
+                    final_size_usdc=0.0,
+                    order_type="skipped",
+                )
+                logger.info(
+                    "[%s] %s: proba=%.4f dir=%s SUPPRESSED (%s)",
+                    model_name, symbol, pred_proba, pred_direction, filter_reason,
+                )
+                continue
+            else:
+                self._record_compact_decision(
+                    prediction_id=prediction_id,
+                    outcome="suppressed",
+                    reason="below_confidence",
+                    ev_estimate=None,
+                    kelly_fraction_capped=None,
+                    final_size_usdc=0.0,
+                    order_type="skipped",
+                )
+                logger.debug(
+                    "[%s] %s: proba=%.4f (below_confidence)",
+                    model_name, symbol, pred_proba,
+                )
+                continue
 
                 # ── Trade passes all filters — execute ────────
                 if above_threshold:
@@ -1596,8 +1607,8 @@ class PaperTrader:
                             prediction_id=prediction_id,
                             envelope=self._build_envelope(model_name, platform="paper"),
                             symbol=symbol,
-                            market_window_seconds=meta["training_horizon_seconds"],  # native horizon
-                            resolution_type="native",
+            market_window_seconds=duration,
+            resolution_type="evaluation",
                             ts_model_ran_ms=ts_model_ran_ms,
                             ts_contract_open_ms=boundary_ms,
                             ts_resolve_at_ms=boundary_ms + duration * 1000,
@@ -1654,6 +1665,8 @@ class PaperTrader:
                         "[%s] %s: proba=%.4f (below threshold)", model_name, symbol, pred_proba,
                     )
 
+            logger.debug("[DIAG] %s: guard_skip=%d blocked_skip=%d predicted=%d", symbol, _diag_guard_skip, _diag_blocked_skip, _diag_predicted)
+
         # C5: Record overlap scores for the boundary
         try:
             if per_boundary_scores:
@@ -1671,6 +1684,9 @@ class PaperTrader:
             datetime.fromtimestamp(boundary_ms / 1000, tz=timezone.utc).strftime("%H:%M"),
             self._prediction_count, self._trade_count,
         )
+        if self._model_meta:
+            _first_k, _first_v = next(iter(self._model_meta.items()))
+            logger.debug("[DIAG] meta_sample: %s=%s", _first_k, _first_v)
 
 
     def _check_mid_price_range(self, symbol: str, mid_price: float) -> None:
@@ -1757,14 +1773,14 @@ def main():
     parser.add_argument("--log-dir", type=str, default="/data/logs",
                         help="Log/ledger directory")
     parser.add_argument("--h60-model", type=str,
-                        default="/data/models/latest_h60/model.lgb",
-                        help="Path to H=60 model")
+                        default=None,
+                        help="Path to H=60 model (omit for fleet-mode)")
     parser.add_argument("--h60-v3-model", type=str,
-                        default="",
+                        default=None,
                         help="Path to H=60 V3 (debiased with mid_price_dev_30d) model.")
     parser.add_argument("--h300-model", type=str,
-                        default="/data/models/latest_h300/model.lgb",
-                        help="Path to H=300 model")
+                        default=None,
+                        help="Path to H=300 model (omit for fleet-mode)")
     parser.add_argument("--features-dir", type=str, default="/data/features_v3",
                         help="Path to features_v3 parquets for EWM preload")
 

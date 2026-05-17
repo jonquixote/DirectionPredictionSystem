@@ -72,7 +72,7 @@ def backfill_calibration(db_path: str, lookback_days: int, n_bins: int) -> None:
                 FROM predictions
                 WHERE model_name = ?
                     AND resolved = 1
-                    AND resolution_type = 'native'
+                    AND resolution_type = 'evaluation'
                     AND warmup = 0
                     AND ts_contract_open_ms >= (
                         CAST(strftime('%s', 'now') AS INTEGER) * 1000
