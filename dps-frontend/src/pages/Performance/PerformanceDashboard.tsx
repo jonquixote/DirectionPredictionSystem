@@ -111,16 +111,14 @@ export const PerformanceDashboard = () => {
             <p className="text-[var(--color-text-muted)] text-sm mt-1">Core accuracy, edge, and risk metrics across your fleet.</p>
          </div>
 
-         <div className="flex items-center space-x-3 bg-[var(--color-surface)] border border-[var(--color-border)] rounded-lg p-1.5 shadow-sm">
-            {['All', 'H60_V1', 'H60_V3', 'H300'].map(m => (
-               <button 
-                  key={m}
-                  onClick={() => setActiveModel(m)}
-                  className={`px-4 py-1.5 text-sm font-medium rounded-md transition-all ${activeModel === m ? 'bg-[var(--color-primary)] text-black shadow-sm' : 'text-[var(--color-text-muted)] hover:text-[var(--color-text)] hover:bg-[var(--color-surface-hover)]'}`}
-               >
-                 {m.replace('_', ' ')}
-               </button>
-            ))}
+<div className="flex items-center space-x-3 bg-[var(--color-surface)] border border-[var(--color-border)] rounded-lg p-1.5 shadow-sm">
+<select
+  value={activeModel}
+  onChange={(e) => setActiveModel(e.target.value)}
+  className="bg-[var(--color-surface-offset)] border border-[var(--color-border)] rounded text-sm px-3 py-1.5 focus:outline-none focus:border-[var(--color-primary)] hover:bg-[var(--color-surface-dynamic)] outline-none min-w-[120px]"
+>
+  <option value="All">All Models</option>
+</select>
          </div>
       </div>
 
@@ -288,7 +286,7 @@ export const PerformanceDashboard = () => {
                 <div key={sym} className={`bg-[var(--color-surface)] border ${sym === 'BTC' ? 'border-[var(--color-orange)] shadow-[0_0_15px_rgba(251,146,60,0.1)]' : 'border-[var(--color-border)]'} rounded-xl p-6 shadow-sm`}>
                    <div className="flex justify-between items-center mb-6">
                       <div className="flex items-center">
-                         <div className={`w-8 h-8 rounded-full flex items-center justify-center font-bold text-xs ${sym === 'BTC' ? 'bg-[#f7931a]/20 text-[#f7931a]' : sym === 'ETH' ? 'bg-[#627eea]/20 text-[#627eea]' : 'bg-[#14f195]/20 text-[#14f195]'}`}>
+                         <div className={`w-8 h-8 rounded-full flex items-center justify-center font-bold text-xs ${sym === 'BTC' ? 'bg-[#f7931a]/20 text-[#f7931a]' : sym === 'ETH' ? 'bg-[#627eea]/20 text-[#627eea]' : sym === 'SOL' ? 'bg-[#14f195]/20 text-[#14f195]' : 'bg-[var(--color-success)]/20 text-[var(--color-success)]'}`}>
                             {sym}
                          </div>
                          <h3 className="ml-3 font-semibold text-lg">{sym}</h3>
@@ -364,11 +362,16 @@ export const PerformanceDashboard = () => {
                         '300s': (allSummaries.find(s => s.symbol === 'ETHUSDT' && s.contract_duration === '300')?.accuracy || 0) * 100, 
                         '900s': (allSummaries.find(s => s.symbol === 'ETHUSDT' && s.contract_duration === '900')?.accuracy || 0) * 100 
                      },
-                     { 
-                        name: 'SOL', 
-                        '300s': (allSummaries.find(s => s.symbol === 'SOLUSDT' && s.contract_duration === '300')?.accuracy || 0) * 100, 
-                        '900s': (allSummaries.find(s => s.symbol === 'SOLUSDT' && s.contract_duration === '900')?.accuracy || 0) * 100 
-                     },
+{
+  name: 'SOL',
+  '300s': (allSummaries.find(s => s.symbol === 'SOLUSDT' && s.contract_duration === '300')?.accuracy || 0) * 100,
+  '900s': (allSummaries.find(s => s.symbol === 'SOLUSDT' && s.contract_duration === '900')?.accuracy || 0) * 100
+},
+{
+  name: 'XRP',
+  '300s': (allSummaries.find(s => s.symbol === 'XRPUSDT' && s.contract_duration === '300')?.accuracy || 0) * 100,
+  '900s': (allSummaries.find(s => s.symbol === 'XRPUSDT' && s.contract_duration === '900')?.accuracy || 0) * 100
+},
                   ].filter(d => d['300s'] > 0 || d['900s'] > 0)} margin={{ top: 20, right: 30, left: 0, bottom: 5 }}>
                      <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="var(--color-border)" opacity={0.3} />
                      <XAxis dataKey="name" tick={{fill: 'var(--color-text-faint)'}} axisLine={false} tickLine={false} />

@@ -1,8 +1,8 @@
-export type ModelVersion = 'h60_v1' | 'h60_v3' | 'h300';
-export type Symbol = 'BTCUSDT' | 'SOLUSDT' | 'ETHUSDT';
+export type ModelVersion = string;
+export type Symbol = 'BTCUSDT' | 'SOLUSDT' | 'ETHUSDT' | 'XRPUSDT';
 export type Direction = 'up' | 'down';
 export type Outcome = 'correct' | 'incorrect' | 'unresolved';
-export type ContractDuration = 300 | 900;
+export type ContractDuration = 300 | 900 | 1800;
 export type SuppressedReason = 'contract_mismatch' | 'utc_blackout' | null;
 export type AlertSeverity = 'INFO' | 'WARN' | 'CRITICAL';
 export type AlertType = 'GATE_STATUS_CHANGE' | 'NE_T_DAILY' | 'NE_T_NEGATIVE' | 'ACCURACY_ALERT' | 'COVERAGE_DROP' | 'FEATURE_DRIFT' | 'MODEL_AGREEMENT_FLIP' | 'P_MARKET_ANOMALY' | 'API_FAILURE' | 'SUPPRESSION_EFFECTIVENESS';

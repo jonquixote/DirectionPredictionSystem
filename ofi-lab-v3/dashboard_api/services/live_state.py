@@ -85,10 +85,11 @@ class LiveState:
         """Recompute derived metrics from current data."""
         now_ms = int(time.time() * 1000)
         one_hour_ago = now_ms - 3_600_000
+        active_models = list(store.model_metadata.keys())
 
         # Predictions per hour
         cls.predictions_per_hour = {}
-        for model in ["h60", "h300", "h60_v3"]:
+        for model in active_models:
             recent = [
                 p for p in store.predictions
                 if p.get("model") == model
@@ -99,7 +100,7 @@ class LiveState:
 
         # Trades per hour (non-suppressed)
         cls.trades_per_hour = {}
-        for model in ["h60", "h300", "h60_v3"]:
+        for model in active_models:
             recent = [
                 t for t in store.trades
                 if t.get("model") == model
@@ -113,7 +114,7 @@ class LiveState:
 
         # Gate status per model
         cls.gate_status = {}
-        for model in ["h60", "h300", "h60_v3"]:
+        for model in active_models:
             resolved = store.get_resolved_trades(model=model)
             resolved.sort(key=lambda t: t.get("ts_model_ran_ms", 0))
             outcomes = [t.get("prediction_correct", False) for t in resolved]
@@ -149,10 +150,11 @@ class LiveState:
         """Return JSON-serializable snapshot for /api/status and WS push."""
         store = get_store()
         now_ms = int(time.time() * 1000)
+        active_models = list(store.model_metadata.keys())
 
         # Last prediction per model
         last_pred_per_model = {}
-        for model in ["h60", "h300", "h60_v3"]:
+        for model in active_models:
             model_preds = [
                 p for p in store.predictions
                 if p.get("model") == model and not p.get("warmup", False)
@@ -165,7 +167,7 @@ class LiveState:
 
         # Container status (approximate from prediction timing)
         containers = []
-        for model in ["h60", "h300", "h60_v3"]:
+        for model in active_models:
             last_ms = last_pred_per_model.get(model)
             age = (now_ms - last_ms) / 1000 if last_ms else None
             containers.append({

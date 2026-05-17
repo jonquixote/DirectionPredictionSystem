@@ -21,11 +21,11 @@ async def performance_summary(
     """Aggregated KPI metrics per model×symbol."""
     store = get_store()
     models = [model] if model else ["h60", "h300", "h60_v3"]
-    symbols = [symbol] if symbol else ["BTCUSDT", "SOLUSDT", "ETHUSDT", "ALL"]
+    symbols = [symbol] if symbol else ["BTCUSDT", "SOLUSDT", "ETHUSDT", "XRPUSDT", "ALL"]
 
     summaries = []
     # Base durations and ALL
-    contract_durations = ["ALL", 300, 900]
+    contract_durations = ["ALL", 300, 900, 1800]
     
     for m in models:
         for s in symbols:
@@ -501,7 +501,7 @@ async def cross_symbol_correlation(
             windows[window] = {}
         windows[window][sym] = correct
 
-    symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
+    symbols = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT"]
     pairs = list(combinations(symbols, 2))
     
     results = []

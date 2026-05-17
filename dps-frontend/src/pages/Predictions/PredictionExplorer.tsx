@@ -11,10 +11,11 @@ import { endpoints } from '../../api/endpoints';
 // Utility Badges
 const SymbolBadge = ({ symbol }: { symbol: string }) => {
   const colors: any = {
-    'BTCUSDT': 'bg-[var(--color-primary)]/10 text-[var(--color-primary)] border-[var(--color-primary)]/20',
-    'SOLUSDT': 'bg-[var(--color-purple)]/10 text-[var(--color-purple)] border-[var(--color-purple)]/20',
-    'ETHUSDT': 'bg-[var(--color-blue)]/10 text-[var(--color-blue)] border-[var(--color-blue)]/20',
-  };
+  'BTCUSDT': 'bg-[var(--color-primary)]/10 text-[var(--color-primary)] border-[var(--color-primary)]/20',
+  'SOLUSDT': 'bg-[var(--color-purple)]/10 text-[var(--color-purple)] border-[var(--color-purple)]/20',
+  'ETHUSDT': 'bg-[var(--color-blue)]/10 text-[var(--color-blue)] border-[var(--color-blue)]/20',
+  'XRPUSDT': 'bg-[var(--color-success)]/10 text-[var(--color-success)] border-[var(--color-success)]/20',
+};
   return <span className={`px-2 py-0.5 rounded text-xs font-mono border ${colors[symbol] || colors['BTCUSDT']}`}>{symbol.replace('USDT', '')}</span>
 };
 
@@ -155,16 +156,14 @@ export const PredictionExplorer = () => {
           </div>
           <div className="flex flex-wrap gap-3">
              <select className="bg-[var(--color-surface-offset)] border border-[var(--color-border)] rounded text-sm px-3 py-1.5 focus:outline-none focus:border-[var(--color-primary)] hover:bg-[var(--color-surface-dynamic)] outline-none min-w-[120px]">
-                <option>Model: All</option>
-                <option>H60 V1</option>
-                <option>H60 V3</option>
-                <option>H300</option>
+<option>Model: All</option>
              </select>
              <select className="bg-[var(--color-surface-offset)] border border-[var(--color-border)] rounded text-sm px-3 py-1.5 focus:outline-none focus:border-[var(--color-primary)] hover:bg-[var(--color-surface-dynamic)] outline-none min-w-[120px]">
-                <option>Symbol: All</option>
-                <option>BTC</option>
-                <option>SOL</option>
-                <option>ETH</option>
+<option>Symbol: All</option>
+<option>BTC</option>
+<option>SOL</option>
+<option>ETH</option>
+<option>XRP</option>
              </select>
              <select className="bg-[var(--color-surface-offset)] border border-[var(--color-border)] rounded text-sm px-3 py-1.5 focus:outline-none focus:border-[var(--color-primary)] hover:bg-[var(--color-surface-dynamic)] outline-none min-w-[120px]">
                 <option>Time: Last 24h</option>

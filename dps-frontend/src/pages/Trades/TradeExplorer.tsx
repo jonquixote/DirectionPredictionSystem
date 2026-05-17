@@ -9,10 +9,11 @@ import { endpoints } from '../../api/endpoints';
 // Utility Badges (Shared with Predictions theoretically, but kept here for self-containment)
 const SymbolBadge = ({ symbol }: { symbol: string }) => {
   const colors: any = {
-    'BTCUSDT': 'bg-[var(--color-primary)]/10 text-[var(--color-primary)] border-[var(--color-primary)]/20',
-    'SOLUSDT': 'bg-[var(--color-purple)]/10 text-[var(--color-purple)] border-[var(--color-purple)]/20',
-    'ETHUSDT': 'bg-[var(--color-blue)]/10 text-[var(--color-blue)] border-[var(--color-blue)]/20',
-  };
+  'BTCUSDT': 'bg-[var(--color-primary)]/10 text-[var(--color-primary)] border-[var(--color-primary)]/20',
+  'SOLUSDT': 'bg-[var(--color-purple)]/10 text-[var(--color-purple)] border-[var(--color-purple)]/20',
+  'ETHUSDT': 'bg-[var(--color-blue)]/10 text-[var(--color-blue)] border-[var(--color-blue)]/20',
+  'XRPUSDT': 'bg-[var(--color-success)]/10 text-[var(--color-success)] border-[var(--color-success)]/20',
+};
   return <span className={`px-2 py-0.5 rounded text-xs font-mono border shadow-[inset_0_1px_0_rgba(255,255,255,0.05)] ${colors[symbol] || colors['BTCUSDT']}`}>{symbol.replace('USDT', '')}</span>
 };
 
@@ -154,9 +155,10 @@ export const TradeExplorer = () => {
                 <option>Symbol: All</option>
              </select>
              <select className="bg-[var(--color-surface-offset)] border border-[var(--color-border)] rounded text-xs px-2.5 py-1.5 focus:outline-none hover:bg-[var(--color-surface-dynamic)] outline-none min-w-[100px]">
-                <option>Duration: All</option>
-                <option>300s</option>
-                <option>900s</option>
+<option>Duration: All</option>
+<option>300s</option>
+<option>900s</option>
+<option>1800s</option>
              </select>
              <select className="bg-[var(--color-surface-offset)] border border-[var(--color-border)] rounded text-xs px-2.5 py-1.5 focus:outline-none hover:bg-[var(--color-surface-dynamic)] outline-none min-w-[110px]">
                 <option>Outcome: All</option>
