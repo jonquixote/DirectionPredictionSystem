@@ -133,7 +133,15 @@ def _get_trader(request) -> "PaperTrader":
 # requests. Rotate by changing the env var and restarting.
 
 def _expected_token() -> str | None:
-    return os.environ.get("DASHBOARD_PASSWORD") or None
+    # Accept either env name. Deployments set DASHBOARD_PASS in /etc/v3/env;
+    # DASHBOARD_PASSWORD is the documented name. Keep both as accepted secrets
+    # so dashboard_api can call back via Bearer header without env-name
+    # gymnastics.
+    return (
+        os.environ.get("DASHBOARD_PASSWORD")
+        or os.environ.get("DASHBOARD_PASS")
+        or None
+    )
 
 
 def require_auth(handler):
