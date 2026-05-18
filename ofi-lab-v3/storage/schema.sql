@@ -430,3 +430,13 @@ CREATE TABLE IF NOT EXISTS model_selection (
     committee_config_json TEXT DEFAULT '{}',
     PRIMARY KEY (symbol, market_window_seconds)
 );
+
+-- =========================================================================
+-- dashboard_settings: server-persisted operator/dashboard preferences.
+-- =========================================================================
+CREATE TABLE IF NOT EXISTS dashboard_settings (
+    key         TEXT PRIMARY KEY,
+    value       TEXT NOT NULL,  -- JSON-encoded
+    updated_at  TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    updated_by  TEXT
+);

@@ -20,7 +20,7 @@ from routers import (
     status, predictions, trades, performance,
     parquet, features, models_registry, alerts, logs,
     models_admin, overlap, kill_switch, audit, admin,
-    regime, calibration, baseline,
+    regime, calibration, baseline, dashboard_settings,
 )
 try:
     from routers import training as training_router
@@ -99,6 +99,7 @@ _routers = [
     audit.router,
     admin.router,
     baseline.router,  # cutover baseline — gates predictions page
+    dashboard_settings.router,
 ]
 if _has_training:
     _routers.append(training_router.router)

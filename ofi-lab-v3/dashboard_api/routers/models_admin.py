@@ -10,6 +10,7 @@ Provides:
   POST /api/models/{name}/reload         (confirmation token required)
   POST /api/models/{name}/rollback       (confirmation token required)
   POST /api/models/{name}/filter         (confirmation token if live_eligible=1)
+  POST /api/models/{name}/platform       (confirmation token if live_eligible=1 and enabling live platform)
 """
 from __future__ import annotations
 
@@ -405,6 +406,97 @@ def _trigger_reload_meta() -> bool:
     except Exception as exc:
         logger.warning("Could not reach %s: %s — auto-refresh will pick it up", _TRADER_RELOAD_URL, exc)
         return False
+
+
+# ── Platform config ────────────────────────────────────────────
+
+class PlatformRequest(BaseModel):
+    paper: Optional[bool] = None
+    kalshi: Optional[bool] = None
+    polymarket: Optional[bool] = None
+    by: str = "admin"
+    reason: Optional[str] = None
+    confirmation_token: Optional[str] = None
+
+
+class PlatformResponse(BaseModel):
+    name: str
+    platform_active: dict
+    applied_at: str
+    trader_reloaded: bool
+
+
+@router.post("/{name}/platform", response_model=PlatformResponse)
+def set_platform(name: str, req: PlatformRequest):
+    from dashboard_api.services.admin_auth import (
+        verify_confirmation_token, ConfirmationError,
+    )
+
+    # 422 if no flags supplied
+    if req.paper is None and req.kalshi is None and req.polymarket is None:
+        raise HTTPException(422, "at least one of paper/kalshi/polymarket must be supplied")
+
+    conn = _get_conn()
+    row = conn.execute(
+        "SELECT name, live_eligible, platform_active_json FROM model_registry WHERE name=?",
+        (name,),
+    ).fetchone()
+    if not row:
+        raise HTTPException(404, f"model {name!r} not found")
+
+    try:
+        current = json.loads(row["platform_active_json"] or "{}")
+    except json.JSONDecodeError:
+        current = {}
+
+    # Determine if we're enabling a live platform (False→True) on a live-eligible model
+    needs_token = False
+    if row["live_eligible"]:
+        for flag_name, flag_val in [("kalshi", req.kalshi), ("polymarket", req.polymarket)]:
+            if flag_val is True and not current.get(flag_name, False):
+                needs_token = True
+                break
+
+    if needs_token:
+        if not req.confirmation_token:
+            raise HTTPException(403, "confirmation_token required when enabling live platform on live-eligible model")
+        try:
+            verify_confirmation_token(
+                req.confirmation_token, action="set_platform", target=name
+            )
+        except ConfirmationError as e:
+            raise HTTPException(403, f"confirmation failed: {e}")
+
+    # Merge supplied flags
+    merged = dict(current)
+    if req.paper is not None:
+        merged["paper"] = req.paper
+    if req.kalshi is not None:
+        merged["kalshi"] = req.kalshi
+    if req.polymarket is not None:
+        merged["polymarket"] = req.polymarket
+
+    before_json = _canonical_json(current)
+    after_json = _canonical_json(merged)
+
+    conn.execute(
+        "UPDATE model_registry SET platform_active_json = ?, "
+        "updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') "
+        "WHERE name = ?",
+        (after_json, name),
+    )
+    _audit(conn, name, "set_platform", req.by, req.reason, before_json, after_json)
+    conn.commit()
+
+    reloaded = _trigger_reload_meta()
+    applied_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    return PlatformResponse(
+        name=name,
+        platform_active=merged,
+        applied_at=applied_at,
+        trader_reloaded=reloaded,
+    )
 
 
 @router.post("/{name}/filter", response_model=FilterResponse)

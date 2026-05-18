@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import logging
 import os
+from base64 import b64decode
 
 import httpx
 from fastapi import APIRouter, Request, Response
@@ -25,13 +26,16 @@ _UPSTREAM = os.environ.get("API_SERVER_URL", "http://localhost:8080")
 
 
 async def _proxy(method: str, path: str, request: Request) -> Response:
-    """Forward request to the internal api_server and return its response."""
+    """Forward request to the internal api_server and return its response.
+
+    The dashboard_api accepts HTTP Basic auth from the browser. The runtime
+    api_server on port 8080 requires ``Authorization: Bearer <DASHBOARD_PASSWORD>``.
+    We translate here so the proxy never forwards a Basic header to the runtime.
+    """
     url = f"{_UPSTREAM}{path}"
-    headers = {}
-    # Forward the Authorization header so auth works end-to-end
-    auth = request.headers.get("authorization")
-    if auth:
-        headers["Authorization"] = auth
+    # Translate HTTP Basic → Bearer for the runtime api_server (port 8080).
+    runtime_token = os.environ.get("DASHBOARD_PASS") or os.environ.get("DASHBOARD_PASSWORD") or ""
+    headers = {"Authorization": f"Bearer {runtime_token}"}
 
     body = None
     if method in ("POST", "PATCH", "PUT"):
