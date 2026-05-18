@@ -1,4 +1,5 @@
 import axios from 'axios';
+import type { ModelFilterUpdateRequest, ModelFilterUpdateResponse } from '../types';
 
 // Create a basic Axios client with config
 export const apiClient = axios.create({
@@ -48,3 +49,18 @@ apiClient.interceptors.response.use(
     return Promise.reject(error);
   }
 );
+
+export async function updateModelFilter(
+  name: string,
+  body: ModelFilterUpdateRequest,
+  confirmToken?: string
+): Promise<ModelFilterUpdateResponse> {
+  const headers: Record<string, string> = {};
+  if (confirmToken) headers['X-Confirm-Token'] = confirmToken;
+  const { data } = await apiClient.post(
+    `/api/models/${encodeURIComponent(name)}/filter`,
+    body,
+    { headers }
+  );
+  return data;
+}

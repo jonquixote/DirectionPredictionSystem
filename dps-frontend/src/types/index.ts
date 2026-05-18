@@ -90,3 +90,25 @@ export interface PerformanceSummary {
   expected_value_empirical: number;
   gate_pass_rate: number;
 }
+
+export interface ModelFilterConfig {
+  confidence_threshold?: number;
+  ev_threshold?: number;
+  blackout_hours?: number[];
+  warmup_seconds?: number;
+}
+
+export interface ModelFilterUpdateRequest {
+  confidence_threshold?: number;
+  ev_threshold?: number;
+  blackout_hours?: number[];
+  warmup_seconds?: number;
+  clear_keys?: string[];
+}
+
+export interface ModelFilterUpdateResponse {
+  name: string;
+  filter_config: ModelFilterConfig;
+  applied_at: string;
+  trader_reloaded: boolean;
+}
