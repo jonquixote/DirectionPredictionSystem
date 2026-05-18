@@ -505,6 +505,22 @@ async def _post_reload_meta_inner(request):
         return web.json_response({"status": "error", "detail": str(e)}, status=500)
 
 
+async def _post_reload_fleet_inner(request):
+    """POST /reload_fleet — schedule a full fleet hot-reload at the next boundary tick.
+
+    Sets trader._sighup_requested=True; the reload runs at the top of the next
+    _contract_boundary_loop iteration (deferred, not mid-cycle). This matches the
+    SIGHUP handler behaviour and is the safer choice over an immediate reload.
+
+    Auth-gated (same bearer token as other mutating endpoints).
+    Returns: {"status": "scheduled"} immediately. The actual reload is async.
+    """
+    trader = _get_trader(request)
+    trader._sighup_requested = True
+    logger.info("POST /reload_fleet — fleet hot-reload scheduled via API")
+    return web.json_response({"status": "scheduled"})
+
+
 # ── GET /status ────────────────────────────────────────────────
 
 async def get_status(request):
@@ -1311,6 +1327,9 @@ def create_api_app(trader: "PaperTrader") -> web.Application:
 
     # Model meta reload (internal — triggers immediate filter_config refresh)
     app.router.add_post("/reload_meta", require_auth(_post_reload_meta_inner))
+
+    # Fleet hot-reload (schedules full registry sync at next boundary tick)
+    app.router.add_post("/reload_fleet", require_auth(_post_reload_fleet_inner))
 
     logger.info("API app created with %d routes", len(app.router.routes()))
     return app

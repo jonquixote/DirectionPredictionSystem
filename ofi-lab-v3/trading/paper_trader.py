@@ -420,6 +420,171 @@ class PaperTrader:
         if changed:
             logger.info("reloaded filter_config for %d models: %s", len(changed), changed)
 
+    def _reload_fleet(self) -> None:
+        """Full fleet hot-reload: sync self.models and self._model_meta with model_registry.
+
+        Detects:
+          - Added models (in registry but not loaded): loads .lgb, builds calibrator entry
+          - Removed models (loaded but gone/deactivated): removes from self.models + meta
+          - Updated filter_config_json for existing models: updates in-place
+          - Updated lifecycle_state / enabled flags: updates meta
+
+        Logs counts: added=N removed=M updated=K unchanged=L
+        Safe to call at any time; errors per-model are caught and logged so one
+        bad model does not abort the rest.
+        """
+        if not getattr(self, "_db_conn", None):
+            logger.warning("_reload_fleet: no db_conn available")
+            return
+
+        try:
+            rows = self._db_conn.execute(
+                "SELECT name, symbol, training_horizon_seconds, feature_version, "
+                "train_window_start, train_window_end, train_days, "
+                "artifact_path, feature_names_path, "
+                "platform_active_json, filter_config_json, "
+                "lifecycle_state, paper_active, live_eligible "
+                "FROM model_registry "
+                "WHERE paper_active = 1 AND lifecycle_state != 'suspended'"
+            ).fetchall()
+        except Exception as e:
+            logger.error("_reload_fleet SQL failed: %s", e)
+            return
+
+        registry_names: set[str] = set()
+        added: list[str] = []
+        removed: list[str] = []
+        updated: list[str] = []
+        unchanged: list[str] = []
+
+        for row in rows:
+            name = row["name"]
+            registry_names.add(name)
+
+            # Parse platform_active and filter_config
+            try:
+                pa_dict = json.loads(row["platform_active_json"] or "{}")
+            except (json.JSONDecodeError, TypeError):
+                pa_dict = {}
+            try:
+                fc_dict = json.loads(row["filter_config_json"] or "{}")
+            except (json.JSONDecodeError, TypeError):
+                fc_dict = {}
+
+            new_meta = {
+                "symbol": row["symbol"],
+                "training_horizon_seconds": row["training_horizon_seconds"],
+                "feature_version": row["feature_version"] or "v3",
+                "train_window_start": row["train_window_start"] or "",
+                "train_window_end": row["train_window_end"] or "",
+                "train_cutoff": row["train_window_end"] or "",
+                "kalshi_dispatch_enabled": pa_dict.get("kalshi", False),
+                "filter_config": fc_dict,
+                "lifecycle_state": row["lifecycle_state"],
+                "paper_active": bool(row["paper_active"]),
+                "live_eligible": bool(row["live_eligible"]),
+            }
+
+            if name not in self.models:
+                # ── New model: load .lgb file ──────────────────────────
+                artifact_path = row["artifact_path"]
+                if not artifact_path or not Path(artifact_path).exists():
+                    logger.warning(
+                        "fleet_hot_reload: model %s artifact missing at %s — skipping",
+                        name, artifact_path,
+                    )
+                    registry_names.discard(name)
+                    continue
+                try:
+                    new_booster = lgb.Booster(model_file=artifact_path)
+                except Exception as load_err:
+                    logger.error(
+                        "fleet_hot_reload: failed to load lgb for %s: %s — skipping",
+                        name, load_err,
+                    )
+                    registry_names.discard(name)
+                    continue
+
+                # Load feature names
+                fn_path = Path(artifact_path).parent / "feature_names.json"
+                if row["feature_names_path"] and Path(row["feature_names_path"]).exists():
+                    fn_path = Path(row["feature_names_path"])
+                if fn_path.exists():
+                    try:
+                        with open(fn_path) as _f:
+                            feat_names = json.load(_f)
+                    except Exception:
+                        feat_names = V3_FEATURE_COLS
+                else:
+                    feat_names = V3_FEATURE_COLS
+
+                self.models[name] = new_booster
+                self.feature_names[name] = feat_names
+
+                # Compute provenance envelope
+                from storage.provenance import sha256_file, feature_names_hash
+                self._model_envelopes[name] = {
+                    "model_artifact_hash": sha256_file(artifact_path),
+                    "feature_names_hash": feature_names_hash(feat_names),
+                }
+
+                self._model_meta[name] = new_meta
+                logger.info(
+                    "fleet_hot_reload: added model %s (%d features) from %s",
+                    name, len(feat_names), artifact_path,
+                )
+                added.append(name)
+            else:
+                # ── Existing model: check for changes ─────────────────
+                old_meta = self._model_meta.get(name, {})
+                changed_fields: list[str] = []
+
+                if old_meta.get("filter_config") != fc_dict:
+                    changed_fields.append("filter_config")
+                if old_meta.get("lifecycle_state") != row["lifecycle_state"]:
+                    changed_fields.append("lifecycle_state")
+                if old_meta.get("kalshi_dispatch_enabled") != pa_dict.get("kalshi", False):
+                    changed_fields.append("kalshi_dispatch_enabled")
+                if old_meta.get("paper_active") != bool(row["paper_active"]):
+                    changed_fields.append("paper_active")
+                if old_meta.get("live_eligible") != bool(row["live_eligible"]):
+                    changed_fields.append("live_eligible")
+
+                if changed_fields:
+                    self._model_meta[name] = {**old_meta, **new_meta}
+                    logger.info(
+                        "fleet_hot_reload: updated model %s fields=%s",
+                        name, changed_fields,
+                    )
+                    updated.append(name)
+                else:
+                    unchanged.append(name)
+
+        # ── Remove models no longer in active registry ─────────────────
+        for name in list(self.models.keys()):
+            if name not in registry_names:
+                del self.models[name]
+                self.feature_names.pop(name, None)
+                self._model_envelopes.pop(name, None)
+                self._model_meta.pop(name, None)
+                logger.info("fleet_hot_reload: removed model %s (deactivated or suspended)", name)
+                removed.append(name)
+
+        logger.info(
+            "fleet_hot_reload complete: added=%d removed=%d updated=%d unchanged=%d",
+            len(added), len(removed), len(updated), len(unchanged),
+        )
+
+    def _handle_sighup(self, *args) -> None:
+        """Signal handler for SIGHUP — sets deferred reload flag.
+
+        Heavy work (DB queries, lgb loads) must not run inside a signal handler.
+        Sets _sighup_requested=True; _contract_boundary_loop picks it up at
+        the top of the next tick.
+        """
+        logger.info("SIGHUP received — scheduling fleet hot-reload at next boundary")
+        self._sighup_requested = True
+
     def _capture_policy_dict(self) -> dict:
         # provenance_builder is not yet available during early __init__
         # (called at line 256, before the builder is instantiated at ~355).
@@ -876,6 +1041,14 @@ class PaperTrader:
     async def _contract_boundary_loop(self) -> None:
         """Check for 5-minute contract boundaries and trigger predictions."""
         while self._running:
+            # ── Deferred SIGHUP fleet hot-reload ──────────────────────
+            if getattr(self, "_sighup_requested", False):
+                self._sighup_requested = False
+                try:
+                    self._reload_fleet()
+                except Exception as e:
+                    logger.error("fleet_hot_reload_failed: %s", e, exc_info=True)
+
             now_ms = int(time.time() * 1000)
             contract_interval_ms = 300_000  # 5 minutes
             boundary_ms = (now_ms // contract_interval_ms) * contract_interval_ms
@@ -1147,6 +1320,7 @@ def main():
 
     signal.signal(signal.SIGINT, handle_signal)
     signal.signal(signal.SIGTERM, handle_signal)
+    signal.signal(signal.SIGHUP, trader._handle_sighup)
 
     asyncio.run(trader.run())
 
