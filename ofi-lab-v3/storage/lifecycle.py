@@ -155,7 +155,14 @@ def evaluate_lifecycle_transitions(conn, *, now_ms: int) -> list[Transition]:
         resolved_count = metrics["sample_count"] or 0
         recency_weighted_ev = metrics["recency_weighted_ev"] or 0.0
         calibration_error = metrics["calibration_error"] or 0.0
-        consecutive_failures = metrics.get("consecutive_requalification_failures", 0) or 0
+        # sqlite3.Row supports __getitem__ + .keys() but NOT .get(). Cold-start
+        # decay_metrics rows may pre-date the consecutive_requalification_failures
+        # column — fall back to 0 if absent.
+        consecutive_failures = (
+            metrics["consecutive_requalification_failures"]
+            if "consecutive_requalification_failures" in metrics.keys()
+            else 0
+        ) or 0
 
         # Evaluate FSM
         decision = fsm.evaluate(
