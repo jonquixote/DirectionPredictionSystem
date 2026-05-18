@@ -127,6 +127,32 @@ def set_model_selection(symbol: str, market_window_seconds: int, body: dict):
     return {"ok": True}
 
 
+# ── Combos endpoint ─────────────────────────────────────────────
+
+@router.get("/combos")
+def list_combos():
+    """Return one row per (model, duration) for all paper_active=1 models.
+
+    Response: {"data": [{"model": str, "symbol": str, "duration": int}, ...]}
+    """
+    conn = _get_conn()
+    rows = conn.execute(
+        "SELECT name, symbol, evaluation_windows FROM model_registry "
+        "WHERE paper_active = 1"
+    ).fetchall()
+    data = []
+    for row in rows:
+        model_name = row["name"]
+        symbol = row["symbol"]
+        try:
+            windows = json.loads(row["evaluation_windows"] or "[300,900,1800]")
+        except (json.JSONDecodeError, TypeError):
+            windows = [300, 900, 1800]
+        for dur in windows:
+            data.append({"model": model_name, "symbol": symbol, "duration": int(dur)})
+    return {"data": data}
+
+
 # ── Model detail (catch-all — must be AFTER specific routes) ──
 
 @router.get("/{name}")
