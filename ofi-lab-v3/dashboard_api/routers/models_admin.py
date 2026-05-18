@@ -9,13 +9,21 @@ Provides:
   POST /api/models/{name}/disable_live   (no confirmation needed — always safe)
   POST /api/models/{name}/reload         (confirmation token required)
   POST /api/models/{name}/rollback       (confirmation token required)
+  POST /api/models/{name}/filter         (confirmation token if live_eligible=1)
 """
 from __future__ import annotations
 
+import json
+import logging
 import time
+from datetime import datetime, timezone
+from typing import List, Optional
 
+import httpx
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
+
+logger = logging.getLogger("dashboard.models_admin")
 
 try:
     from services.db import get_db
@@ -303,3 +311,139 @@ def rollback(name: str, req: RollbackRequest):
         row["generation"], target_gen,
     )
     return {"name": name, "generation": target_gen}
+
+
+# ── Filter config (W2) ─────────────────────────────────────────
+
+_TRADER_RELOAD_URL = "http://127.0.0.1:8080/reload_meta"
+
+
+class FilterRequest(BaseModel):
+    by: str
+    confidence_threshold: Optional[float] = None
+    ev_threshold: Optional[float] = None
+    blackout_hours: Optional[List[int]] = None
+    warmup_seconds: Optional[int] = None
+    clear_keys: Optional[List[str]] = None
+    confirmation_token: Optional[str] = None
+
+    @field_validator("confidence_threshold")
+    @classmethod
+    def _validate_confidence(cls, v):
+        if v is not None and not (0.0 <= v <= 1.0):
+            raise ValueError(f"confidence_threshold {v!r} must be in [0.0, 1.0]")
+        return v
+
+    @field_validator("ev_threshold")
+    @classmethod
+    def _validate_ev(cls, v):
+        if v is not None and not (-1.0 <= v <= 1.0):
+            raise ValueError(f"ev_threshold {v!r} must be in [-1.0, 1.0]")
+        return v
+
+    @field_validator("blackout_hours")
+    @classmethod
+    def _validate_blackout(cls, v):
+        if v is not None:
+            for h in v:
+                if not (0 <= h <= 23):
+                    raise ValueError(f"blackout_hours value {h} out of range [0, 23]")
+            v = sorted(set(v))
+        return v
+
+    @field_validator("warmup_seconds")
+    @classmethod
+    def _validate_warmup(cls, v):
+        if v is not None and v < 0:
+            raise ValueError(f"warmup_seconds {v!r} must be non-negative")
+        return v
+
+
+class FilterResponse(BaseModel):
+    name: str
+    filter_config: dict
+    applied_at: str
+    trader_reloaded: bool
+
+
+def _merge_filter(current_json: str, req: FilterRequest) -> dict:
+    """Merge supplied fields into current filter config, clear requested keys."""
+    try:
+        current = json.loads(current_json or "{}")
+    except json.JSONDecodeError:
+        current = {}
+    merged = dict(current)
+    if req.confidence_threshold is not None:
+        merged["confidence_threshold"] = req.confidence_threshold
+    if req.ev_threshold is not None:
+        merged["ev_threshold"] = req.ev_threshold
+    if req.blackout_hours is not None:
+        merged["blackout_hours"] = req.blackout_hours
+    if req.warmup_seconds is not None:
+        merged["warmup_seconds"] = req.warmup_seconds
+    for k in (req.clear_keys or []):
+        merged.pop(k, None)
+    return merged
+
+
+def _canonical_json(d: dict) -> str:
+    return json.dumps(d, sort_keys=True, separators=(",", ":"))
+
+
+def _trigger_reload_meta() -> bool:
+    """POST to trader reload endpoint. Returns True if successful."""
+    try:
+        resp = httpx.post(_TRADER_RELOAD_URL, timeout=3.0)
+        return resp.status_code < 300
+    except Exception as exc:
+        logger.warning("Could not reach %s: %s — auto-refresh will pick it up", _TRADER_RELOAD_URL, exc)
+        return False
+
+
+@router.post("/{name}/filter", response_model=FilterResponse)
+def set_filter(name: str, req: FilterRequest):
+    from dashboard_api.services.admin_auth import (
+        verify_confirmation_token, ConfirmationError,
+    )
+
+    conn = _get_conn()
+    row = conn.execute(
+        "SELECT name, live_eligible, filter_config_json FROM model_registry WHERE name=?",
+        (name,),
+    ).fetchone()
+    if not row:
+        raise HTTPException(404, f"model {name!r} not found")
+
+    # Live models require a confirmation token
+    if row["live_eligible"]:
+        if not req.confirmation_token:
+            raise HTTPException(403, "confirmation_token required for live-eligible models")
+        try:
+            verify_confirmation_token(
+                req.confirmation_token, action="set_filter", target=name
+            )
+        except ConfirmationError as e:
+            raise HTTPException(403, f"confirmation failed: {e}")
+
+    before_json = row["filter_config_json"] or "{}"
+    after_dict = _merge_filter(before_json, req)
+    after_json = _canonical_json(after_dict)
+
+    conn.execute(
+        "UPDATE model_registry SET filter_config_json = ?, "
+        "updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') "
+        "WHERE name = ?",
+        (after_json, name),
+    )
+    _audit(conn, name, "set_filter", req.by, None, before_json, after_json)
+    conn.commit()
+
+    reloaded = _trigger_reload_meta()
+    applied_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    return FilterResponse(
+        name=name,
+        filter_config=after_dict,
+        applied_at=applied_at,
+        trader_reloaded=reloaded,
+    )
