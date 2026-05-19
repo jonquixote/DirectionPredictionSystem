@@ -440,3 +440,31 @@ CREATE TABLE IF NOT EXISTS dashboard_settings (
     updated_at  TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     updated_by  TEXT
 );
+
+-- =========================================================================
+-- committee_weights: optimized per-(symbol, market_window) ensemble weights.
+-- Written by analysis.optimize_committee_weights. Read by future ModelSelector
+-- when strategy='committee_weighted'.
+-- =========================================================================
+CREATE TABLE IF NOT EXISTS committee_weights (
+    symbol                 TEXT NOT NULL,
+    market_window_seconds  INTEGER NOT NULL,
+    objective              TEXT NOT NULL,        -- 'sharpe' | 'mean' | 'win_rate'
+    weights_json           TEXT NOT NULL,        -- {"model_name": weight, ...}
+    n_boundaries           INTEGER,
+    expected_sharpe        REAL,
+    expected_win_rate      REAL,
+    expected_roi_pct       REAL,
+    converged              INTEGER DEFAULT 1,    -- 0 if scipy fallback used
+    computed_at            TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    PRIMARY KEY (symbol, market_window_seconds, objective)
+);
+
+-- =========================================================================
+-- decay_metrics hardening columns (H2): denormalized ms timestamp + window
+-- cutoff sentinel. Both required for leak-safe timestamp joins from analysis.
+-- Pre-existing rows will have NULL until next refresh_decay_metrics() write.
+-- =========================================================================
+-- NOTE: SQLite has no IF NOT EXISTS for ALTER TABLE. The migration writer
+-- (storage.db._migrate or analysis service init) must check + add.
+-- See storage/db.py:_ensure_decay_metrics_hardening.

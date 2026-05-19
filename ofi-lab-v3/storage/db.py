@@ -51,6 +51,10 @@ def _run_migrations(conn) -> None:
     _add_column_if_missing(conn, "model_registry", "filter_config_json", "TEXT DEFAULT '{}'")
     _add_column_if_missing(conn, "model_registry", "platform_active_json",
         "TEXT DEFAULT '{\"paper\":true,\"kalshi\":false,\"polymarket\":false}'")
+    # H2 — decay-join leakage hardening. Denormalized ms timestamp + window
+    # cutoff sentinel for strict-< joins from analysis service.
+    _add_column_if_missing(conn, "decay_metrics", "ts_ms", "INTEGER")
+    _add_column_if_missing(conn, "decay_metrics", "computed_for_max_ts_ms", "INTEGER")
     _migrate_native_to_eval_indexes(conn)
 
 
