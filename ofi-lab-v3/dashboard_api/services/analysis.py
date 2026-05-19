@@ -2017,22 +2017,34 @@ def walk_forward_validate(
 # v2 endpoint I: recommend_premium_filter
 # ---------------------------------------------------------------------------
 
-def recommend_premium_filter(symbol: str, window: int,
-                             since_ms: int | None = None) -> dict:
+def recommend_premium_filter(
+    symbol: str,
+    window: int,
+    since_ms: int | None = None,
+    mode: str = "strict",
+) -> dict:
     """Top-down recommendation: grid search → walk_forward + train_test on
     top 5 → return first config that survives all gates.
+
+    mode="strict"    (default): FDR + walk-forward robust + test_wr >= 0.55 + n >= 100
+    mode="discovery": walk-forward robust + test_wr >= 0.55 + n >= 50 + p_raw < 0.05;
+                      FDR is surfaced but not gating.
     """
+    if mode not in {"strict", "discovery"}:
+        raise ValueError(f"mode must be 'strict' or 'discovery', got {mode!r}")
+
     started = _now_iso()
     warnings_list = []
     errors_list = []
 
+    # Always run FDR for transparency — it populates survives_fdr_q05 on every candidate
     gs = grid_search(symbol, window, since_ms=since_ms, top_k=5, apply_fdr=True)
     if gs["status"] != "ok":
         return _envelope(
             status=gs["status"],
             message=f"grid_search: {gs.get('message')}",
             metadata={"symbol": symbol, "window": window,
-                      "computed_at_utc": started},
+                      "computed_at_utc": started, "mode": mode},
             result={"winner": None,
                     "reason": "grid_search returned no candidates",
                     "candidates_evaluated": 0},
@@ -2045,7 +2057,7 @@ def recommend_premium_filter(symbol: str, window: int,
             status="no_data",
             message="grid_search top is empty",
             metadata={"symbol": symbol, "window": window,
-                      "computed_at_utc": started},
+                      "computed_at_utc": started, "mode": mode},
             result={"winner": None,
                     "reason": "no FDR-surviving candidates",
                     "candidates_evaluated": 0,
@@ -2053,6 +2065,9 @@ def recommend_premium_filter(symbol: str, window: int,
             warnings=warnings_list,
         )
 
+    # In discovery mode we consider all top candidates regardless of FDR flag
+    # (grid_search top_k=5 uses apply_fdr=True but returns all top-k rows, not
+    #  just FDR survivors, so we already have the full set)
     evaluated = []
     winner = None
     for cand in candidates[:5]:
@@ -2072,52 +2087,95 @@ def recommend_premium_filter(symbol: str, window: int,
         tt_ok = tt["status"] == "ok"
         wf_robust = wf_ok and wf["result"].get("robust")
         tt_win_rate = tt["result"]["test"]["win_rate"] if (tt_ok and tt["result"]) else None
-        gates_pass = (
-            wf_robust
-            and tt_win_rate is not None
-            and tt_win_rate >= 0.55
-            and cand["survives_fdr_q05"]
-            and cand["n_passed"] >= 100
+        wf_mean_wr = (wf["result"].get("mean_win_rate") if wf_ok else None) or 0.0
+        p_raw = cand.get("p_value_raw", 1.0)  # raw (uncorrected) p-value from grid
+
+        # Gate sets differ by mode
+        if mode == "strict":
+            gates_pass = (
+                wf_robust
+                and tt_win_rate is not None
+                and tt_win_rate >= 0.55
+                and cand.get("survives_fdr_q05", False)
+                and cand["n_passed"] >= 100
+            )
+            gates_detail = {
+                "survives_fdr_q05": cand.get("survives_fdr_q05", False),
+                "wf_robust": wf_robust,
+                "test_win_rate_ge_55pct": tt_win_rate is not None and tt_win_rate >= 0.55,
+                "n_passed_ge_100": cand["n_passed"] >= 100,
+            }
+        else:  # discovery
+            gates_pass = (
+                wf_robust
+                and tt_win_rate is not None
+                and tt_win_rate >= 0.55
+                and cand["n_passed"] >= 50
+                and (p_raw is not None and p_raw < 0.05)
+            )
+            gates_detail = {
+                "wf_robust": wf_robust,
+                "test_win_rate_ge_55pct": tt_win_rate is not None and tt_win_rate >= 0.55,
+                "n_passed_ge_50": cand["n_passed"] >= 50,
+                "p_raw_lt_05": p_raw is not None and p_raw < 0.05,
+                # informative only
+                "survives_fdr_q05_informative": cand.get("survives_fdr_q05", False),
+            }
+
+        # Composite score used for sorting runners-up (conservative cross-validated WR)
+        composite = min(
+            tt_win_rate if tt_win_rate is not None else 0.0,
+            wf_mean_wr if wf_mean_wr else 0.0,
         )
-        evaluated.append({
+
+        entry = {
             "filter_config": fc,
             "grid_metrics": cand,
             "walk_forward": wf["result"] if wf_ok else {"status": wf["status"], "message": wf.get("message")},
             "train_test": tt["result"] if tt_ok else {"status": tt["status"], "message": tt.get("message")},
-            "gates": {
-                "survives_fdr_q05": cand["survives_fdr_q05"],
-                "wf_robust": wf_robust,
-                "test_win_rate_ge_55pct": tt_win_rate is not None and tt_win_rate >= 0.55,
-                "n_passed_ge_100": cand["n_passed"] >= 100,
-            },
+            "gates_passed": gates_detail,
             "applicable": gates_pass,
+            "mode_used": mode,
+            "composite_score": round(composite, 6),
             "confidence": "high" if gates_pass else (
                 "medium" if (wf_robust or (tt_win_rate and tt_win_rate >= 0.55)) else "low"
             ),
-        })
+        }
+        evaluated.append(entry)
         if gates_pass and winner is None:
-            winner = evaluated[-1]
+            winner = entry
+
+    # Sort runners-up by composite_score descending so best runner-up is first
+    runners = sorted(
+        [e for e in evaluated if e is not winner],
+        key=lambda x: x["composite_score"],
+        reverse=True,
+    )
+
+    if mode == "strict":
+        no_winner_reason = "no candidate satisfied (FDR + walk-forward robust + test win_rate >= 0.55 + n >= 100)"
+    else:
+        no_winner_reason = "no candidate satisfied (walk-forward robust + test win_rate >= 0.55 + n >= 50 + p_raw < 0.05)"
 
     if winner is None:
         return _envelope(
             status="ok",
             message="no candidate passed all gates; returning highest-confidence runner-up",
             metadata={"symbol": symbol, "window": window,
-                      "computed_at_utc": started},
+                      "computed_at_utc": started, "mode": mode},
             result={
                 "winner": None,
-                "reason": "no candidate satisfied (FDR + walk-forward robust + test win_rate >= 0.55 + n >= 100)",
-                "runners_up": evaluated,
+                "reason": no_winner_reason,
+                "runners_up": runners,
                 "candidates_evaluated": len(evaluated),
             },
             warnings=warnings_list,
         )
 
-    runners = [e for e in evaluated if e is not winner]
     return _envelope(
         status="ok",
         metadata={"symbol": symbol, "window": window,
-                  "computed_at_utc": started},
+                  "computed_at_utc": started, "mode": mode},
         result={
             "winner": winner,
             "runners_up": runners,

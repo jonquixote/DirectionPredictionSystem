@@ -314,6 +314,7 @@ def cmd_recommend_premium(args):
         symbol=args.symbol,
         window=args.window,
         since_ms=args.since_ms,
+        mode=getattr(args, "recommend_mode", "strict"),
     )
     _write_output(data, args.json_out)
 
@@ -355,6 +356,10 @@ def build_parser() -> argparse.ArgumentParser:
                       help="Train/test split validation (JSON string) — requires --symbol --window")
     mode.add_argument("--recommend-premium", dest="recommend_premium", action="store_true",
                       help="Full premium filter recommendation — requires --symbol --window")
+
+    p.add_argument("--mode", dest="recommend_mode", choices=["strict", "discovery"],
+                   default="strict",
+                   help="Gate mode for --recommend-premium: strict (default) or discovery")
 
     # Shared filter params
     p.add_argument("--symbol", type=str, default=None,

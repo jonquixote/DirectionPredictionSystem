@@ -94,6 +94,7 @@ class RecommendPremiumRequest(BaseModel):
     symbol: str
     window: int
     since_ms: int | None = None
+    mode: str = "strict"
 
 router = APIRouter(tags=["analysis"])
 
@@ -324,4 +325,5 @@ async def api_recommend_premium(body: RecommendPremiumRequest):
         symbol=body.symbol,
         window=body.window,
         since_ms=body.since_ms,
+        mode=body.mode,
     )
