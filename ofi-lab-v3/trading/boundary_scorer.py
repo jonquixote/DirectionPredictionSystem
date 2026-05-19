@@ -62,8 +62,11 @@ class BoundaryScorer:
         t = self._trader
         boundary_ts = boundary_ms // 1000
 
-        # C5: Initialize accumulator for overlap recording
-        per_boundary_scores: dict = {}
+        # C5: Initialize accumulator for overlap recording.
+        # Keyed by (symbol, market_window_seconds) → list[ModelScore].
+        # One row written to model_overlap per key after all models score.
+        from trading.overlap_writer import ModelScore
+        per_boundary_scores: dict = {}  # (symbol, window) -> list[ModelScore]
 
         # Fetch live Kalshi bankroll to sync paper trader bankroll
         t._current_kalshi_bankroll = None
@@ -273,16 +276,27 @@ class BoundaryScorer:
                     )
                     continue  # skip to next symbol/model
 
-                # C5: Accumulate score for overlap recording
-                try:
-                    from trading.overlap_writer import ModelScore
-                    per_boundary_scores[(model_name, symbol)] = ModelScore(
-                        proba=pred_proba_calibrated,
-                        direction=pred_direction,
-                        ev=None,  # Will be filled in after trade resolution
-                    )
-                except Exception as e:
-                    logger.debug("overlap_score_accumulation_failed: %s", e)
+                # C5: Accumulate score for overlap recording.
+                # Record once per (symbol, window) group; use CONTRACT_DURATIONS
+                # so each duration gets its own model_overlap row.
+                for _overlap_window in CONTRACT_DURATIONS:
+                    try:
+                        _dur_cal_p = pred_proba_calibrated
+                        try:
+                            _dc = t.calibrators.get(model_name, symbol, _overlap_window)
+                            _dur_cal_p = _dc.calibrate(pred_proba)
+                        except (KeyError, Exception):
+                            pass
+                        score = ModelScore(
+                            model_name=model_name,
+                            direction=pred_direction,
+                            calibrated_confidence=_dur_cal_p,
+                        )
+                        per_boundary_scores.setdefault(
+                            (symbol, _overlap_window), []
+                        ).append(score)
+                    except Exception as e:
+                        logger.warning("overlap_score_accumulation_failed: %s", e)
 
                 # Suppress trades during warmup
                 if in_warmup:
@@ -434,17 +448,22 @@ class BoundaryScorer:
 
             logger.debug("[DIAG] %s: guard_skip=%d blocked_skip=%d predicted=%d", symbol, _diag_guard_skip, _diag_blocked_skip, _diag_predicted)
 
-        # C5: Record overlap scores for the boundary
-        try:
-            if per_boundary_scores:
+        # C5: Record overlap scores for the boundary — one row per (symbol, window).
+        for (sym, win), score_list in per_boundary_scores.items():
+            if not score_list:
+                continue
+            try:
                 t.record_overlap_for_boundary(
                     ts_contract_open_ms=boundary_ms,
-                    symbol=PREDICTION_SYMBOLS[0] if PREDICTION_SYMBOLS else "BTCUSDT",
-                    market_window_seconds=900,
-                    scores=per_boundary_scores,
+                    symbol=sym,
+                    market_window_seconds=win,
+                    scores=score_list,
                 )
-        except Exception as e:
-            logger.exception("overlap_recording_failed", extra={"err": str(e)})
+            except Exception as e:
+                logger.exception(
+                    "overlap_recording_failed",
+                    extra={"symbol": sym, "window": win, "err": str(e)},
+                )
 
         logger.info(
             "Boundary %s: %d predictions total, %d trades total",
