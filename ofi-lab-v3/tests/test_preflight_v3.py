@@ -194,7 +194,8 @@ def test_backfill_regime_script_has_cli():
 
     assert result.returncode == 0
     assert "--db" in result.stdout
-    assert "--lookback-days" in result.stdout
+    # B1: CLI renamed --lookback-days to --days (regime tagger rewrite)
+    assert "--days" in result.stdout
 
 
 def test_backfill_calibration_script_has_cli():
