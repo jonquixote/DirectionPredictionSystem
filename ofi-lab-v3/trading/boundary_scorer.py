@@ -68,6 +68,15 @@ class BoundaryScorer:
         from trading.overlap_writer import ModelScore
         per_boundary_scores: dict = {}  # (symbol, window) -> list[ModelScore]
 
+        # consensus_required: deferred paper_trade writes.
+        # For models with filter_config.consensus_required=True, we cannot know
+        # consensus at trade-write time (other models haven't all scored yet).
+        # Solution: defer their paper_trade log_paper_trade calls until after all
+        # models for the symbol have scored, then check local consensus from
+        # per_boundary_scores. Keyed by symbol → list of (fn, args) callables.
+        # Predictions are always logged immediately (unaffected by this gate).
+        _deferred_trades: dict = {}  # symbol -> list[dict] of pending trade kwargs
+
         # Fetch live Kalshi bankroll to sync paper trader bankroll
         t._current_kalshi_bankroll = None
         if getattr(t, "_kalshi_trader", None) is not None:
@@ -80,6 +89,9 @@ class BoundaryScorer:
             if not t.feature_computer.is_warmed_up(symbol):
                 logger.info("Skipping %s — not warmed up yet", symbol)
                 continue
+
+            # Initialize deferred trade list for this symbol (consensus_required gate)
+            _deferred_trades[symbol] = []
 
             trade_eligible = symbol in TRADE_SYMBOLS
 
@@ -378,6 +390,12 @@ class BoundaryScorer:
                 boundary_sec = boundary_ms // 1000
                 is_15m_boundary = (boundary_sec % 900 == 0)
 
+                # consensus_required gate: if this model requires fleet consensus,
+                # defer its paper_trade writes until after all models for this
+                # symbol have scored (so we can compute local consensus).
+                # Predictions are ALWAYS logged immediately (see _emit_prediction_rows above).
+                _needs_consensus = bool(_model_fc.get("consensus_required"))
+
                 for duration in CONTRACT_DURATIONS:
                     suppressed_durs = H300_SUPPRESS_DURATIONS.get(model_name, set())
                     suppress_reason = "contract_mismatch" if duration in suppressed_durs else None
@@ -392,7 +410,7 @@ class BoundaryScorer:
                     except KeyError:
                         dur_pred_proba_calibrated = pred_proba_calibrated
 
-                    t.sqlite_ledger.log_paper_trade(
+                    trade_kwargs = dict(
                         prediction_id=prediction_id,
                         envelope=t._build_envelope(model_name, platform="paper"),
                         symbol=symbol,
@@ -417,6 +435,19 @@ class BoundaryScorer:
                         p_market=p_market,
                     )
 
+                    if _needs_consensus:
+                        # Defer: consensus not yet determined (other models still scoring)
+                        _deferred_trades[symbol].append({
+                            "model_name": model_name,
+                            "duration": duration,
+                            "suppress_reason": suppress_reason,
+                            "trade_kwargs": trade_kwargs,
+                            "prediction_id": prediction_id,
+                        })
+                        continue
+
+                    t.sqlite_ledger.log_paper_trade(**trade_kwargs)
+
                     if suppress_reason:
                         continue
 
@@ -440,13 +471,74 @@ class BoundaryScorer:
                                 model_name=model_name,
                             ))
 
-                logger.info(
-                    "[%s] %s %s: proba=%.4f dir=%s TRADE",
-                    model_name, symbol, "\U0001f53c" if pred_direction == "up" else "\U0001f53d",
-                    pred_proba, pred_direction,
-                )
+                if not _needs_consensus:
+                    logger.info(
+                        "[%s] %s %s: proba=%.4f dir=%s TRADE",
+                        model_name, symbol, "\U0001f53c" if pred_direction == "up" else "\U0001f53d",
+                        pred_proba, pred_direction,
+                    )
+                else:
+                    logger.info(
+                        "[%s] %s %s: proba=%.4f dir=%s TRADE_DEFERRED (consensus_required)",
+                        model_name, symbol, "\U0001f53c" if pred_direction == "up" else "\U0001f53d",
+                        pred_proba, pred_direction,
+                    )
 
             logger.debug("[DIAG] %s: guard_skip=%d blocked_skip=%d predicted=%d", symbol, _diag_guard_skip, _diag_blocked_skip, _diag_predicted)
+
+            # consensus_required: flush deferred paper_trade writes now that all
+            # models for this symbol have scored.  Compute local consensus from the
+            # per_boundary_scores accumulator (already populated for models that passed
+            # the filter verdicts above).
+            deferred = _deferred_trades.get(symbol, [])
+            if deferred:
+                # Build consensus map: (symbol, window) → bool
+                _consensus_by_window: dict = {}
+                for _win in CONTRACT_DURATIONS:
+                    _scores = per_boundary_scores.get((symbol, _win), [])
+                    if _scores:
+                        _dirs = {s.direction for s in _scores}
+                        _consensus_by_window[_win] = len(_dirs) == 1
+                    else:
+                        _consensus_by_window[_win] = False
+
+                for _pending in deferred:
+                    _dur = _pending["duration"]
+                    _sr = _pending["suppress_reason"]
+                    _kw = _pending["trade_kwargs"]
+                    _pid = _pending["prediction_id"]
+                    _mname = _pending["model_name"]
+                    _has_consensus = _consensus_by_window.get(_dur, False)
+
+                    if not _has_consensus:
+                        # Gate: no consensus → skip paper_trade write, log suppression
+                        logger.info(
+                            "consensus_gate_blocked: %s %s %ds — no fleet consensus, "
+                            "prediction logged, paper_trade suppressed",
+                            _mname, symbol, _dur,
+                        )
+                        t._record_compact_decision(
+                            prediction_id=_pid,
+                            outcome="suppressed",
+                            reason="consensus_required",
+                            ev_estimate=_kw.get("ev_estimate"),
+                            kelly_fraction_capped=None,
+                            final_size_usdc=0.0,
+                            order_type="skipped",
+                        )
+                        continue
+
+                    # Consensus present → write trade
+                    t.sqlite_ledger.log_paper_trade(**_kw)
+
+                    if _sr:
+                        continue
+
+                    t._trade_count += 1
+                    logger.info(
+                        "consensus_gate_passed: %s %s %ds — consensus=1, trade written",
+                        _mname, symbol, _dur,
+                    )
 
         # C5: Record overlap scores for the boundary — one row per (symbol, window).
         for (sym, win), score_list in per_boundary_scores.items():

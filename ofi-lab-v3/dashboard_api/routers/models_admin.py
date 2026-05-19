@@ -352,6 +352,7 @@ class FilterRequest(BaseModel):
     ev_threshold: Optional[float] = None
     blackout_hours: Optional[List[int]] = None
     warmup_seconds: Optional[int] = None
+    consensus_required: Optional[bool] = None
     clear_keys: Optional[List[str]] = None
     confirmation_token: Optional[str] = None
 
@@ -409,6 +410,8 @@ def _merge_filter(current_json: str, req: FilterRequest) -> dict:
         merged["blackout_hours"] = req.blackout_hours
     if req.warmup_seconds is not None:
         merged["warmup_seconds"] = req.warmup_seconds
+    if req.consensus_required is not None:
+        merged["consensus_required"] = req.consensus_required
     for k in (req.clear_keys or []):
         merged.pop(k, None)
     return merged
