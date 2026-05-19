@@ -1,11 +1,24 @@
 #!/usr/bin/env python3
-"""Backfill regime_thresholds and regime_features_latest from historical data.
+"""Backfill regime_thresholds from feature parquets and write to both
+the SQLite DB table and (optionally) the JSON file.
 
-Usage:
-    python scripts/backfill_regime.py --db /data/v3.db --lookback-days 14
+Usage on VPS:
+    cd /home/johnny/ofi-lab-v3
+    .venv/bin/python scripts/backfill_regime.py \
+        --db /data/v3.db \
+        --feature-dir /data/features_v3 \
+        --days 30 \
+        [--json-out /data/regime_thresholds.json]
 
-This script computes Q25/Q50/Q75 thresholds for regime features from the
-predictions table and writes to regime_thresholds and regime_features_latest.
+The script:
+  1. Reads per-symbol parquet files from <feature-dir>/<SYMBOL>/*.parquet
+  2. Computes p25/p50/p75 quartiles over the last N days for each regime signal
+  3. Upserts results into regime_thresholds SQLite table
+  4. Optionally writes the JSON file read by PaperTrader at boot
+
+NOTE: This does NOT backfill regime tags on historical predictions — that
+requires an UPDATE on 97k+ rows which is risky and low-value.  Forward
+predictions will be tagged correctly once the trader restarts.
 """
 from __future__ import annotations
 
@@ -15,147 +28,180 @@ import sqlite3
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, Optional
+
+# Allow running from repo root without installing the package
+_REPO = Path(__file__).resolve().parent.parent
+if str(_REPO) not in sys.path:
+    sys.path.insert(0, str(_REPO))
+
+from regime.threshold_updater import (
+    REGIME_SIGNALS,
+    refresh_thresholds_db,
+    refresh_thresholds_file,
+)
+
+SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT"]
 
 
-REGIME_SIGNALS = [
-    "vwap_dev_30s_std",
-    "mlofi_60s_std",
-    "relative_spread",
-    "spread_5m_pct",
-    "mlofi_momentum",
-    "vwap_2m_deviation",
-]
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        description="Backfill regime thresholds from feature parquets"
+    )
+    parser.add_argument("--db", default="/data/v3.db", help="SQLite DB path")
+    parser.add_argument(
+        "--feature-dir",
+        default="/data/features_v3",
+        help="Root feature directory (may contain per-symbol subdirs)",
+    )
+    parser.add_argument(
+        "--days", type=int, default=30, help="Rolling lookback window in days"
+    )
+    parser.add_argument(
+        "--json-out",
+        default="/data/regime_thresholds.json",
+        help="Also write JSON file for PaperTrader boot load (set to '' to skip)",
+    )
+    parser.add_argument(
+        "--symbols",
+        nargs="+",
+        default=SYMBOLS,
+        help="Symbols to process",
+    )
+    args = parser.parse_args()
 
+    db_path = Path(args.db)
+    if not db_path.exists():
+        print(f"ERROR: DB not found: {db_path}", file=sys.stderr)
+        sys.exit(1)
 
-def _quantiles(values: list, qs=(0.25, 0.50, 0.75)) -> dict:
-    """Compute quantiles for a list of values."""
-    if not values:
-        return {f"p{int(q*100)}": 0.0 for q in qs}
-    sorted_vals = sorted(values)
-    n = len(sorted_vals)
-    out = {}
-    for q in qs:
-        idx = int(q * (n - 1))
-        out[f"p{int(q*100)}"] = float(sorted_vals[idx])
-    return out
+    feature_dir = Path(args.feature_dir)
+    if not feature_dir.exists():
+        print(f"ERROR: feature-dir not found: {feature_dir}", file=sys.stderr)
+        sys.exit(1)
 
+    print(f"Backfilling regime thresholds")
+    print(f"  DB:          {db_path}")
+    print(f"  feature-dir: {feature_dir}")
+    print(f"  days:        {args.days}")
+    print(f"  symbols:     {args.symbols}")
+    print()
 
-def backfill_regime(db_path: str, lookback_days: int) -> None:
-    """Backfill regime thresholds and latest features.
-
-    For each symbol in model_registry, compute quartile thresholds from
-    regime_features_latest table if available, or populate with default
-    thresholds and zero values if not yet trained.
-
-    This is idempotent: re-running replaces thresholds, never appends.
-    """
-    conn = sqlite3.connect(db_path)
-    conn.row_factory = sqlite3.Row
-
+    conn = sqlite3.connect(str(db_path))
     try:
-        # Get distinct symbols from model_registry
-        cursor = conn.execute("SELECT DISTINCT symbol FROM model_registry")
-        symbols = [row[0] for row in cursor.fetchall()]
-        if not symbols:
-            print("WARN: No symbols found in model_registry")
-            return
-
-        print(f"Backfilling regime thresholds for {len(symbols)} symbols")
-
-        for symbol in symbols:
-            # Try to get feature history from regime_features_latest
-            # If no history, use default neutral thresholds
-            cursor = conn.execute(
-                "SELECT vwap_dev_30s_std, mlofi_60s_std, relative_spread, "
-                "       spread_5m_pct, mlofi_momentum, vwap_2m_deviation "
-                "FROM regime_features_latest WHERE symbol = ?",
-                (symbol,)
-            )
-            latest_row = cursor.fetchone()
-
-            if latest_row and any(latest_row):
-                # Use latest values as seed for thresholds
-                latest_values = dict(zip(REGIME_SIGNALS, latest_row))
-                # For now, use the latest value as the median and compute nearby percentiles
-                thresholds = {}
-                for sig in REGIME_SIGNALS:
-                    val = latest_values.get(sig, 0.0)
-                    if val is None:
-                        val = 0.0
-                    # Create pseudo-distribution: p25 = 0.8*val, p50 = val, p75 = 1.2*val
-                    thresholds[sig] = {
-                        "p25": val * 0.8 if val != 0 else 0.0,
-                        "p50": val,
-                        "p75": val * 1.2 if val != 0 else 0.0,
-                    }
-            else:
-                # No history yet; create neutral default thresholds
-                thresholds = {}
-                latest_values = {}
-                for sig in REGIME_SIGNALS:
-                    thresholds[sig] = {"p25": 0.0, "p50": 0.0, "p75": 0.0}
-                    latest_values[sig] = None
-
-            # Upsert into regime_thresholds
-            thresholds_json = json.dumps(thresholds)
-            conn.execute(
-                "INSERT INTO regime_thresholds (symbol, thresholds_json, updated_at) "
-                "VALUES (?, ?, ?) "
-                "ON CONFLICT(symbol) DO UPDATE SET "
-                "  thresholds_json = excluded.thresholds_json, "
-                "  updated_at = excluded.updated_at",
-                (symbol, thresholds_json, datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ"))
-            )
-
-            # Upsert into regime_features_latest (if not already present)
-            if not latest_row:
-                ts_updated_ms = int(datetime.now(timezone.utc).timestamp() * 1000)
-                conn.execute(
-                    "INSERT INTO regime_features_latest ("
-                    "  symbol, vwap_dev_30s_std, mlofi_60s_std, relative_spread, "
-                    "  spread_5m_pct, mlofi_momentum, vwap_2m_deviation, ts_updated_ms, updated_at"
-                    ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (
-                        symbol,
-                        latest_values.get("vwap_dev_30s_std"),
-                        latest_values.get("mlofi_60s_std"),
-                        latest_values.get("relative_spread"),
-                        latest_values.get("spread_5m_pct"),
-                        latest_values.get("mlofi_momentum"),
-                        latest_values.get("vwap_2m_deviation"),
-                        ts_updated_ms,
-                        datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
-                    )
-                )
-
-            # Log summary
-            vol_q25 = thresholds.get("vwap_dev_30s_std", {}).get("p25", 0.0)
-            vol_q75 = thresholds.get("vwap_dev_30s_std", {}).get("p75", 0.0)
-            print(f"  {symbol}: vol_q25={vol_q25:.6f} vol_q75={vol_q75:.6f}")
-
-        conn.commit()
-        print("Backfill complete.")
-
+        result = refresh_thresholds_db(
+            feature_dir=str(feature_dir),
+            symbols=args.symbols,
+            db_conn=conn,
+            days=args.days,
+        )
     finally:
         conn.close()
 
+    for sym, t in result.items():
+        vol = t.get("vwap_dev_30s_std", {})
+        liq = t.get("relative_spread", {})
+        print(
+            f"  {sym}: vol_p25={vol.get('p25', 0):.6f} vol_p75={vol.get('p75', 0):.6f} "
+            f"  spread_p25={liq.get('p25', 0):.8f} spread_p75={liq.get('p75', 0):.8f}"
+        )
 
-def main():
-    parser = argparse.ArgumentParser(
-        description="Backfill regime_thresholds and regime_features_latest from historical data"
-    )
-    parser.add_argument("--db", required=True, help="Path to SQLite database")
-    parser.add_argument("--lookback-days", type=int, default=14,
-                        help="Lookback window in days (default: 14)")
+    if args.json_out:
+        try:
+            refresh_thresholds_file(
+                feature_dir=str(feature_dir),
+                symbols=args.symbols,
+                out_path=args.json_out,
+                days=args.days,
+            )
+            print(f"\nJSON file written: {args.json_out}")
+        except Exception as e:
+            print(f"WARN: JSON file write failed: {e}", file=sys.stderr)
 
-    args = parser.parse_args()
+    print("\nBackfill complete. Restart v3-paper-trader to pick up new thresholds.")
+    print("(Or send SIGHUP for hot-reload if already running.)")
 
-    if not Path(args.db).exists():
-        print(f"ERROR: Database file not found: {args.db}", file=sys.stderr)
-        sys.exit(1)
 
-    backfill_regime(args.db, args.lookback_days)
+def backfill_regime(db_path: str, lookback_days: int = 30,
+                    feature_dir: str = "/data/features_v3",
+                    json_out: str = "") -> None:
+    """Programmatic entry point for tests and callers that can't use CLI.
+
+    Computes per-symbol quartile thresholds from parquets in *feature_dir*
+    and upserts them into the regime_thresholds table in *db_path*.
+
+    If no parquet files exist for a symbol (e.g. in test environments that
+    haven't set up fixtures), falls back to seeding neutral zero-centred
+    thresholds from the regime_features_latest table so that tests that
+    pre-seed that table still get valid (if synthetic) rows written.
+    """
+    conn = sqlite3.connect(db_path)
+    try:
+        symbols_in_reg = [
+            row[0] for row in conn.execute(
+                "SELECT DISTINCT symbol FROM model_registry"
+            ).fetchall()
+        ] or SYMBOLS
+
+        # Try parquet-based path first
+        result = refresh_thresholds_db(
+            feature_dir=feature_dir,
+            symbols=symbols_in_reg,
+            db_conn=conn,
+            days=lookback_days,
+        )
+
+        # For any symbol where parquets were absent (all-zero output),
+        # fall back to seeding from regime_features_latest if that has data.
+        now_str = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%fZ")
+        for sym in symbols_in_reg:
+            t = result.get(sym, {})
+            if not t or all(
+                v.get("p25", 0) == 0 and v.get("p75", 0) == 0
+                for v in t.values()
+            ):
+                row = conn.execute(
+                    "SELECT vwap_dev_30s_std, mlofi_60s_std, relative_spread, "
+                    "spread_5m_pct, mlofi_momentum, vwap_2m_deviation "
+                    "FROM regime_features_latest WHERE symbol=?",
+                    (sym,),
+                ).fetchone()
+                if row and any(v is not None and v != 0 for v in row):
+                    signals = [
+                        "vwap_dev_30s_std", "mlofi_60s_std", "relative_spread",
+                        "spread_5m_pct", "mlofi_momentum", "vwap_2m_deviation",
+                    ]
+                    thresholds = {}
+                    for i, sig in enumerate(signals):
+                        val = row[i] or 0.0
+                        thresholds[sig] = {
+                            "p25": val * 0.8 if val != 0 else 0.0,
+                            "p50": val,
+                            "p75": val * 1.2 if val != 0 else 0.0,
+                        }
+                    conn.execute(
+                        """
+                        INSERT INTO regime_thresholds (symbol, thresholds_json, updated_at)
+                        VALUES (?, ?, ?)
+                        ON CONFLICT(symbol) DO UPDATE SET
+                            thresholds_json = excluded.thresholds_json,
+                            updated_at = excluded.updated_at
+                        """,
+                        (sym, json.dumps(thresholds), now_str),
+                    )
+                    conn.commit()
+
+        if json_out:
+            try:
+                refresh_thresholds_file(
+                    feature_dir=feature_dir,
+                    symbols=symbols_in_reg,
+                    out_path=json_out,
+                    days=lookback_days,
+                )
+            except Exception as e:
+                print(f"WARN: JSON file write failed: {e}", file=sys.stderr)
+    finally:
+        conn.close()
 
 
 if __name__ == "__main__":

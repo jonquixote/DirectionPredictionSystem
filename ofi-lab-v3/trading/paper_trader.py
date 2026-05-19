@@ -357,13 +357,43 @@ class PaperTrader:
         self._boot_ts_ms = int(time.time() * 1000)
 
     def _reload_regime_thresholds(self) -> None:
-        import json
+        """Load regime thresholds: JSON file (primary) or SQLite table (fallback).
+
+        JSON path: $REGIME_THRESHOLDS_PATH (default /data/regime_thresholds.json)
+        DB fallback: regime_thresholds table (populated by backfill/nightly cron)
+        """
+        import json as _json
         p = Path(self._regime_thresholds_path)
         if p.exists():
             try:
-                self._regime_thresholds = json.loads(p.read_text())
-            except Exception:
+                data = _json.loads(p.read_text())
+                self._regime_thresholds = data
+                logger.info(
+                    "regime_thresholds loaded from file: %d symbols",
+                    sum(1 for k in data if k != "updated_at"),
+                )
+                return
+            except Exception as e:
+                logger.warning("regime_thresholds file load failed: %s", e)
+
+        # Fallback: read from regime_thresholds DB table
+        try:
+            from regime.threshold_updater import load_thresholds_from_db
+            data = load_thresholds_from_db(self._db_conn)
+            if data:
+                self._regime_thresholds = data
+                logger.info(
+                    "regime_thresholds loaded from DB: %d symbols", len(data)
+                )
+            else:
+                logger.warning(
+                    "regime_thresholds: JSON file absent and DB table empty — "
+                    "all regime tags will be 'unknown' until backfill runs"
+                )
                 self._regime_thresholds = {}
+        except Exception as e:
+            logger.warning("regime_thresholds DB fallback failed: %s", e)
+            self._regime_thresholds = {}
 
     def _tag_regime(self, symbol: str, regime_features: dict) -> RegimeTags:
         if not self._regime_thresholds:
@@ -1082,6 +1112,13 @@ class PaperTrader:
                         self.refresh_decay_metrics()
                     except Exception as e:
                         logger.exception("decay_refresh_failed", extra={"err": str(e)})
+
+                # Reload regime thresholds every 12 boundaries (~60 min)
+                if self._boundary_count % 12 == 0:
+                    try:
+                        self._reload_regime_thresholds()
+                    except Exception as e:
+                        logger.exception("regime_threshold_reload_failed", extra={"err": str(e)})
 
                 # C6: Evaluate lifecycle FSM every 16 boundaries + reload model meta
                 if self._boundary_count % self._lifecycle_interval == 0:
