@@ -21,7 +21,7 @@ from routers import (
     parquet, features, models_registry, alerts, logs,
     models_admin, overlap, kill_switch, audit, admin,
     regime, calibration, baseline, dashboard_settings,
-    kalshi_proxy,
+    kalshi_proxy, analysis,
 )
 try:
     from routers import training as training_router
@@ -102,6 +102,7 @@ _routers = [
     baseline.router,  # cutover baseline — gates predictions page
     dashboard_settings.router,
     kalshi_proxy.router,  # /kalshi/* → 8080 runtime API with Basic→Bearer translation
+    analysis.router,
 ]
 if _has_training:
     _routers.append(training_router.router)
