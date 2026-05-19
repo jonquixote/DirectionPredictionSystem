@@ -797,7 +797,29 @@ def compute_full_report(
                 "expected_n_trades_per_day": expected_n,
             })
 
+    # Merge results + recommended_configs into a `pairs` array (one per
+    # symbol+window). Match frontend types (Analysis.tsx FullReport).
+    from datetime import datetime, timezone as _tz
+    pairs = []
+    rec_by_key = {(rc["symbol"], rc["window"]): rc for rc in recommended_configs}
+    for r in results:
+        key = (r["symbol"], r["market_window_seconds"])
+        pairs.append({
+            "symbol": r["symbol"],
+            "window": r["market_window_seconds"],
+            "leaderboard": r["leaderboard"],
+            "threshold_grid": r["threshold_grid"],
+            # Frontend expects committee_sims as array — give them just the
+            # `avg` strategy result for now (the other strategies are still
+            # available via /api/analysis/committee-sim with ?strategy=).
+            "committee_sims": [r["committee_sim"]] if r["committee_sim"] else [],
+            "skip_conditions": r["skip_conditions"],
+            "recommended_config": rec_by_key.get(key, {}),
+        })
     return {
+        "generated_at": datetime.now(_tz.utc).isoformat(),
+        "pairs": pairs,
+        # Back-compat aliases for existing CLI + tests that read the legacy keys.
         "results": results,
         "recommended_configs": recommended_configs,
     }
