@@ -272,6 +272,21 @@ async def api_decay_filter(
     )
 
 
+@router.get("/analysis/observation-status")
+async def api_observation_status():
+    """Live monitoring of consensus-gated paper-observation models.
+
+    Returns the 6 currently-gated models (3 ETH 300s + 3 BTC 1800s) plus
+    fresh paper-trade win rates and the 7-day decision gate readout
+    (ship / observe / kill).
+    """
+    try:
+        from services.analysis import observation_status
+    except ModuleNotFoundError:
+        from dashboard_api.services.analysis import observation_status  # type: ignore
+    return observation_status()
+
+
 @router.get("/analysis/committee-weights")
 async def api_committee_weights(
     symbol: str = Query(...),

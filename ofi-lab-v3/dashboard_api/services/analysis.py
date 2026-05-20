@@ -2183,3 +2183,321 @@ def recommend_premium_filter(
         },
         warnings=warnings_list,
     )
+
+
+# ---------------------------------------------------------------------------
+# observation_status — consensus-gated model monitoring dashboard
+# ---------------------------------------------------------------------------
+
+_OBSERVE_DIR = "/data/observe"
+_SHIP_THRESHOLD = 0.65
+_OBSERVE_THRESHOLD = 0.55
+_GATE_DAYS = 7
+_MIN_N_FOR_RATE = 10
+
+
+def _wilson_ci_safe(wins: int, n: int) -> list[float] | None:
+    """Return [lo, hi] Wilson CI or None if n is 0."""
+    if n == 0:
+        return None
+    lo, hi = wilson_ci(wins, n)
+    return [round(lo, 4), round(hi, 4)]
+
+
+def _gate_applied_at_for_model(db, model_name: str) -> str | None:
+    """Return ISO timestamp when consensus_required was first set for this model.
+
+    Strategy: scan model_audit for action='set_filter' rows where after_json
+    contains 'consensus_required' in the detail string. Return earliest match.
+    Falls back to committee_weights.computed_at for the model's (symbol, window).
+    """
+    rows = db.execute(
+        """
+        SELECT ts FROM model_audit
+        WHERE model_name = ? AND action = 'set_filter'
+              AND detail LIKE '%consensus_required%true%'
+        ORDER BY ts ASC
+        LIMIT 1
+        """,
+        (model_name,),
+    ).fetchall()
+    if rows:
+        return rows[0]["ts"]
+    return None
+
+
+def _gate_applied_at_for_pair(db, symbol: str, window: int, models: list[str]) -> str | None:
+    """Return the earliest gate timestamp across all models in the pair."""
+    earliest = None
+    for m in models:
+        t = _gate_applied_at_for_model(db, m)
+        if t and (earliest is None or t < earliest):
+            earliest = t
+    if earliest:
+        return earliest
+    # Fallback: committee_weights computed_at
+    row = db.execute(
+        """
+        SELECT computed_at FROM committee_weights
+        WHERE symbol = ? AND market_window_seconds = ?
+        ORDER BY computed_at DESC LIMIT 1
+        """,
+        (symbol, window),
+    ).fetchone()
+    if row and row["computed_at"]:
+        return row["computed_at"]
+    return None
+
+
+def _fresh_paper_trade_stats(db, models: list[str], symbol: str, window: int,
+                              gate_ts: str | None) -> dict:
+    """Compute live win-rate stats from paper_trades since gate was applied.
+
+    Counts:
+    - n_total: all paper_trades rows for models in (symbol, window) since gate_ts
+    - n_consensus_deferred: rows with decision_outcome='suppressed' AND reason='consensus_required'
+    - n_executed: total - deferred (trades that actually executed)
+    - n_resolved: executed trades with resolved=1
+    - win_rate: wins / n_resolved (None if < _MIN_N_FOR_RATE)
+    """
+    warnings: list[str] = []
+
+    if not models:
+        return {
+            "n_total": 0, "n_consensus_deferred": 0, "n_executed": 0,
+            "n_resolved": 0, "win_rate": None, "wilson_ci": None,
+        }
+
+    placeholders = ",".join("?" * len(models))
+    gate_ms: int | None = None
+    if gate_ts:
+        try:
+            from datetime import datetime, timezone
+            # Parse ISO string (with or without Z suffix)
+            ts_clean = gate_ts.rstrip("Z").replace("+00:00", "")
+            dt = datetime.fromisoformat(ts_clean).replace(tzinfo=timezone.utc)
+            gate_ms = int(dt.timestamp() * 1000)
+        except Exception:
+            pass
+
+    # Fetch all paper_trades rows for these models in this (symbol, window)
+    since_clause = ""
+    params_base: list = list(models) + [symbol, window]
+    if gate_ms is not None:
+        since_clause = "AND pt.ts_contract_open_ms >= ?"
+        params_base.append(gate_ms)
+
+    rows = db.execute(
+        f"""
+        SELECT pt.resolved, pt.prediction_correct, pt.decision_outcome, pt.suppressed_reason,
+               pt.decision_reason
+        FROM paper_trades pt
+        WHERE pt.model_name IN ({placeholders})
+          AND pt.symbol = ?
+          AND pt.market_window_seconds = ?
+          {since_clause}
+        """,
+        params_base,
+    ).fetchall()
+
+    n_total = len(rows)
+    n_deferred = sum(
+        1 for r in rows
+        if (r["decision_outcome"] == "suppressed"
+            and r["decision_reason"] == "consensus_required")
+    )
+    # Executed = wrote a trade (not consensus-suppressed)
+    executed = [r for r in rows if not (
+        r["decision_outcome"] == "suppressed"
+        and r["decision_reason"] == "consensus_required"
+    )]
+    n_executed = len(executed)
+    resolved = [r for r in executed if r["resolved"] == 1]
+    n_resolved = len(resolved)
+    wins = sum(1 for r in resolved if r["prediction_correct"] == 1)
+
+    win_rate: float | None = None
+    ci: list[float] | None = None
+    if n_resolved >= _MIN_N_FOR_RATE:
+        win_rate = round(wins / n_resolved, 4)
+        ci = _wilson_ci_safe(wins, n_resolved)
+    else:
+        warnings.append(
+            f"only {n_resolved} resolved trades since gate; win_rate suppressed (min={_MIN_N_FOR_RATE})"
+        )
+
+    return {
+        "n_total": n_total,
+        "n_consensus_deferred": n_deferred,
+        "n_executed": n_executed,
+        "n_resolved": n_resolved,
+        "win_rate": win_rate,
+        "wilson_ci": ci,
+        "_warnings": warnings,
+    }
+
+
+def _decision_gate(win_rate: float | None, gate_ts: str | None) -> dict:
+    """Compute ship/observe/kill status and days remaining."""
+    import math as _math
+    from datetime import datetime, timezone
+
+    days_observed: float = 0.0
+    if gate_ts:
+        try:
+            ts_clean = gate_ts.rstrip("Z").replace("+00:00", "")
+            dt = datetime.fromisoformat(ts_clean).replace(tzinfo=timezone.utc)
+            now = datetime.now(timezone.utc)
+            days_observed = max(0.0, (now - dt).total_seconds() / 86400.0)
+        except Exception:
+            pass
+
+    days_remaining = max(0.0, round(_GATE_DAYS - days_observed, 2))
+    days_observed_r = round(days_observed, 2)
+
+    if win_rate is None:
+        status = "observe"
+    elif win_rate >= _SHIP_THRESHOLD:
+        status = "ship"
+    elif win_rate >= _OBSERVE_THRESHOLD:
+        status = "observe"
+    else:
+        status = "kill"
+
+    return {
+        "ship_threshold": _SHIP_THRESHOLD,
+        "observe_threshold": _OBSERVE_THRESHOLD,
+        "current_status": status,
+        "days_remaining_to_decision": days_remaining,
+    }, days_observed_r
+
+
+def _read_snapshots(observe_dir: str, limit: int = 14) -> list[dict]:
+    """Read JSON snapshot files from observe_dir; return last `limit` by date desc."""
+    import os
+    import json as _json
+
+    snapshots: list[dict] = []
+    try:
+        entries = os.listdir(observe_dir)
+    except FileNotFoundError:
+        return []
+    except PermissionError:
+        return []
+
+    json_files = sorted(
+        [e for e in entries if e.endswith(".json")],
+        reverse=True,
+    )[:limit]
+
+    for fname in json_files:
+        fpath = os.path.join(observe_dir, fname)
+        # Expected format: YYYY-MM-DD_SYMBOL_WINDOW.json
+        snap: dict = {"path": fpath}
+        parts = fname[:-5].split("_")  # strip .json
+        if len(parts) >= 3:
+            snap["date"] = parts[0]
+            snap["symbol"] = parts[1]
+            try:
+                snap["window"] = int(parts[2])
+            except ValueError:
+                snap["window"] = None
+        else:
+            snap["date"] = None
+            snap["symbol"] = None
+            snap["window"] = None
+
+        try:
+            with open(fpath) as fh:
+                data = _json.load(fh)
+            snap["recommend_premium_winner"] = data.get("winner") or data.get("recommend_premium_winner")
+        except Exception:
+            snap["recommend_premium_winner"] = None
+
+        snapshots.append(snap)
+
+    return snapshots
+
+
+def observation_status(observe_dir: str = _OBSERVE_DIR) -> dict:
+    """Summarize consensus-gated model observation state.
+
+    Returns an envelope with:
+    - observation_pairs: grouped by (symbol, window)
+    - snapshots: last 14 /data/observe/*.json files
+    """
+    started = _now_iso()
+    db = _get_db()
+    warnings_list: list[str] = []
+
+    # 1. Query model_registry for consensus_required models
+    rows = db.execute(
+        """
+        SELECT name, symbol, training_horizon_seconds, filter_config_json
+        FROM model_registry
+        WHERE filter_config_json LIKE '%consensus_required%'
+          AND paper_active = 1
+        """
+    ).fetchall()
+
+    # Filter: only rows where consensus_required is actually true
+    gated_models: list[dict] = []
+    for row in rows:
+        try:
+            import json as _json
+            fc = _json.loads(row["filter_config_json"] or "{}")
+        except Exception:
+            fc = {}
+        if fc.get("consensus_required") is True:
+            gated_models.append({
+                "name": row["name"],
+                "symbol": row["symbol"],
+                "window": row["training_horizon_seconds"],
+                "filter_config": fc,
+            })
+
+    # 2. Group by (symbol, window)
+    from collections import defaultdict as _dd
+    pairs: dict[tuple, list] = _dd(list)
+    filter_configs: dict[tuple, dict] = {}
+    for m in gated_models:
+        key = (m["symbol"], m["window"])
+        pairs[key].append(m["name"])
+        filter_configs[key] = m["filter_config"]
+
+    # 3. Build observation_pairs
+    observation_pairs: list[dict] = []
+    for (symbol, window), models in sorted(pairs.items()):
+        gate_ts = _gate_applied_at_for_pair(db, symbol, window, models)
+        trade_stats = _fresh_paper_trade_stats(db, models, symbol, window, gate_ts)
+        extra_warnings = trade_stats.pop("_warnings", [])
+        warnings_list.extend(extra_warnings)
+
+        gate_dict, days_observed = _decision_gate(trade_stats["win_rate"], gate_ts)
+
+        observation_pairs.append({
+            "symbol": symbol,
+            "window": window,
+            "models": sorted(models),
+            "filter_config": filter_configs[(symbol, window)],
+            "gate_applied_at": gate_ts,
+            "days_observed": days_observed,
+            "fresh_paper_trades": trade_stats,
+            "decision_gate": gate_dict,
+        })
+
+    # 4. Read snapshots
+    snapshots = _read_snapshots(observe_dir)
+
+    return {
+        "status": "ok",
+        "metadata": {
+            "computed_at_utc": started,
+            "n_observation_pairs": len(observation_pairs),
+        },
+        "result": {
+            "observation_pairs": observation_pairs,
+            "snapshots": snapshots,
+        },
+        "warnings": warnings_list,
+    }
