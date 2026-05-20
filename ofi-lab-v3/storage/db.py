@@ -51,6 +51,11 @@ def _run_migrations(conn) -> None:
     _add_column_if_missing(conn, "model_registry", "filter_config_json", "TEXT DEFAULT '{}'")
     _add_column_if_missing(conn, "model_registry", "platform_active_json",
         "TEXT DEFAULT '{\"paper\":true,\"kalshi\":false,\"polymarket\":false}'")
+    # T3.2 — explicit fleet grouping column. Backfilled from train_window_end for legacy rows.
+    _add_column_if_missing(conn, "model_registry", "fleet_version", "TEXT")
+    conn.execute(
+        "UPDATE model_registry SET fleet_version = train_window_end WHERE fleet_version IS NULL"
+    )
     # H2 — decay-join leakage hardening. Denormalized ms timestamp + window
     # cutoff sentinel for strict-< joins from analysis service.
     _add_column_if_missing(conn, "decay_metrics", "ts_ms", "INTEGER")

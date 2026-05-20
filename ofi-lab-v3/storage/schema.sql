@@ -383,6 +383,8 @@ CREATE TABLE IF NOT EXISTS model_registry (
     evaluation_windows TEXT DEFAULT '[300,900,1800]',
     filter_config_json TEXT DEFAULT '{}',
     platform_active_json TEXT DEFAULT '{"paper":true,"kalshi":false,"polymarket":false}',
+    -- fleet_version (TEXT) — explicit fleet grouping, added via _run_migrations() ALTER TABLE.
+    -- Backfilled from train_window_end for legacy rows. New registrations supply it directly.
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );

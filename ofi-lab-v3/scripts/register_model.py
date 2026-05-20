@@ -2,8 +2,10 @@
 import argparse
 import hashlib
 import json
+import os
 import sqlite3
 import sys
+from datetime import date, timedelta
 from pathlib import Path
 
 
@@ -21,6 +23,7 @@ def register_model(
     conn: sqlite3.Connection,
     artifact_dir: str,
     evaluation_windows: list[int],
+    fleet_version: str | None = None,
 ) -> str:
     """
     Register a trained model artifact into model_registry.
@@ -45,6 +48,13 @@ def register_model(
 
     artifact_hash = _sha256(art / "model.lgb")
 
+    # fleet_version: explicit arg > env var > metrics.train_window_end
+    effective_fleet_version = (
+        fleet_version
+        or os.environ.get("V3_FLEET_VERSION")
+        or metrics.get("train_window_end")
+    )
+
     existing = conn.execute(
         "SELECT is_baseline, lifecycle_state, paper_active, live_eligible "
         "FROM model_registry WHERE name=?",
@@ -56,7 +66,7 @@ def register_model(
         conn.execute(
             "UPDATE model_registry SET artifact_path=?, feature_names_path=?, "
             "artifact_hash=?, train_window_start=?, train_window_end=?, "
-            "train_days=?, feature_version=?, evaluation_windows=? "
+            "train_days=?, feature_version=?, evaluation_windows=?, fleet_version=? "
             "WHERE name=?",
             (
                 str(art / "model.lgb"),
@@ -67,6 +77,7 @@ def register_model(
                 train_days,
                 metrics.get("feature_version", "v3"),
                 json.dumps(evaluation_windows),
+                effective_fleet_version,
                 name,
             ),
         )
@@ -77,9 +88,9 @@ def register_model(
             "symbol, training_horizon_seconds, generation, artifact_path, "
             "feature_names_path, artifact_hash, train_window_start, "
             "train_window_end, train_days, feature_version, evaluation_windows, "
-            "filter_config_json, platform_active_json) "
+            "filter_config_json, platform_active_json, fleet_version) "
             "VALUES (?, 0, 1, 0, 'active', ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, '{}', "
-            "'{\"paper\":true,\"kalshi\":false,\"polymarket\":false}')",
+            "'{\"paper\":true,\"kalshi\":false,\"polymarket\":false}', ?)",
             (
                 name,
                 symbol,
@@ -92,6 +103,7 @@ def register_model(
                 train_days,
                 metrics.get("feature_version", "v3"),
                 json.dumps(evaluation_windows),
+                effective_fleet_version,
             ),
         )
 
@@ -103,6 +115,50 @@ def register_model(
     )
     conn.commit()
     return name
+
+
+def demote_old_fleets(conn: sqlite3.Connection, days: int) -> int:
+    """
+    Demote non-baseline fleet models whose fleet_version is older than
+    (today - days) by setting paper_active=0.
+
+    Refuses to demote if doing so would leave zero active fleet models.
+
+    Returns:
+        Number of rows actually updated (may be 0 if idempotent re-run).
+    """
+    cutoff = (date.today() - timedelta(days=days)).strftime("%Y-%m-%d")
+
+    # Safety: count active fleet rows that would remain after demotion.
+    remaining = conn.execute(
+        "SELECT COUNT(*) FROM model_registry "
+        "WHERE is_baseline = 0 "
+        "  AND paper_active = 1 "
+        "  AND (fleet_version IS NULL OR fleet_version >= ?)",
+        (cutoff,),
+    ).fetchone()[0]
+
+    if remaining == 0:
+        print(
+            f"demote-fleets: REFUSED (cutoff={cutoff}, days={days}): "
+            "demotion would leave zero active fleet models — skipping",
+            file=sys.stderr,
+        )
+        return 0
+
+    cur = conn.execute(
+        "UPDATE model_registry "
+        "   SET paper_active = 0 "
+        " WHERE is_baseline = 0 "
+        "   AND fleet_version IS NOT NULL "
+        "   AND fleet_version < ? "
+        "   AND paper_active = 1",
+        (cutoff,),
+    )
+    updated = cur.rowcount or 0
+    conn.commit()
+    print(f"demote-fleets: cutoff={cutoff} (days={days}) rows_updated={updated}")
+    return updated
 
 
 def main():
@@ -118,6 +174,25 @@ def main():
         default="300,900,1800",
         help="Comma-separated evaluation window durations in seconds",
     )
+    p.add_argument(
+        "--fleet-version",
+        default=None,
+        help=(
+            "Explicit fleet grouping label (e.g. '2026-05-16'). "
+            "Falls back to V3_FLEET_VERSION env var, then train_window_end."
+        ),
+    )
+    p.add_argument(
+        "--demote-fleets-older-than",
+        type=int,
+        default=None,
+        metavar="DAYS",
+        help=(
+            "After registration, set paper_active=0 on non-baseline fleet "
+            "rows whose fleet_version is older than (today - DAYS). "
+            "Refuses to run if it would leave zero active fleet models."
+        ),
+    )
     args = p.parse_args()
 
     conn = sqlite3.connect(args.db)
@@ -126,8 +201,12 @@ def main():
         conn=conn,
         artifact_dir=args.artifact_dir,
         evaluation_windows=[int(x) for x in args.evaluation_windows.split(",")],
+        fleet_version=args.fleet_version,
     )
     print(f"registered: {name}")
+
+    if args.demote_fleets_older_than is not None:
+        demote_old_fleets(conn, args.demote_fleets_older_than)
 
 
 if __name__ == "__main__":

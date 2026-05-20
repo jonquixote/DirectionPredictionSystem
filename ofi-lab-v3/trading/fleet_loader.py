@@ -15,14 +15,19 @@ def load_active_fleet(conn: sqlite3.Connection) -> list[dict]:
         artifact_path, feature_names_path, evaluation_windows (as list),
         generation, is_baseline, lifecycle_state
     """
+    # ORDER BY drives t.models insertion order. boundary_scorer iterates
+    # t.models.items() in insertion order (CPython dict contract), so latest
+    # fleet + live-eligible models score first within each boundary's budget.
     rows = conn.execute(
         """
         SELECT name, symbol, training_horizon_seconds, artifact_path,
         feature_names_path, evaluation_windows, generation, is_baseline,
-        lifecycle_state, filter_config_json, platform_active_json
+        lifecycle_state, filter_config_json, platform_active_json,
+        fleet_version, live_eligible
         FROM model_registry
         WHERE paper_active = 1 AND lifecycle_state != 'suspended'
-        ORDER BY is_baseline DESC, training_horizon_seconds, name
+        ORDER BY live_eligible DESC, fleet_version DESC, is_baseline DESC,
+                 training_horizon_seconds, name
         """
     ).fetchall()
     out = []

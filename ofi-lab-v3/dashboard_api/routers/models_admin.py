@@ -78,7 +78,7 @@ def list_models():
         SELECT mr.name, mr.is_baseline, mr.lifecycle_state,
                mr.paper_active, mr.live_eligible,
                mr.symbol, mr.training_horizon_seconds as horizon,
-               mr.generation, mr.created_at,
+               mr.generation, mr.created_at, mr.fleet_version,
                dm.recency_weighted_ev as ewma_ev,
                dm.brier_score as ewma_brier,
                dm.calibration_error as psi

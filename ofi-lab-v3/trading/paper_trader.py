@@ -289,7 +289,8 @@ class PaperTrader:
             reg = self._db_conn.execute(
                 "SELECT symbol, training_horizon_seconds, feature_version, "
                 "train_window_start, train_window_end, train_days, "
-                "platform_active_json, filter_config_json FROM model_registry WHERE name=?",
+                "platform_active_json, filter_config_json, "
+                "fleet_version, live_eligible FROM model_registry WHERE name=?",
                 (name,),
             ).fetchone()
             if reg:
@@ -473,9 +474,11 @@ class PaperTrader:
                 "train_window_start, train_window_end, train_days, "
                 "artifact_path, feature_names_path, "
                 "platform_active_json, filter_config_json, "
-                "lifecycle_state, paper_active, live_eligible "
+                "lifecycle_state, paper_active, live_eligible, fleet_version "
                 "FROM model_registry "
-                "WHERE paper_active = 1 AND lifecycle_state != 'suspended'"
+                "WHERE paper_active = 1 AND lifecycle_state != 'suspended' "
+                "ORDER BY live_eligible DESC, fleet_version DESC, is_baseline DESC, "
+                "training_horizon_seconds, name"
             ).fetchall()
         except Exception as e:
             logger.error("_reload_fleet SQL failed: %s", e)
