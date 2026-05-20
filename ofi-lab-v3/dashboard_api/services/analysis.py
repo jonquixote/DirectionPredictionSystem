@@ -13,8 +13,125 @@ import json
 import math
 import random
 import statistics
+import time as _time
 from collections import defaultdict
 from typing import Any, Optional
+
+# ---------------------------------------------------------------------------
+# Module-level TTL in-memory cache  (T1.1)
+# ---------------------------------------------------------------------------
+
+_CACHE: dict[str, tuple[float, Any]] = {}  # key → (computed_at_ts, payload)
+_CACHE_TTL_SECS = 300  # 5-minute boundary cycle
+
+
+def _cache_get(key: str) -> Any | None:
+    entry = _CACHE.get(key)
+    if entry and (_time.time() - entry[0]) < _CACHE_TTL_SECS:
+        return entry[1]
+    return None
+
+
+def _cache_put(key: str, payload: Any) -> None:
+    _CACHE[key] = (_time.time(), payload)
+
+
+# ---------------------------------------------------------------------------
+# Persistent SQLite cache for slow endpoints  (T1.2)
+#
+# Survives worker restarts and is shared across uvicorn workers. The
+# background loop in dashboard_api.main repopulates these rows every 5 min so
+# warm reads return in <50 ms. We reuse _get_db() (the same monkeypatchable
+# helper used by analysis fetches) so tests transparently share the test DB.
+# ---------------------------------------------------------------------------
+
+_ANALYSIS_CACHE_TABLE_READY: dict[int, bool] = {}  # keyed by id(db) — defensive
+
+
+def _ensure_analysis_cache_table(db) -> None:
+    """Create analysis_cache table on first use if init_schema hasn't run.
+
+    The dashboard API process does not call init_schema (only writers do),
+    so this guards against a fresh DB or a DB created before this migration
+    landed. Idempotent — uses CREATE TABLE IF NOT EXISTS.
+    """
+    cache_id = id(db)
+    if _ANALYSIS_CACHE_TABLE_READY.get(cache_id):
+        return
+    try:
+        db.execute(
+            "CREATE TABLE IF NOT EXISTS analysis_cache ("
+            "  key TEXT PRIMARY KEY,"
+            "  payload_json TEXT NOT NULL,"
+            "  computed_at_ms INTEGER NOT NULL,"
+            "  duration_ms INTEGER"
+            ")"
+        )
+        db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_analysis_cache_computed_at"
+            " ON analysis_cache(computed_at_ms)"
+        )
+        try:
+            db.commit()
+        except Exception:
+            pass
+        _ANALYSIS_CACHE_TABLE_READY[cache_id] = True
+    except Exception:
+        # Read-only or contended — fall through; helpers will no-op on failure.
+        pass
+
+
+def _persistent_cache_get(key: str, max_age_ms: int = 300_000) -> dict | None:
+    """Read cached blob if computed within max_age_ms; else None.
+
+    Returns the decoded JSON payload (dict) on hit. Never raises — any
+    error (missing table, malformed JSON, DB unavailable) is swallowed so
+    the caller falls through to live computation.
+    """
+    try:
+        db = _get_db()
+    except Exception:
+        return None
+    try:
+        _ensure_analysis_cache_table(db)
+        now_ms = int(_time.time() * 1000)
+        row = db.execute(
+            "SELECT payload_json, computed_at_ms FROM analysis_cache WHERE key = ?",
+            (key,),
+        ).fetchone()
+        if row is None:
+            return None
+        computed_at_ms = row[1] if not hasattr(row, "keys") else row["computed_at_ms"]
+        if (now_ms - int(computed_at_ms)) > max_age_ms:
+            return None
+        payload_json = row[0] if not hasattr(row, "keys") else row["payload_json"]
+        return json.loads(payload_json)
+    except Exception:
+        return None
+
+
+def _persistent_cache_put(key: str, payload: dict, duration_ms: int) -> None:
+    """Upsert cache row via INSERT OR REPLACE. Best-effort — never raises."""
+    try:
+        db = _get_db()
+    except Exception:
+        return
+    try:
+        _ensure_analysis_cache_table(db)
+        payload_json = json.dumps(payload, default=str)
+        now_ms = int(_time.time() * 1000)
+        db.execute(
+            "INSERT OR REPLACE INTO analysis_cache"
+            " (key, payload_json, computed_at_ms, duration_ms)"
+            " VALUES (?, ?, ?, ?)",
+            (key, payload_json, now_ms, int(duration_ms)),
+        )
+        try:
+            db.commit()
+        except Exception:
+            pass
+    except Exception:
+        return
 
 try:
     import numpy as np
@@ -78,6 +195,12 @@ def _load_resolved_predictions(
       p_market, ts_contract_open_ms, utc_hour, day_of_week,
       relative_spread, p_model_minus_market
     """
+    # T1.1 — in-memory TTL cache for the most-called DB fetch
+    _cache_key = f"_load_resolved:{symbol}:{market_window}:{since_ms}:{model}"
+    _cached = _cache_get(_cache_key)
+    if _cached is not None:
+        return _cached
+
     clauses = ["resolved = 1", "prediction_correct IS NOT NULL", "warmup = 0"]
     params: list[Any] = []
 
@@ -119,6 +242,7 @@ def _load_resolved_predictions(
         pm = d.get("p_market") or 0.5
         d["divergence"] = abs(pp - pm)
         result.append(d)
+    _cache_put(_cache_key, result)
     return result
 
 
@@ -379,6 +503,11 @@ def compute_committee_sim(
     strategy: str = "avg",
     since_ms: int | None = None,
 ) -> dict:
+    # T1.1 outer cache
+    _ck = f"committee_sim:{symbol}:{market_window}:{strategy}:{since_ms}"
+    _hit = _cache_get(_ck)
+    if _hit is not None:
+        return _hit
     db = _get_db()
     preds = _load_resolved_predictions(db, symbol, market_window, since_ms)
 
@@ -477,7 +606,7 @@ def compute_committee_sim(
         delta = 0.0
         recommendation = "committee" if n_boundaries > 0 else "no_data"
 
-    return {
+    _result = {
         "symbol": symbol,
         "market_window_seconds": market_window,
         "strategy": strategy,
@@ -488,6 +617,8 @@ def compute_committee_sim(
         "recommendation": recommendation,
         "delta_pct_points": round(delta * 100, 4),
     }
+    _cache_put(_ck, _result)
+    return _result
 
 
 # ---------------------------------------------------------------------------
@@ -515,6 +646,17 @@ def compute_skip_conditions(
     min_bucket_size: int = 30,
     since_ms: int | None = None,
 ) -> dict:
+    # T1.1 outer cache (in-memory, per-worker)
+    _ck = f"skip_conditions:{symbol or '_all'}:{market_window or '_all'}:{min_bucket_size}:{since_ms or '_all'}"
+    _hit = _cache_get(_ck)
+    if _hit is not None:
+        return _hit
+    # T1.2 persistent cache (shared across workers, repopulated by bg loop)
+    _persisted = _persistent_cache_get(_ck)
+    if _persisted is not None:
+        _cache_put(_ck, _persisted)
+        return _persisted
+    _t0 = _time.time()
     db = _get_db()
     preds = _load_resolved_predictions(db, symbol, market_window, since_ms)
 
@@ -675,7 +817,7 @@ def compute_skip_conditions(
         r["skip_recommended"] for r in div_rows if r["bucket"] == 4
     )
 
-    return {
+    _result = {
         "symbol": symbol or "ALL",
         "window": market_window or "ALL",
         "buckets": {
@@ -692,6 +834,9 @@ def compute_skip_conditions(
             "skip_high_divergence": skip_high_div,
         },
     }
+    _cache_put(_ck, _result)
+    _persistent_cache_put(_ck, _result, int((_time.time() - _t0) * 1000))
+    return _result
 
 
 # ---------------------------------------------------------------------------
@@ -706,6 +851,17 @@ def compute_full_report(
     market_window: int | None = None,
     since_ms: int | None = None,
 ) -> dict:
+    # T1.1 outer cache — most expensive endpoint
+    _ck = f"full_report:{symbol or '_all'}:{market_window or '_all'}:{since_ms or '_all'}"
+    _hit = _cache_get(_ck)
+    if _hit is not None:
+        return _hit
+    # T1.2 persistent cache (shared across workers, repopulated by bg loop)
+    _persisted = _persistent_cache_get(_ck)
+    if _persisted is not None:
+        _cache_put(_ck, _persisted)
+        return _persisted
+    _t0 = _time.time()
     symbols = [symbol] if symbol else ALL_SYMBOLS
     windows = [market_window] if market_window else ALL_WINDOWS
 
@@ -827,13 +983,16 @@ def compute_full_report(
             "skip_conditions": r["skip_conditions"],
             "recommended_config": rec_by_key.get(key, {}),
         })
-    return {
+    _result = {
         "generated_at": datetime.now(_tz.utc).isoformat(),
         "pairs": pairs,
         # Back-compat aliases for existing CLI + tests that read the legacy keys.
         "results": results,
         "recommended_configs": recommended_configs,
     }
+    _cache_put(_ck, _result)
+    _persistent_cache_put(_ck, _result, int((_time.time() - _t0) * 1000))
+    return _result
 
 
 # ===========================================================================

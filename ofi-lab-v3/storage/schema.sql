@@ -468,3 +468,19 @@ CREATE TABLE IF NOT EXISTS committee_weights (
 -- NOTE: SQLite has no IF NOT EXISTS for ALTER TABLE. The migration writer
 -- (storage.db._migrate or analysis service init) must check + add.
 -- See storage/db.py:_ensure_decay_metrics_hardening.
+
+-- =========================================================================
+-- analysis_cache (T1.2): persistent blob cache for slow /api/analysis/*
+-- endpoints. Pre-populated every 5 min by the dashboard background loop so
+-- warm reads return in <50 ms. Multi-worker safe via INSERT OR REPLACE
+-- + WAL mode. payload_json is JSON-encoded (dumps with default=str).
+-- =========================================================================
+CREATE TABLE IF NOT EXISTS analysis_cache (
+    key             TEXT PRIMARY KEY,
+    payload_json    TEXT NOT NULL,
+    computed_at_ms  INTEGER NOT NULL,
+    duration_ms     INTEGER
+);
+
+CREATE INDEX IF NOT EXISTS idx_analysis_cache_computed_at
+    ON analysis_cache(computed_at_ms);

@@ -47,6 +47,87 @@ async def _refresh_loop():
         await asyncio.sleep(5)
 
 
+# T1.2 — Background pre-compute of slow analysis endpoints. Pre-populates
+# the persistent analysis_cache so /api/analysis/full-report warm reads stay
+# <50ms. Multi-worker safe: writes go through INSERT OR REPLACE under WAL.
+_ANALYSIS_PRECOMPUTE_INTERVAL_S = 300
+_ANALYSIS_PRECOMPUTE_BOOT_DELAY_S = 30
+_ANALYSIS_FALLBACK_PAIRS = [
+    (s, w)
+    for s in ("BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT")
+    for w in (300, 900, 1800)
+]
+
+
+def _analysis_discover_pairs() -> list[tuple[str, int]]:
+    """Return distinct (symbol, market_window_seconds) seen in predictions.
+
+    Falls back to the hardcoded 4×3 grid if the query returns empty (fresh DB).
+    Best-effort — any failure returns the fallback set.
+    """
+    try:
+        from services.analysis import _get_db  # type: ignore
+    except ModuleNotFoundError:
+        from dashboard_api.services.analysis import _get_db  # type: ignore
+    try:
+        db = _get_db()
+        rows = db.execute(
+            "SELECT DISTINCT symbol, market_window_seconds FROM predictions"
+        ).fetchall()
+        pairs = [(r[0], int(r[1])) for r in rows if r[0] and r[1] is not None]
+        if pairs:
+            return pairs
+    except Exception as exc:
+        logger.warning("analysis precompute: pair discovery failed: %s", exc)
+    return list(_ANALYSIS_FALLBACK_PAIRS)
+
+
+async def _analysis_precompute_loop():
+    """Periodically repopulate the analysis_cache so warm reads stay <50ms.
+
+    Runs every ~5 min. Catches per-pair exceptions so a single bad pair
+    cannot kill the loop. First run is delayed ~30s after startup to avoid
+    competing with cold-boot traffic.
+    """
+    try:
+        await asyncio.sleep(_ANALYSIS_PRECOMPUTE_BOOT_DELAY_S)
+    except asyncio.CancelledError:
+        return
+    try:
+        from services.analysis import compute_full_report  # type: ignore
+    except ModuleNotFoundError:
+        from dashboard_api.services.analysis import compute_full_report  # type: ignore
+
+    while True:
+        pairs = _analysis_discover_pairs()
+        logger.info(
+            "analysis precompute: starting cycle (%d pairs + unfiltered)",
+            len(pairs),
+        )
+        # Run each compute in a worker thread so we don't block the event loop.
+        for sym, win in pairs:
+            try:
+                await asyncio.to_thread(
+                    compute_full_report, symbol=sym, market_window=win
+                )
+            except Exception as exc:
+                logger.warning(
+                    "analysis precompute: %s/%ds failed: %s", sym, win, exc
+                )
+        # Unfiltered ALL/ALL view — the most expensive single call.
+        try:
+            await asyncio.to_thread(
+                compute_full_report, symbol=None, market_window=None
+            )
+        except Exception as exc:
+            logger.warning("analysis precompute: unfiltered failed: %s", exc)
+        logger.info("analysis precompute: cycle done")
+        try:
+            await asyncio.sleep(_ANALYSIS_PRECOMPUTE_INTERVAL_S)
+        except asyncio.CancelledError:
+            return
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup / shutdown lifecycle."""
@@ -57,9 +138,13 @@ async def lifespan(app: FastAPI):
     LiveState.initialize()
     start_alert_worker()
     task = asyncio.create_task(_refresh_loop())
-    logger.info("Dashboard API ready — background refresh started")
+    precompute_task = asyncio.create_task(_analysis_precompute_loop())
+    logger.info(
+        "Dashboard API ready — background refresh + analysis precompute started"
+    )
     yield
     task.cancel()
+    precompute_task.cancel()
     logger.info("Dashboard API shutting down")
 
 
