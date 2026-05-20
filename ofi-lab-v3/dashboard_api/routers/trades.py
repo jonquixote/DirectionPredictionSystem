@@ -9,6 +9,30 @@ from services.metrics import (
 router = APIRouter(tags=["trades"])
 
 
+@router.get("/trades/count")
+async def trades_count(
+    model: str | None = None,
+    symbol: str | None = None,
+    from_ms: int | None = None,
+    to_ms: int | None = None,
+    direction: str | None = None,
+    suppressed: bool | None = None,
+    outcome: str | None = None,
+    contract_duration: int | None = None,
+    duration: int | None = None,
+    settled: bool | None = None,
+):
+    """Return count of trades matching the given filters."""
+    store = get_store()
+    actual_duration = contract_duration or duration
+    total = store.count_trades(
+        model=model, symbol=symbol, from_ms=from_ms, to_ms=to_ms,
+        direction=direction, suppressed=suppressed, outcome=outcome,
+        contract_duration=actual_duration, settled=settled,
+    )
+    return {"total": total}
+
+
 @router.get("/trades")
 async def list_trades(
     model: str | None = None,
@@ -19,6 +43,7 @@ async def list_trades(
     suppressed: bool | None = None,
     outcome: str | None = None,
     contract_duration: int | None = None,
+    duration: int | None = None,
     net_sign: str | None = None,
     settled: bool | None = None,
     page: int = Query(1, ge=1),
@@ -28,11 +53,12 @@ async def list_trades(
 ):
     """Paginated, filtered paper trade records with realized NE_t."""
     store = get_store()
+    actual_duration = contract_duration or duration
 
     items, total = store.get_trades(
         model=model, symbol=symbol, from_ms=from_ms, to_ms=to_ms,
         direction=direction, suppressed=suppressed, outcome=outcome,
-        contract_duration=contract_duration, settled=settled,
+        contract_duration=actual_duration, settled=settled,
         page=page, page_size=page_size, sort=sort, order=order,
     )
 
@@ -59,7 +85,7 @@ async def list_trades(
             "filters_applied": {
                 k: v for k, v in {
                     "model": model, "symbol": symbol, "direction": direction,
-                    "contract_duration": contract_duration, "settled": settled,
+                    "contract_duration": actual_duration, "settled": settled,
                     "suppressed": suppressed, "outcome": outcome, "net_sign": net_sign,
                 }.items() if v is not None
             },

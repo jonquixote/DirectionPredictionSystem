@@ -399,13 +399,16 @@ async def suppression_effectiveness(
 
     results = []
     for reason, label in rules:
-        suppressed = [
-            t for t in store.trades
-            if t.get("suppressed_reason") == reason
-            and (model is None or t.get("model") == model)
-            and (from_ms is None or t.get("ts_model_ran_ms", 0) >= from_ms)
-            and (to_ms is None or t.get("ts_model_ran_ms", 0) <= to_ms)
-        ]
+        # SQL-backed: pulls full history (not the last-hour cache) so
+        # /performance/suppression-effectiveness works over arbitrary windows.
+        suppressed, _ = store.get_trades(
+            model=model,
+            from_ms=from_ms,
+            to_ms=to_ms,
+            suppressed=True,
+            suppressed_reason=reason,
+            page_size=100000,
+        )
 
         resolved = [t for t in suppressed if t.get("resolved") and t.get("prediction_correct") is not None]
 

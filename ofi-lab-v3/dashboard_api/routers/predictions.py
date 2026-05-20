@@ -7,6 +7,28 @@ from services.metrics import compute_realized_net, SYSTEM_FEE
 router = APIRouter(tags=["predictions"])
 
 
+@router.get("/predictions/count")
+async def predictions_count(
+    model: str | None = None,
+    symbol: str | None = None,
+    from_ms: int | None = None,
+    to_ms: int | None = None,
+    direction: str | None = None,
+    suppressed: bool | None = None,
+    warmup: bool | None = None,
+    outcome: str | None = None,
+    contract_duration: int | None = None,
+):
+    """Return count of predictions matching the given filters."""
+    store = get_store()
+    total = store.count_predictions(
+        model=model, symbol=symbol, from_ms=from_ms, to_ms=to_ms,
+        direction=direction, suppressed=suppressed, warmup=warmup,
+        outcome=outcome, contract_duration=contract_duration,
+    )
+    return {"total": total}
+
+
 @router.get("/predictions")
 async def list_predictions(
     model: str | None = None,
@@ -17,6 +39,7 @@ async def list_predictions(
     suppressed: bool | None = None,
     warmup: bool | None = None,
     outcome: str | None = None,
+    contract_duration: int | None = None,
     divergence_min: float | None = None,
     divergence_max: float | None = None,
     pmodel_min: float | None = None,
@@ -32,10 +55,7 @@ async def list_predictions(
 
     # Exact match shortcut
     if prediction_id:
-        match = [
-            p for p in store.predictions
-            if p.get("prediction_id") == prediction_id
-        ]
+        match = store.get_predictions_by_id(prediction_id)
         items = [_enrich_prediction(p) for p in match]
         return {
             "data": items,
@@ -53,7 +73,8 @@ async def list_predictions(
     items, total = store.get_predictions(
         model=model, symbol=symbol, from_ms=from_ms, to_ms=to_ms,
         direction=direction, suppressed=suppressed, warmup=warmup,
-        outcome=outcome, page=page, page_size=page_size,
+        outcome=outcome, contract_duration=contract_duration,
+        page=page, page_size=page_size,
         sort=sort, order=order,
     )
 
@@ -81,6 +102,7 @@ async def list_predictions(
                 k: v for k, v in {
                     "model": model, "symbol": symbol, "direction": direction,
                     "suppressed": suppressed, "warmup": warmup, "outcome": outcome,
+                    "contract_duration": contract_duration,
                 }.items() if v is not None
             },
         },
