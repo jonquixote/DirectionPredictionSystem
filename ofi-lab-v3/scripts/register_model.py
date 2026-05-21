@@ -18,6 +18,27 @@ def _sha256(path: Path) -> str:
     return h.hexdigest()
 
 
+def build_model_name(
+    *,
+    horizon: int,
+    symbol: str,
+    train_days: int,
+    train_window_end: str,
+) -> str:
+    """Construct the canonical model_name for a fleet cell.
+
+    Format: h{horizon}_{sym}_v3_{train_days}d_{YYYYMMDD}
+
+    The trailing YYYYMMDD (derived from train_window_end) prevents collisions
+    when a NEW fleet is registered with the same (horizon, symbol, train_days)
+    triple as an OLD fleet — without it, INSERT OR REPLACE would clobber the
+    old fleet's row.
+    """
+    sym = symbol.replace("USDT", "").lower()
+    train_end_compact = train_window_end.replace("-", "")
+    return f"h{horizon}_{sym}_v3_{train_days}d_{train_end_compact}"
+
+
 def register_model(
     *,
     conn: sqlite3.Connection,
@@ -34,7 +55,7 @@ def register_model(
         evaluation_windows: List of evaluation window durations in seconds
 
     Returns:
-        Model name (e.g., "h180_xrp_v3_330d")
+        Model name (e.g., "h180_xrp_v3_330d_20260426")
 
     If a baseline model with the same name exists, updates only artifact pointers.
     Otherwise, inserts a new fleet model with is_baseline=0, paper_active=1, live_eligible=0.
@@ -44,7 +65,13 @@ def register_model(
     horizon = metrics["horizon_seconds"]
     symbol = metrics["symbol"]
     train_days = metrics.get("train_days", 330)
-    name = f"h{horizon}_{symbol.replace('USDT','').lower()}_v3_{train_days}d"
+    train_window_end = metrics["train_window_end"]
+    name = build_model_name(
+        horizon=horizon,
+        symbol=symbol,
+        train_days=train_days,
+        train_window_end=train_window_end,
+    )
 
     artifact_hash = _sha256(art / "model.lgb")
 

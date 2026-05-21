@@ -34,7 +34,7 @@ def filter_pending(fleet, state_path: Path):
     return [c for c in fleet if c["name"] not in done]
 
 
-def train_one(cell, *, train_end, feature_dir, output_root, evaluation_windows, db_path=None, val_days=10, test_days=5):
+def train_one(cell, *, train_end, feature_dir, output_root, evaluation_windows, db_path=None, val_days=10, test_days=5, train_mode="per-symbol"):
     """Train a single model cell.
 
     Args:
@@ -72,6 +72,8 @@ def train_one(cell, *, train_end, feature_dir, output_root, evaluation_windows, 
         feature_dir,
         "--output-dir",
         str(out_dir),
+        "--train-mode",
+        train_mode,
         "--skip-wf",
     ]
     t0 = time.time()
@@ -174,6 +176,16 @@ def main():
     )
     p.add_argument("--val-days", type=int, default=10, help="Validation window in days")
     p.add_argument("--test-days", type=int, default=5, help="Test window in days")
+    p.add_argument(
+        "--train-mode",
+        choices=["per-symbol", "joint"],
+        default="per-symbol",
+        help=(
+            "per-symbol (default): each cell trains on its own symbol only. "
+            "joint: legacy multi-symbol training with symbol_cat feature "
+            "(use only for experiments)."
+        ),
+    )
     args = p.parse_args()
 
     symbols = args.symbols.split(",")
@@ -204,6 +216,7 @@ def main():
                 db_path=args.db,
                 val_days=args.val_days,
                 test_days=args.test_days,
+                train_mode=args.train_mode,
             ): c
             for c in pending
         }

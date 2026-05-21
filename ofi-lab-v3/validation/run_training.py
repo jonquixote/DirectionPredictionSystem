@@ -55,10 +55,16 @@ logger = logging.getLogger("training")
 HORIZON_SECONDS = 300  # 5-minute contracts (default)
 # HORIZON_SECONDS = 900  # 15-minute contracts (second run)
 
-TRAIN_END = "2025-12-31"
-VAL_END = "2026-02-15"
-# TEST = 2026-02-16 → 2026-03-23
+# Legacy default split dates — kept ONLY for back-compat fallback when
+# --train-end / --val-end are not supplied on the CLI. Never reference these
+# directly in split logic below — always use the local `train_end` / `val_end`
+# resolved in main() so Phase-2 callers (retrain.py / train_fleet.py) get
+# the dates they explicitly pass through.
+_LEGACY_TRAIN_END_DEFAULT = "2025-12-31"
+_LEGACY_VAL_END_DEFAULT = "2026-02-15"
+# TEST = 2026-02-16 → 2026-03-23 (legacy)
 
+# Full feature set — includes symbol_cat, used in joint training mode.
 FEATURE_COLS = [
     # Point-in-time features (vpin dropped — SHAP-confirmed noise)
     "mlofi", "ofi", "mid_price", "spread", "relative_spread",
@@ -80,6 +86,10 @@ FEATURE_COLS = [
     # Categorical
     "symbol_cat",
 ]
+
+# Per-symbol feature set — drops symbol_cat (constant within a per-symbol
+# DataFrame, so it adds no information).
+FEATURE_COLS_PER_SYMBOL = [c for c in FEATURE_COLS if c != "symbol_cat"]
 
 GO_NOGO_AUC = 0.53  # applied to auc_at_contract_times, NOT auc_full
 
@@ -496,8 +506,8 @@ def train_final_model(
     # 4. Config snapshot
     config_snapshot = {
         "HORIZON_SECONDS": horizon_seconds,
-        "TRAIN_END": TRAIN_END,
-        "VAL_END": VAL_END,
+        "LEGACY_TRAIN_END_DEFAULT": _LEGACY_TRAIN_END_DEFAULT,
+        "LEGACY_VAL_END_DEFAULT": _LEGACY_VAL_END_DEFAULT,
         "LGBM_PARAMS": lgbm_params,
         "FEATURE_COLS": feature_names,
         "GO_NOGO_AUC": GO_NOGO_AUC,
@@ -632,15 +642,29 @@ def main():
                         help="Feature schema version (default: v3)")
     parser.add_argument("--model-name", type=str, default=None,
                         help="Model name for logging (optional)")
+    parser.add_argument(
+        "--train-mode",
+        choices=["per-symbol", "joint"],
+        default="per-symbol",
+        help=(
+            "per-symbol (default): filter DataFrame to --symbol after load, "
+            "drop symbol_cat from features. joint: load all 4 symbols, keep "
+            "symbol_cat (legacy multi-symbol behaviour)."
+        ),
+    )
     args = parser.parse_args()
 
     horizon = args.horizon
     feature_dir = Path(args.feature_dir)
     models_dir = Path(args.output_dir)
 
-    # Use provided train dates or fall back to hardcoded
-    train_end = args.train_end if args.train_end else TRAIN_END
-    val_end = args.val_end if args.val_end else VAL_END
+    # Use provided train dates or fall back to legacy defaults.
+    # NOTE: NEVER reference the legacy module constants below this point —
+    # always use these local variables so the split logic respects --train-end
+    # / --val-end / --test-end.
+    train_end = args.train_end if args.train_end else _LEGACY_TRAIN_END_DEFAULT
+    val_end = args.val_end if args.val_end else _LEGACY_VAL_END_DEFAULT
+    test_end = args.test_end  # Optional upper bound on test window
     train_start = args.train_start  # May be None
 
     logger.info("=" * 60)
@@ -661,6 +685,27 @@ def main():
     start_time = time.time()
     df = load_features(feature_dir)
     validate_data(df)
+
+    # ── Phase 0.5: Per-symbol filter (Bug A fix) ──
+    # In per-symbol mode, drop rows from other symbols so the model trains
+    # only on its own symbol's data. In joint mode, keep all 4 symbols and
+    # rely on symbol_cat to discriminate.
+    if args.train_mode == "per-symbol":
+        if not args.symbol:
+            raise SystemExit(
+                "per-symbol train-mode requires --symbol "
+                "(use --train-mode joint for multi-symbol training)"
+            )
+        before = len(df)
+        df = df[df["symbol"] == args.symbol].reset_index(drop=True)
+        logger.info(
+            "train_mode=per-symbol filter symbol=%s: %d → %d rows",
+            args.symbol, before, len(df),
+        )
+        if len(df) == 0:
+            raise SystemExit(
+                f"No rows for symbol={args.symbol} after filter — check feature dir"
+            )
 
     if args.dry_run:
         logger.info("DRY RUN: data validation passed. Exiting before training.")
@@ -686,18 +731,36 @@ def main():
         if dropped > 0:
             logger.info("Dropped %d rows on boundary dates: %s", dropped, TRAINING_BOUNDARIES)
 
-    df_train = df[df["date"] <= train_end].reset_index(drop=True)
+    # Optional lower bound from --train-start (back-compat: omit if not provided).
+    if train_start:
+        df_train = df[
+            (df["date"] >= train_start) & (df["date"] <= train_end)
+        ].reset_index(drop=True)
+    else:
+        df_train = df[df["date"] <= train_end].reset_index(drop=True)
     df_val = df[(df["date"] > train_end) & (df["date"] <= val_end)].reset_index(drop=True)
-    df_test = df[df["date"] > VAL_END].reset_index(drop=True)
+    # Bug B fix: use local val_end (not the module-level legacy default).
+    # If --test-end is supplied, apply it as an upper bound on the test window.
+    if test_end:
+        df_test = df[(df["date"] > val_end) & (df["date"] <= test_end)].reset_index(drop=True)
+    else:
+        df_test = df[df["date"] > val_end].reset_index(drop=True)
 
     logger.info("Split sizes: train=%d, val=%d, test=%d", len(df_train), len(df_val), len(df_test))
 
     # Check class balance
     for name, subset in [("train", df_train), ("val", df_val), ("test", df_test)]:
+        if len(subset) == 0:
+            logger.warning("  %s split is empty — skipping target-rate log", name)
+            continue
         pos_rate = subset["target"].mean()
         logger.info("  %s target rate: %.4f (%.1f%% up)", name, pos_rate, 100 * pos_rate)
 
-    feature_names = FEATURE_COLS.copy()
+    # Pick the feature set based on train_mode.
+    if args.train_mode == "per-symbol":
+        feature_names = FEATURE_COLS_PER_SYMBOL.copy()
+    else:
+        feature_names = FEATURE_COLS.copy()
 
     # ── Phase 4: Walk-forward CV on training set ──
     if getattr(args, "skip_wf", False):

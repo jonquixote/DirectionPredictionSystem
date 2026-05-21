@@ -41,6 +41,9 @@ def main() -> int:
                    help="(default) derive model name from convention")
     p.add_argument("--skip-wf", action="store_true",
                    help="skip walk-forward CV (faster fleet training)")
+    p.add_argument("--train-mode", choices=["per-symbol", "joint"],
+                   default="per-symbol",
+                   help="forwarded to run_training; default per-symbol")
     args = p.parse_args()
 
     train_end = datetime.strptime(args.train_end, "%Y-%m-%d").date()
@@ -76,6 +79,7 @@ def main() -> int:
         "--feature-dir", args.feature_dir,
         "--output-dir", args.output_dir,
         "--model-name", name,
+        "--train-mode", args.train_mode,
     ]
     if args.skip_wf:
         cmd.append("--skip-wf")

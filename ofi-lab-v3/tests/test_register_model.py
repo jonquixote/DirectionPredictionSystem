@@ -18,8 +18,8 @@ def db_conn():
 
 def test_register_model_writes_sqlite_row(tmp_path, db_conn):
     """Test that register_model correctly writes a fleet model to the registry."""
-    # Create fake training output
-    out = tmp_path / "fleet" / "h180_xrp_v3_330d"
+    # Create fake training output. Name layout is asserted below.
+    out = tmp_path / "fleet" / "h180_xrp_v3_330d_20260426"
     out.mkdir(parents=True)
     (out / "model.lgb").write_bytes(b"FAKE_LGB_DATA")
     (out / "feature_names.json").write_text(json.dumps(["mlofi", "ofi"]))
@@ -44,10 +44,11 @@ def test_register_model_writes_sqlite_row(tmp_path, db_conn):
         conn=db_conn, artifact_dir=str(out), evaluation_windows=[300, 900, 1800]
     )
 
-    assert registered_name == "h180_xrp_v3_330d"
+    # Bug C fix: name now includes the train_window_end as YYYYMMDD suffix.
+    assert registered_name == "h180_xrp_v3_330d_20260426"
 
     row = db_conn.execute(
-        "SELECT * FROM model_registry WHERE name=?", ("h180_xrp_v3_330d",)
+        "SELECT * FROM model_registry WHERE name=?", ("h180_xrp_v3_330d_20260426",)
     ).fetchone()
 
     assert row is not None
@@ -55,7 +56,13 @@ def test_register_model_writes_sqlite_row(tmp_path, db_conn):
     assert row["training_horizon_seconds"] == 180
     assert row["train_days"] == 330
     assert row["is_baseline"] == 0
-    assert row["paper_active"] == 1
+    # Phase 5: new non-baseline rows land as paper_active=0 with a
+    # scheduled cutover. The dashboard scheduler loop flips them to 1
+    # when cutover_scheduled_at arrives.
+    assert row["paper_active"] == 0
+    assert row["cutover_state"] == "scheduled"
+    assert row["cutover_scheduled_at"] is not None
+    assert row["cutover_decided_by"] == "auto"
     assert row["live_eligible"] == 0
     assert json.loads(row["evaluation_windows"]) == [300, 900, 1800]
     assert row["artifact_hash"] is not None
@@ -64,8 +71,9 @@ def test_register_model_writes_sqlite_row(tmp_path, db_conn):
 
 def test_register_model_does_not_touch_baseline(db_conn, tmp_path):
     """Test that registering a baseline model doesn't change its is_baseline flag."""
-    # Insert a baseline model with the naming convention: h{horizon}_{symbol}_v3_{train_days}d
-    baseline_name = "h300_btc_v3_330d"
+    # Insert a baseline model with the canonical (now dated) naming convention:
+    # h{horizon}_{symbol}_v3_{train_days}d_{YYYYMMDD}
+    baseline_name = "h300_btc_v3_330d_20260426"
     db_conn.execute(
         "INSERT INTO model_registry "
         "(name, is_baseline, symbol, training_horizon_seconds, lifecycle_state) "
