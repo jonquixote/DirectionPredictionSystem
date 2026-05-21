@@ -241,6 +241,17 @@ async def lifespan(app: FastAPI):
     # Validate admin secret on startup
     env = os.environ.get("V3_ENV", "dev")
     validate_admin_secret(env=env)
+    # Apply pending schema migrations (T32: previously only paper_trader did this,
+    # so a dashboard-only deploy left new columns missing until trader restart).
+    try:
+        from storage.db import open_database, init_schema
+        db_path = os.environ.get("V3_DB_PATH", "/data/v3.db")
+        _mig_conn = open_database(db_path)
+        init_schema(_mig_conn)
+        _mig_conn.close()
+        logger.info("Schema migrations applied")
+    except Exception as e:
+        logger.error("Schema migration failed at startup: %s", e)
     LiveState.initialize()
     start_alert_worker()
     task = asyncio.create_task(_refresh_loop())
