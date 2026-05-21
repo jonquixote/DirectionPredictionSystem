@@ -5,8 +5,23 @@ import json
 import os
 import sqlite3
 import sys
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+
+
+DEFAULT_CUTOVER_DELAY_HOURS = 24.0
+
+
+def _utc_now_iso() -> str:
+    """Return current UTC time as ISO 8601 with Z suffix."""
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _utc_plus_hours_iso(hours: float) -> str:
+    """Return (now UTC + hours) as ISO 8601 with Z suffix."""
+    return (datetime.now(timezone.utc) + timedelta(hours=hours)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
 
 
 def _sha256(path: Path) -> str:
@@ -45,6 +60,7 @@ def register_model(
     artifact_dir: str,
     evaluation_windows: list[int],
     fleet_version: str | None = None,
+    cutover_delay_hours: float = DEFAULT_CUTOVER_DELAY_HOURS,
 ) -> str:
     """
     Register a trained model artifact into model_registry.
@@ -53,12 +69,16 @@ def register_model(
         conn: SQLite database connection with row_factory set to sqlite3.Row
         artifact_dir: Path to directory containing model.lgb, metrics.json, feature_names.json
         evaluation_windows: List of evaluation window durations in seconds
+        fleet_version: Explicit fleet grouping label (overrides env var / metrics).
+        cutover_delay_hours: Phase 5 — hours from now until the model is
+            auto-promoted to paper_active=1. Default 24h. Ignored for baselines.
 
     Returns:
         Model name (e.g., "h180_xrp_v3_330d_20260426")
 
     If a baseline model with the same name exists, updates only artifact pointers.
-    Otherwise, inserts a new fleet model with is_baseline=0, paper_active=1, live_eligible=0.
+    Otherwise, inserts a new fleet model with is_baseline=0, paper_active=0,
+    cutover_state='scheduled', cutover_scheduled_at = NOW + cutover_delay_hours.
     """
     art = Path(artifact_dir)
     metrics = json.loads((art / "metrics.json").read_text())
@@ -109,15 +129,23 @@ def register_model(
             ),
         )
     else:
+        # Phase 5: new non-baseline models land as scheduled (paper_active=0),
+        # auto-promoted by the dashboard background loop after
+        # cutover_delay_hours. decided_by='auto' on the schedule itself.
+        cutover_scheduled_at = _utc_plus_hours_iso(cutover_delay_hours)
+        cutover_decided_at = _utc_now_iso()
         conn.execute(
             "INSERT OR REPLACE INTO model_registry "
             "(name, is_baseline, paper_active, live_eligible, lifecycle_state, "
             "symbol, training_horizon_seconds, generation, artifact_path, "
             "feature_names_path, artifact_hash, train_window_start, "
             "train_window_end, train_days, feature_version, evaluation_windows, "
-            "filter_config_json, platform_active_json, fleet_version) "
-            "VALUES (?, 0, 1, 0, 'active', ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, '{}', "
-            "'{\"paper\":true,\"kalshi\":false,\"polymarket\":false}', ?)",
+            "filter_config_json, platform_active_json, fleet_version, "
+            "cutover_scheduled_at, cutover_state, cutover_decided_by, "
+            "cutover_decided_at) "
+            "VALUES (?, 0, 0, 0, 'active', ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, '{}', "
+            "'{\"paper\":true,\"kalshi\":false,\"polymarket\":false}', ?, "
+            "?, 'scheduled', 'auto', ?)",
             (
                 name,
                 symbol,
@@ -131,6 +159,8 @@ def register_model(
                 metrics.get("feature_version", "v3"),
                 json.dumps(evaluation_windows),
                 effective_fleet_version,
+                cutover_scheduled_at,
+                cutover_decided_at,
             ),
         )
 
@@ -220,6 +250,15 @@ def main():
             "Refuses to run if it would leave zero active fleet models."
         ),
     )
+    p.add_argument(
+        "--cutover-delay-hours",
+        type=float,
+        default=DEFAULT_CUTOVER_DELAY_HOURS,
+        help=(
+            "Phase 5 — hours from now until a newly-registered non-baseline "
+            "model is auto-promoted to paper_active=1. Default 24."
+        ),
+    )
     args = p.parse_args()
 
     conn = sqlite3.connect(args.db)
@@ -229,6 +268,7 @@ def main():
         artifact_dir=args.artifact_dir,
         evaluation_windows=[int(x) for x in args.evaluation_windows.split(",")],
         fleet_version=args.fleet_version,
+        cutover_delay_hours=args.cutover_delay_hours,
     )
     print(f"registered: {name}")
 

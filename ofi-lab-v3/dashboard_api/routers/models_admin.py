@@ -79,6 +79,8 @@ def list_models():
                mr.paper_active, mr.live_eligible,
                mr.symbol, mr.training_horizon_seconds as horizon,
                mr.generation, mr.created_at, mr.fleet_version,
+               mr.cutover_scheduled_at, mr.cutover_state,
+               mr.cutover_decided_by, mr.cutover_decided_at,
                dm.recency_weighted_ev as ewma_ev,
                dm.brier_score as ewma_brier,
                dm.calibration_error as psi
@@ -575,3 +577,221 @@ def set_filter(name: str, req: FilterRequest):
         applied_at=applied_at,
         trader_reloaded=reloaded,
     )
+
+
+# ── Phase 5 — scheduled cutover endpoints ──────────────────────
+
+class CutoverRequest(BaseModel):
+    decided_by: str = "operator"
+
+
+class RescheduleCutoverRequest(BaseModel):
+    at: str  # ISO 8601 UTC
+    decided_by: str = "operator"
+
+
+class BulkCutoverRequest(BaseModel):
+    names: List[str]
+    action: str  # 'cutover' | 'skip' | 'reschedule'
+    at: Optional[str] = None
+    decided_by: str = "operator"
+
+
+def _utc_now_iso() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _parse_iso_utc(s: str) -> datetime:
+    """Parse an ISO 8601 string into a tz-aware UTC datetime.
+
+    Accepts both ``...Z`` and ``...+00:00`` forms. Raises HTTPException(400)
+    on parse failure.
+    """
+    if not s:
+        raise HTTPException(400, "missing timestamp")
+    candidate = s.strip()
+    if candidate.endswith("Z"):
+        candidate = candidate[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(candidate)
+    except ValueError as exc:
+        raise HTTPException(400, f"invalid ISO timestamp {s!r}: {exc}")
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
+
+
+def _ensure_not_baseline(row) -> None:
+    if row is None:
+        raise HTTPException(404, "model not found")
+    if row["is_baseline"]:
+        raise HTTPException(
+            409, "baseline models cannot be managed via cutover endpoints"
+        )
+
+
+def _apply_cutover_now(conn, name: str, decided_by: str) -> dict:
+    """Promote ``name`` to paper_active=1, cutover_state='cutover'."""
+    row = conn.execute(
+        "SELECT name, is_baseline, paper_active, cutover_state "
+        "FROM model_registry WHERE name = ?",
+        (name,),
+    ).fetchone()
+    _ensure_not_baseline(row)
+    now = _utc_now_iso()
+    conn.execute(
+        "UPDATE model_registry "
+        "   SET paper_active = 1, "
+        "       cutover_state = 'cutover', "
+        "       cutover_decided_by = ?, "
+        "       cutover_decided_at = ?, "
+        "       updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') "
+        " WHERE name = ?",
+        (decided_by, now, name),
+    )
+    _audit(
+        conn, name, "cutover_now", decided_by, None,
+        f"paper_active={row['paper_active']},state={row['cutover_state']}",
+        "paper_active=1,state=cutover",
+    )
+    return {
+        "name": name,
+        "paper_active": 1,
+        "cutover_state": "cutover",
+        "cutover_decided_by": decided_by,
+        "cutover_decided_at": now,
+    }
+
+
+def _apply_skip_cutover(conn, name: str, decided_by: str) -> dict:
+    row = conn.execute(
+        "SELECT name, is_baseline, paper_active, cutover_state "
+        "FROM model_registry WHERE name = ?",
+        (name,),
+    ).fetchone()
+    _ensure_not_baseline(row)
+    now = _utc_now_iso()
+    conn.execute(
+        "UPDATE model_registry "
+        "   SET cutover_state = 'skipped', "
+        "       cutover_decided_by = ?, "
+        "       cutover_decided_at = ?, "
+        "       updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') "
+        " WHERE name = ?",
+        (decided_by, now, name),
+    )
+    _audit(
+        conn, name, "cutover_skip", decided_by, None,
+        f"state={row['cutover_state']}", "state=skipped",
+    )
+    return {
+        "name": name,
+        "paper_active": int(row["paper_active"] or 0),
+        "cutover_state": "skipped",
+        "cutover_decided_by": decided_by,
+        "cutover_decided_at": now,
+    }
+
+
+def _apply_reschedule(conn, name: str, at_iso: str, decided_by: str) -> dict:
+    parsed = _parse_iso_utc(at_iso)
+    if parsed <= datetime.now(timezone.utc):
+        raise HTTPException(400, f"reschedule timestamp {at_iso!r} is not in the future")
+    row = conn.execute(
+        "SELECT name, is_baseline, cutover_state, cutover_scheduled_at "
+        "FROM model_registry WHERE name = ?",
+        (name,),
+    ).fetchone()
+    _ensure_not_baseline(row)
+    now = _utc_now_iso()
+    canonical_at = parsed.strftime("%Y-%m-%dT%H:%M:%SZ")
+    conn.execute(
+        "UPDATE model_registry "
+        "   SET cutover_scheduled_at = ?, "
+        "       cutover_state = 'scheduled', "
+        "       cutover_decided_by = ?, "
+        "       cutover_decided_at = ?, "
+        "       updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') "
+        " WHERE name = ?",
+        (canonical_at, decided_by, now, name),
+    )
+    _audit(
+        conn, name, "cutover_reschedule", decided_by, None,
+        f"state={row['cutover_state']},at={row['cutover_scheduled_at']}",
+        f"state=scheduled,at={canonical_at}",
+    )
+    return {
+        "name": name,
+        "cutover_state": "scheduled",
+        "cutover_scheduled_at": canonical_at,
+        "cutover_decided_by": decided_by,
+        "cutover_decided_at": now,
+    }
+
+
+@router.post("/{name}/cutover")
+def cutover_now(name: str, req: CutoverRequest):
+    conn = _get_conn()
+    result = _apply_cutover_now(conn, name, req.decided_by)
+    conn.commit()
+    return result
+
+
+@router.post("/{name}/skip-cutover")
+def skip_cutover(name: str, req: CutoverRequest):
+    conn = _get_conn()
+    result = _apply_skip_cutover(conn, name, req.decided_by)
+    conn.commit()
+    return result
+
+
+@router.post("/{name}/reschedule-cutover")
+def reschedule_cutover(name: str, req: RescheduleCutoverRequest):
+    conn = _get_conn()
+    result = _apply_reschedule(conn, name, req.at, req.decided_by)
+    conn.commit()
+    return result
+
+
+@router.post("/bulk-cutover")
+def bulk_cutover(req: BulkCutoverRequest):
+    if req.action not in {"cutover", "skip", "reschedule"}:
+        raise HTTPException(400, f"unknown action {req.action!r}")
+    if req.action == "reschedule" and not req.at:
+        raise HTTPException(400, "reschedule action requires 'at' timestamp")
+    if not req.names:
+        return {"action": req.action, "results": []}
+
+    # Atomicity note: each row's helper commits its own UPDATE + audit pair
+    # (matches the existing pattern in this file — _audit calls conn.commit()).
+    # We capture per-row status so the caller can see which names succeeded
+    # vs failed (404 / 409 / 400). Aggregate failures do NOT roll back earlier
+    # successes — the response makes that explicit via {ok: true|false} flags.
+    conn = _get_conn()
+    results = []
+    for name in req.names:
+        try:
+            if req.action == "cutover":
+                out = _apply_cutover_now(conn, name, req.decided_by)
+            elif req.action == "skip":
+                out = _apply_skip_cutover(conn, name, req.decided_by)
+            else:  # reschedule
+                assert req.at is not None  # guarded by validation above
+                out = _apply_reschedule(conn, name, req.at, req.decided_by)
+            conn.commit()
+            results.append({"name": name, "ok": True, "result": out})
+        except HTTPException as exc:
+            results.append({
+                "name": name,
+                "ok": False,
+                "error": exc.detail,
+                "status_code": exc.status_code,
+            })
+        except Exception as exc:  # pragma: no cover — defensive
+            results.append({
+                "name": name,
+                "ok": False,
+                "error": str(exc),
+                "status_code": 500,
+            })
+    return {"action": req.action, "results": results}

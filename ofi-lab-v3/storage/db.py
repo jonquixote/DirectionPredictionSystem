@@ -56,6 +56,31 @@ def _run_migrations(conn) -> None:
     conn.execute(
         "UPDATE model_registry SET fleet_version = train_window_end WHERE fleet_version IS NULL"
     )
+    # Phase 5 — scheduled cutover lifecycle. Newly-trained non-baseline models
+    # land as cutover_state='scheduled' + paper_active=0 with cutover_scheduled_at
+    # set to NOW+24h (configurable). A background loop in dashboard_api flips
+    # them to paper_active=1 / cutover_state='cutover' when the time arrives.
+    # Existing rows are backfilled with cutover_state='cutover' (already live).
+    _add_column_if_missing(conn, "model_registry", "cutover_scheduled_at", "TEXT")
+    _add_column_if_missing(
+        conn, "model_registry", "cutover_state", "TEXT DEFAULT 'cutover'"
+    )
+    _add_column_if_missing(conn, "model_registry", "cutover_decided_by", "TEXT")
+    _add_column_if_missing(conn, "model_registry", "cutover_decided_at", "TEXT")
+    # Backfill legacy rows: they are already live, so state='cutover',
+    # decided_by='auto' (assume past auto-promotion), decided_at=created_at.
+    conn.execute(
+        "UPDATE model_registry SET cutover_state = 'cutover' "
+        "WHERE cutover_state IS NULL"
+    )
+    conn.execute(
+        "UPDATE model_registry SET cutover_decided_by = 'auto' "
+        "WHERE cutover_decided_by IS NULL AND cutover_state = 'cutover'"
+    )
+    conn.execute(
+        "UPDATE model_registry SET cutover_decided_at = created_at "
+        "WHERE cutover_decided_at IS NULL AND cutover_state = 'cutover'"
+    )
     # H2 — decay-join leakage hardening. Denormalized ms timestamp + window
     # cutoff sentinel for strict-< joins from analysis service.
     _add_column_if_missing(conn, "decay_metrics", "ts_ms", "INTEGER")

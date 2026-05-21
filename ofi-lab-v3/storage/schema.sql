@@ -385,6 +385,19 @@ CREATE TABLE IF NOT EXISTS model_registry (
     platform_active_json TEXT DEFAULT '{"paper":true,"kalshi":false,"polymarket":false}',
     -- fleet_version (TEXT) — explicit fleet grouping, added via _run_migrations() ALTER TABLE.
     -- Backfilled from train_window_end for legacy rows. New registrations supply it directly.
+    --
+    -- Phase 5 scheduled-cutover columns. ALTER TABLE in _run_migrations() is the
+    -- source of truth; declared here for documentation. New non-baseline models
+    -- are inserted as paper_active=0 + cutover_state='scheduled' with
+    -- cutover_scheduled_at = NOW + 24h. A background loop in dashboard_api
+    -- flips them to paper_active=1 / cutover_state='cutover' when the time
+    -- arrives. Legacy rows are backfilled with cutover_state='cutover',
+    -- cutover_decided_by='auto', cutover_decided_at=created_at.
+    -- Allowed cutover_state values: 'pending' | 'scheduled' | 'cutover' | 'skipped'
+    cutover_scheduled_at TEXT,
+    cutover_state TEXT DEFAULT 'cutover',
+    cutover_decided_by TEXT,
+    cutover_decided_at TEXT,
     created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
     updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );

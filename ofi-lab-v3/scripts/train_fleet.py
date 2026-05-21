@@ -34,7 +34,7 @@ def filter_pending(fleet, state_path: Path):
     return [c for c in fleet if c["name"] not in done]
 
 
-def train_one(cell, *, train_end, feature_dir, output_root, evaluation_windows, db_path=None, val_days=10, test_days=5, train_mode="per-symbol"):
+def train_one(cell, *, train_end, feature_dir, output_root, evaluation_windows, db_path=None, val_days=10, test_days=5, train_mode="per-symbol", cutover_delay_hours=None):
     """Train a single model cell.
 
     Args:
@@ -110,6 +110,8 @@ def train_one(cell, *, train_end, feature_dir, output_root, evaluation_windows, 
             "--evaluation-windows",
             ",".join(map(str, evaluation_windows)),
         ]
+        if cutover_delay_hours is not None:
+            reg_cmd.extend(["--cutover-delay-hours", str(cutover_delay_hours)])
         try:
             subprocess.run(reg_cmd, check=True, timeout=60, capture_output=True)
         except subprocess.CalledProcessError as e:
@@ -186,6 +188,16 @@ def main():
             "(use only for experiments)."
         ),
     )
+    p.add_argument(
+        "--cutover-delay-hours",
+        type=float,
+        default=None,
+        help=(
+            "Phase 5 — forwarded to scripts/register_model.py. Hours from now "
+            "until each freshly-trained model is auto-promoted to "
+            "paper_active=1. If omitted, register_model's default (24h) applies."
+        ),
+    )
     args = p.parse_args()
 
     symbols = args.symbols.split(",")
@@ -217,6 +229,7 @@ def main():
                 val_days=args.val_days,
                 test_days=args.test_days,
                 train_mode=args.train_mode,
+                cutover_delay_hours=args.cutover_delay_hours,
             ): c
             for c in pending
         }

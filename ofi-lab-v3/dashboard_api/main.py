@@ -8,6 +8,8 @@ import asyncio
 import logging
 import os
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
+
 from fastapi import FastAPI, Depends
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -128,6 +130,110 @@ async def _analysis_precompute_loop():
             return
 
 
+# Phase 5 — scheduled cutover loop. Promotes models whose
+# cutover_scheduled_at has arrived to paper_active=1 / cutover_state='cutover'.
+# Sibling of the T1.2 analysis precompute loop.
+_CUTOVER_SCHEDULER_INTERVAL_S = 60
+_CUTOVER_SCHEDULER_BOOT_DELAY_S = 20
+
+
+def _utc_now_iso_for_cutover() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _cutover_get_db():
+    """Indirection layer so tests can monkey-patch the connection source.
+
+    Mirrors the same fallback pattern used by _analysis_precompute_loop.
+    """
+    try:
+        from services.db import get_db  # type: ignore
+    except ModuleNotFoundError:
+        from dashboard_api.services.db import get_db  # type: ignore
+    return get_db()
+
+
+def _run_cutover_scheduler_tick() -> list[str]:
+    """One iteration of the cutover scheduler.
+
+    Finds all rows where cutover_state='scheduled' and cutover_scheduled_at
+    is in the past (UTC), and promotes them to paper_active=1 +
+    cutover_state='cutover'. Returns list of model names that flipped.
+
+    Wrapped in try/except by the caller — but per-row failures are also
+    contained here so one bad row cannot block the rest of the batch.
+    """
+    now_iso = _utc_now_iso_for_cutover()
+    promoted: list[str] = []
+    conn = _cutover_get_db()
+    try:
+        rows = conn.execute(
+            "SELECT name FROM model_registry "
+            "WHERE cutover_state = 'scheduled' "
+            "  AND cutover_scheduled_at IS NOT NULL "
+            "  AND cutover_scheduled_at <= ? "
+            "  AND COALESCE(is_baseline, 0) = 0",
+            (now_iso,),
+        ).fetchall()
+        for row in rows:
+            name = row["name"] if hasattr(row, "keys") else row[0]
+            try:
+                conn.execute(
+                    "UPDATE model_registry "
+                    "   SET paper_active = 1, "
+                    "       cutover_state = 'cutover', "
+                    "       cutover_decided_by = 'auto', "
+                    "       cutover_decided_at = ?, "
+                    "       updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') "
+                    " WHERE name = ? AND cutover_state = 'scheduled'",
+                    (now_iso, name),
+                )
+                conn.execute(
+                    "INSERT INTO model_audit "
+                    "(model_name, action, by_user, detail) "
+                    "VALUES (?, 'cutover_auto', 'auto', ?)",
+                    (name, f"auto-promoted at {now_iso}"),
+                )
+                conn.commit()
+                promoted.append(name)
+                logger.info(
+                    "cutover scheduler: auto-promoted %s (paper_active=1)",
+                    name,
+                )
+            except Exception as row_exc:
+                logger.warning(
+                    "cutover scheduler: failed to promote %s: %s",
+                    name,
+                    row_exc,
+                )
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+    return promoted
+
+
+async def _cutover_scheduler_loop():
+    """Background loop: every 60s, scan for due cutovers and promote them.
+
+    Boot delay of 20s ensures we don't race init_schema() on startup.
+    """
+    try:
+        await asyncio.sleep(_CUTOVER_SCHEDULER_BOOT_DELAY_S)
+    except asyncio.CancelledError:
+        return
+    while True:
+        try:
+            await asyncio.to_thread(_run_cutover_scheduler_tick)
+        except Exception as exc:
+            logger.warning("cutover scheduler tick failed: %s", exc)
+        try:
+            await asyncio.sleep(_CUTOVER_SCHEDULER_INTERVAL_S)
+        except asyncio.CancelledError:
+            return
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup / shutdown lifecycle."""
@@ -139,12 +245,15 @@ async def lifespan(app: FastAPI):
     start_alert_worker()
     task = asyncio.create_task(_refresh_loop())
     precompute_task = asyncio.create_task(_analysis_precompute_loop())
+    cutover_task = asyncio.create_task(_cutover_scheduler_loop())
     logger.info(
-        "Dashboard API ready — background refresh + analysis precompute started"
+        "Dashboard API ready — background refresh + analysis precompute "
+        "+ cutover scheduler started"
     )
     yield
     task.cancel()
     precompute_task.cancel()
+    cutover_task.cancel()
     logger.info("Dashboard API shutting down")
 
 
