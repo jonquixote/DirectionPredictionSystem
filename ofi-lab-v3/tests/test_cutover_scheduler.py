@@ -411,6 +411,83 @@ def test_bulk_cutover_via_endpoint(tmp_path, monkeypatch):
         assert row["cutover_state"] == "cutover"
 
 
+def test_scheduler_tick_calls_reload_fleet_on_promotion(tmp_path, monkeypatch):
+    """When at least one row is promoted, _trigger_reload_fleet should be called once."""
+    import sqlite3
+    db_path = tmp_path / "test.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    conn.executescript("""
+        CREATE TABLE model_registry (
+            name TEXT PRIMARY KEY,
+            is_baseline INTEGER DEFAULT 0,
+            paper_active INTEGER DEFAULT 0,
+            cutover_scheduled_at TEXT,
+            cutover_state TEXT,
+            cutover_decided_by TEXT,
+            cutover_decided_at TEXT,
+            updated_at TEXT
+        );
+        CREATE TABLE model_audit (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            model_name TEXT, action TEXT, by_user TEXT, detail TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        );
+        INSERT INTO model_registry(name, paper_active, cutover_scheduled_at, cutover_state)
+        VALUES ('m_due',  0, '2000-01-01T00:00:00Z', 'scheduled'),
+               ('m_fut',  0, '2999-01-01T00:00:00Z', 'scheduled');
+    """)
+
+    from dashboard_api import main as dm
+    from dashboard_api.routers import models_admin as ma
+
+    monkeypatch.setattr(dm, "_cutover_get_db", lambda: _ConnWrap(conn))
+    called = []
+    monkeypatch.setattr(ma, "_trigger_reload_fleet", lambda: (called.append(1), True)[1])
+
+    promoted = dm._run_cutover_scheduler_tick()
+    assert promoted == ["m_due"]
+    assert called == [1]
+
+
+def test_scheduler_tick_no_reload_fleet_when_nothing_promoted(tmp_path, monkeypatch):
+    """Zero promotions → reload helper must not be called."""
+    import sqlite3
+    db_path = tmp_path / "test.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    conn.executescript("""
+        CREATE TABLE model_registry (
+            name TEXT PRIMARY KEY,
+            is_baseline INTEGER DEFAULT 0,
+            paper_active INTEGER DEFAULT 0,
+            cutover_scheduled_at TEXT,
+            cutover_state TEXT,
+            cutover_decided_by TEXT,
+            cutover_decided_at TEXT,
+            updated_at TEXT
+        );
+        CREATE TABLE model_audit (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            model_name TEXT, action TEXT, by_user TEXT, detail TEXT,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        );
+        INSERT INTO model_registry(name, paper_active, cutover_scheduled_at, cutover_state)
+        VALUES ('m_fut',  0, '2999-01-01T00:00:00Z', 'scheduled');
+    """)
+
+    from dashboard_api import main as dm
+    from dashboard_api.routers import models_admin as ma
+
+    monkeypatch.setattr(dm, "_cutover_get_db", lambda: _ConnWrap(conn))
+    called = []
+    monkeypatch.setattr(ma, "_trigger_reload_fleet", lambda: (called.append(1), True)[1])
+
+    promoted = dm._run_cutover_scheduler_tick()
+    assert promoted == []
+    assert called == []
+
+
 def test_list_models_exposes_cutover_columns(tmp_path, monkeypatch):
     """GET /api/models/list returns the four cutover_* fields per row."""
     from fastapi import FastAPI

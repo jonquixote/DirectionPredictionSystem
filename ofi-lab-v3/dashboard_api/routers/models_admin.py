@@ -439,6 +439,21 @@ def _trigger_reload_meta() -> bool:
         return False
 
 
+_TRADER_RELOAD_FLEET_URL = "http://127.0.0.1:8080/reload_fleet"
+
+
+def _trigger_reload_fleet() -> bool:
+    """POST to trader runtime API fleet-reload endpoint. Returns True if successful."""
+    dashboard_pass = os.environ.get("DASHBOARD_PASS") or os.environ.get("DASHBOARD_PASSWORD")
+    headers = {"Authorization": f"Bearer {dashboard_pass}"} if dashboard_pass else {}
+    try:
+        resp = httpx.post(_TRADER_RELOAD_FLEET_URL, headers=headers, timeout=3.0)
+        return resp.status_code < 300
+    except Exception as exc:
+        logger.warning("Could not reach %s: %s — auto-refresh will pick it up", _TRADER_RELOAD_FLEET_URL, exc)
+        return False
+
+
 # ── Platform config ────────────────────────────────────────────
 
 class PlatformRequest(BaseModel):
@@ -734,6 +749,7 @@ def cutover_now(name: str, req: CutoverRequest):
     conn = _get_conn()
     result = _apply_cutover_now(conn, name, req.decided_by)
     conn.commit()
+    _trigger_reload_fleet()
     return result
 
 
@@ -794,4 +810,6 @@ def bulk_cutover(req: BulkCutoverRequest):
                 "error": str(exc),
                 "status_code": 500,
             })
+    if req.action == "cutover" and any(r.get("ok") for r in results):
+        _trigger_reload_fleet()
     return {"action": req.action, "results": results}

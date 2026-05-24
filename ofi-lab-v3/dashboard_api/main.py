@@ -211,6 +211,16 @@ def _run_cutover_scheduler_tick() -> list[str]:
             conn.close()
         except Exception:
             pass
+    if promoted:
+        try:
+            from dashboard_api.routers.models_admin import _trigger_reload_fleet
+        except ModuleNotFoundError:
+            from routers.models_admin import _trigger_reload_fleet  # type: ignore
+        ok = _trigger_reload_fleet()
+        logger.info(
+            "cutover scheduler: tick complete, promoted=%d, reload_signal_ok=%s",
+            len(promoted), ok,
+        )
     return promoted
 
 
