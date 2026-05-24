@@ -1,6 +1,6 @@
 [Unit]
 Description=ofi-lab-v3 paper trader
-After=network.target
+After=network.target v3-ws-feed.service
 
 [Service]
 Type=simple
