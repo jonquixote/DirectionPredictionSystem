@@ -409,49 +409,64 @@ def train_final_model(
     model = lgb.LGBMClassifier(**lgbm_params)
     model.fit(X_trainval, y_trainval)
 
-    y_pred = model.predict_proba(X_test)[:, 1]
+    empty_test = len(df_test) == 0
 
-    # Full-sample metrics
-    auc_full = roc_auc_score(y_test, y_pred)
-    logloss = log_loss(y_test, y_pred)
-    brier = brier_score_loss(y_test, y_pred)
-    accuracy = float(np.mean((y_pred > 0.5).astype(int) == y_test))
-
-    # Contract-aligned AUC: filter to rows within ±window of a contract boundary
-    # Contract interval = horizon in ms. For 5-min: 300_000. For 1-min: 60_000.
-    # Window is ±30s, but capped at half the interval to avoid overlap.
-    contract_interval_ms = horizon_seconds * 1000
-    contract_window_ms = min(CONTRACT_WINDOW_MS, contract_interval_ms // 2)
-    test_cts = df_test["cts"].values
-    remainder = test_cts % contract_interval_ms
-    contract_mask = (remainder <= contract_window_ms) | (remainder >= (contract_interval_ms - contract_window_ms))
-    n_contract = int(contract_mask.sum())
-
-    if n_contract >= 100:
-        auc_contract = roc_auc_score(y_test[contract_mask], y_pred[contract_mask])
-        logloss_contract = log_loss(y_test[contract_mask], y_pred[contract_mask])
-    else:
-        logger.warning("Only %d contract-aligned rows — too few for reliable AUC", n_contract)
+    if empty_test:
+        logger.warning(
+            "Test set is EMPTY — no feature data covers the test window. "
+            "Model is saved but all test metrics are None and gate FAILS. "
+            "Set --train-end further back so val+test windows fit in available data."
+        )
+        auc_full = None
         auc_contract = float('nan')
-        logloss_contract = float('nan')
+        logloss = None
+        logloss_contract = None
+        brier = None
+        accuracy = None
+        n_contract = 0
+    else:
+        y_pred = model.predict_proba(X_test)[:, 1]
+
+        auc_full = roc_auc_score(y_test, y_pred)
+        logloss = log_loss(y_test, y_pred)
+        brier = brier_score_loss(y_test, y_pred)
+        accuracy = float(np.mean((y_pred > 0.5).astype(int) == y_test))
+
+        contract_interval_ms = horizon_seconds * 1000
+        contract_window_ms = min(CONTRACT_WINDOW_MS, contract_interval_ms // 2)
+        test_cts = df_test["cts"].values
+        remainder = test_cts % contract_interval_ms
+        contract_mask = (remainder <= contract_window_ms) | (remainder >= (contract_interval_ms - contract_window_ms))
+        n_contract = int(contract_mask.sum())
+
+        if n_contract >= 100:
+            auc_contract = roc_auc_score(y_test[contract_mask], y_pred[contract_mask])
+            logloss_contract = log_loss(y_test[contract_mask], y_pred[contract_mask])
+        else:
+            logger.warning("Only %d contract-aligned rows — too few for reliable AUC", n_contract)
+            auc_contract = float('nan')
+            logloss_contract = float('nan')
 
     logger.info("=" * 50)
     logger.info("FINAL TEST SET RESULTS")
-    logger.info("  AUC-ROC (full):     %.4f  (%d rows)", auc_full, len(y_test))
-    logger.info("  AUC-ROC (contract): %.4f  (%d rows)", auc_contract, n_contract)
-    logger.info("  Log-loss (full):    %.4f", logloss)
-    logger.info("  Log-loss (contract):%.4f", logloss_contract)
-    logger.info("  Brier:              %.4f", brier)
-    logger.info("  Accuracy:           %.4f", accuracy)
+    if empty_test:
+        logger.info("  (no test data — metrics unavailable)")
+    else:
+        logger.info(" AUC-ROC (full): %.4f (%d rows)", auc_full, len(y_test))
+        logger.info(" AUC-ROC (contract): %.4f (%d rows)", auc_contract, n_contract)
+        logger.info(" Log-loss (full): %.4f", logloss)
+        logger.info(" Log-loss (contract):%.4f", logloss_contract)
+        logger.info(" Brier: %.4f", brier)
+        logger.info(" Accuracy: %.4f", accuracy)
     logger.info("=" * 50)
 
     # Leakage check
-    leakage = check_leakage(accuracy, context="final_test_set")
-    if leakage["flagged"]:
+    leakage = check_leakage(accuracy if accuracy is not None else 0.5, context="final_test_set")
+    if not empty_test and leakage["flagged"]:
         logger.warning("LEAKAGE FLAG: %s", leakage["message"])
 
     # Go/no-go gate — applied to contract-aligned AUC, NOT full AUC
-    gate_passed = (not np.isnan(auc_contract)) and (auc_contract >= GO_NOGO_AUC)
+    gate_passed = (not empty_test) and (not np.isnan(auc_contract)) and (auc_contract >= GO_NOGO_AUC)
     if gate_passed:
         logger.info(
             "✓ GO/NO-GO GATE PASSED: contract AUC %.4f >= %.2f",
@@ -482,7 +497,7 @@ def train_final_model(
         "auc_at_contract_times": float(auc_contract) if not np.isnan(auc_contract) else None,
         "n_contract_rows": n_contract,
         "log_loss": logloss,
-        "log_loss_contract": float(logloss_contract) if not np.isnan(logloss_contract) else None,
+        "log_loss_contract": float(logloss_contract) if isinstance(logloss_contract, (int, float)) and not np.isnan(logloss_contract) else None,
         "brier_score": brier,
         "accuracy": accuracy,
         "gate_passed": gate_passed,
@@ -519,46 +534,50 @@ def train_final_model(
 
     # 5. Calibration plot
     try:
-        prob_true, prob_pred = calibration_curve(y_test, y_pred, n_bins=10, strategy="uniform")
-        fig, ax = plt.subplots(1, 1, figsize=(8, 6))
-        ax.plot(prob_pred, prob_true, "s-", label="LightGBM")
-        ax.plot([0, 1], [0, 1], "k--", label="Perfect calibration")
-        ax.set_xlabel("Predicted probability")
-        ax.set_ylabel("Observed frequency")
-        ax.set_title(f"Calibration Plot (AUC_full={auc_full:.4f}, AUC_contract={auc_contract:.4f}, H={horizon_seconds}s)")
-        ax.legend()
-        ax.grid(True, alpha=0.3)
-        fig.savefig(output_dir / "calibration.png", dpi=150, bbox_inches="tight")
-        plt.close(fig)
-        logger.info("Calibration plot saved")
+        if empty_test:
+            logger.info("Calibration plot skipped (empty test set)")
+        else:
+            prob_true, prob_pred = calibration_curve(y_test, y_pred, n_bins=10, strategy="uniform")
+            fig, ax = plt.subplots(1, 1, figsize=(8, 6))
+            ax.plot(prob_pred, prob_true, "s-", label="LightGBM")
+            ax.plot([0, 1], [0, 1], "k--", label="Perfect calibration")
+            ax.set_xlabel("Predicted probability")
+            ax.set_ylabel("Observed frequency")
+            ax.set_title(f"Calibration Plot (AUC_full={auc_full:.4f}, AUC_contract={auc_contract:.4f}, H={horizon_seconds}s)")
+            ax.legend()
+            ax.grid(True, alpha=0.3)
+            fig.savefig(output_dir / "calibration.png", dpi=150, bbox_inches="tight")
+            plt.close(fig)
+            logger.info("Calibration plot saved")
     except Exception as e:
         logger.warning("Failed to generate calibration plot: %s", e)
 
     # 6. SHAP feature importance
     try:
-        import shap
-        explainer = shap.TreeExplainer(model)
-        # Use a subsample for speed
-        sample_size = min(5000, len(X_test))
-        rng = np.random.default_rng(42)
-        sample_idx = rng.choice(len(X_test), sample_size, replace=False)
-        shap_values = explainer.shap_values(X_test[sample_idx])
-
-        if isinstance(shap_values, list):
-            # Binary classification: use class 1
-            shap_vals = shap_values[1]
+        if empty_test:
+            logger.info("SHAP plot skipped (empty test set)")
         else:
-            shap_vals = shap_values
+            import shap
+            explainer = shap.TreeExplainer(model)
+            sample_size = min(5000, len(X_test))
+            rng = np.random.default_rng(42)
+            sample_idx = rng.choice(len(X_test), sample_size, replace=False)
+            shap_values = explainer.shap_values(X_test[sample_idx])
 
-        fig, ax = plt.subplots(1, 1, figsize=(10, 8))
-        shap.summary_plot(
-            shap_vals, X_test[sample_idx],
-            feature_names=feature_names,
-            show=False, max_display=20,
-        )
-        plt.savefig(output_dir / "shap_importance.png", dpi=150, bbox_inches="tight")
-        plt.close()
-        logger.info("SHAP importance plot saved")
+            if isinstance(shap_values, list):
+                shap_vals = shap_values[1]
+            else:
+                shap_vals = shap_values
+
+            fig, ax = plt.subplots(1, 1, figsize=(10, 8))
+            shap.summary_plot(
+                shap_vals, X_test[sample_idx],
+                feature_names=feature_names,
+                show=False, max_display=20,
+            )
+            plt.savefig(output_dir / "shap_importance.png", dpi=150, bbox_inches="tight")
+            plt.close()
+            logger.info("SHAP importance plot saved")
     except Exception as e:
         logger.warning("Failed to generate SHAP plot: %s", e)
 

@@ -1,17 +1,110 @@
-"""Drive fleet training: iterate (symbol, horizon, train_days), shell to retrain.py."""
+"""Drive fleet training: iterate (symbol, horizon, train_days), shell to retrain.py.
+
+When --train-end is omitted, it is auto-derived from the latest available
+feature data so that the val + test windows are fully covered:
+
+    train_end = latest_feature_date - val_days - test_days - buffer_days
+"""
 from __future__ import annotations
 
 import argparse
 import json
+import re
 import subprocess
 import sys
 import time
 from concurrent.futures import ProcessPoolExecutor, as_completed
+from datetime import datetime, timedelta
 from pathlib import Path
 
 DEFAULT_SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT"]
 DEFAULT_HORIZONS = [60, 180, 300, 600, 900, 1200, 1800]
 DEFAULT_TRAIN_DAYS = [90, 180, 330]
+
+_DATE_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})_")
+
+
+def discover_latest_feature_date(feature_dir: str, symbols: list[str]) -> datetime.date:
+    """Scan feature parquet filenames to find the latest date common to all symbols.
+
+    Feature files follow the pattern: {YYYY-MM-DD}_{SYMBOL}_features.parquet
+    Returns the latest date for which every symbol has a feature file.
+    Raises SystemExit if any symbol has no feature files at all.
+    """
+    feature_path = Path(feature_dir)
+    if not feature_path.is_dir():
+        raise SystemExit(f"feature-dir not found: {feature_dir}")
+
+    per_symbol: dict[str, set[datetime.date]] = {}
+    for sym in symbols:
+        sym_dir = feature_path / sym
+        if not sym_dir.is_dir():
+            raise SystemExit(f"no feature directory for symbol {sym}: {sym_dir}")
+        dates: set[datetime.date] = set()
+        for f in sym_dir.iterdir():
+            m = _DATE_RE.match(f.name)
+            if m:
+                dates.add(datetime.strptime(m.group(1), "%Y-%m-%d").date())
+        if not dates:
+            raise SystemExit(f"no feature parquet files for symbol {sym} in {sym_dir}")
+        per_symbol[sym] = dates
+
+    common = set.intersection(*per_symbol.values())
+    if not common:
+        raise SystemExit(
+            f"no date has feature files for ALL symbols: "
+            f"per-symbol counts: {', '.join(f'{s}={len(d)}' for s, d in per_symbol.items())}"
+        )
+    latest = max(common)
+    counts = {s: len(d) for s, d in per_symbol.items()}
+    print(f"feature scan: latest common date = {latest}  (per-symbol files: {counts})")
+    return latest
+
+
+def resolve_train_end(
+    *,
+    train_end_arg: str | None,
+    feature_dir: str,
+    symbols: list[str],
+    val_days: int,
+    test_days: int,
+    buffer_days: int,
+) -> str:
+    """Resolve train_end: explicit CLI arg, or auto-derived from feature data.
+
+    Auto-derive: train_end = latest_feature_date - val_days - test_days - buffer_days
+
+    Validates that feature data covers the full val + test window when
+    --train-end is explicitly provided (warns but continues on short data).
+    """
+    latest = discover_latest_feature_date(feature_dir, symbols)
+
+    if train_end_arg:
+        train_end = datetime.strptime(train_end_arg, "%Y-%m-%d").date()
+        needed_through = train_end + timedelta(days=val_days + test_days)
+        if needed_through > latest:
+            print(
+                f"WARNING: --train-end {train_end_arg} requires data through "
+                f"{needed_through} but latest available is {latest}. "
+                f"Val/test windows may be empty, causing training failures.",
+                file=sys.stderr,
+            )
+        return train_end_arg
+
+    train_end = latest - timedelta(days=val_days + test_days + buffer_days)
+    val_end = train_end + timedelta(days=val_days)
+    test_end = val_end + timedelta(days=test_days)
+    print(f"auto-derived train_end = {train_end}  (latest data: {latest})")
+    print(f"  val window:   {train_end + timedelta(days=1)} → {val_end}")
+    print(f"  test window:  {val_end + timedelta(days=1)} → {test_end}")
+    print(f"  data through: {latest}  ✓" if test_end <= latest else f"  data through: {latest}  ✗ INSUFFICIENT")
+    if test_end > latest:
+        raise SystemExit(
+            f"Cannot fit val({val_days}d)+test({test_days}d) windows before "
+            f"latest data date {latest}. Reduce --val-days/--test-days or add "
+            f"more feature data."
+        )
+    return train_end.isoformat()
 
 
 def enumerate_fleet(symbols, horizons, train_days_list):
@@ -142,8 +235,17 @@ def main():
     )
     p.add_argument(
         "--train-end",
-        required=True,
-        help="Training end date YYYY-MM-DD",
+        default=None,
+        help=(
+            "Training end date YYYY-MM-DD. When omitted, auto-derived from "
+            "latest feature data as: latest_date - val_days - test_days - buffer_days"
+        ),
+    )
+    p.add_argument(
+        "--buffer-days",
+        type=int,
+        default=0,
+        help="Extra days to subtract from auto-derived train_end (default: 0)",
     )
     p.add_argument(
         "--feature-dir",
@@ -205,6 +307,15 @@ def main():
     train_days_list = [int(x) for x in args.train_days.split(",")]
     eval_windows = [int(x) for x in args.evaluation_windows.split(",")]
 
+    train_end = resolve_train_end(
+        train_end_arg=args.train_end,
+        feature_dir=args.feature_dir,
+        symbols=symbols,
+        val_days=args.val_days,
+        test_days=args.test_days,
+        buffer_days=args.buffer_days,
+    )
+
     fleet = enumerate_fleet(symbols, horizons, train_days_list)
     state_path = Path(args.state)
     state_path.parent.mkdir(parents=True, exist_ok=True)
@@ -221,7 +332,7 @@ def main():
             ex.submit(
                 train_one,
                 c,
-                train_end=args.train_end,
+                train_end=train_end,
                 feature_dir=args.feature_dir,
                 output_root=args.output_root,
                 evaluation_windows=eval_windows,
