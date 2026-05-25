@@ -342,3 +342,55 @@ async def api_recommend_premium(body: RecommendPremiumRequest):
         since_ms=body.since_ms,
         mode=body.mode,
     )
+
+
+@router.get("/analysis/decay-alerts")
+async def api_decay_alerts(
+    since_ms: int | None = Query(None, description="Only return alerts after this timestamp_ms"),
+    triggered: int = Query(1, description="1 = only triggered alerts (default), 0 = all"),
+    eval_type: str | None = Query(None, description="Filter by eval_type: rwev_drop|brier_rise|calibration_drift"),
+    limit: int = Query(200, ge=1, le=2000),
+):
+    """Recent decay_evaluations rows. Returns list of {ts, model_name, symbol, market_window_seconds, eval_type, metric_value, threshold, triggered, detail_json}."""
+    try:
+        from services.db import get_db  # type: ignore
+    except ModuleNotFoundError:
+        from dashboard_api.services.db import get_db  # type: ignore
+    conn = get_db()
+    try:
+        sql = (
+            "SELECT ts, model_name, symbol, market_window_seconds,"
+            " eval_type, metric_value, threshold, triggered, detail_json"
+            " FROM decay_evaluations"
+            " WHERE 1=1"
+        )
+        params: list = []
+        if since_ms is not None:
+            # ts is ISO format; convert since_ms to ISO for comparison
+            from datetime import datetime, timezone
+            iso = datetime.fromtimestamp(since_ms / 1000, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+            sql += " AND ts >= ?"
+            params.append(iso)
+        if triggered == 1:
+            sql += " AND triggered = 1"
+        if eval_type is not None:
+            sql += " AND eval_type = ?"
+            params.append(eval_type)
+        sql += " ORDER BY ts DESC LIMIT ?"
+        params.append(limit)
+        rows = conn.execute(sql, tuple(params)).fetchall()
+        out = []
+        for r in rows:
+            d = dict(r) if hasattr(r, "keys") else {
+                "ts": r[0], "model_name": r[1], "symbol": r[2],
+                "market_window_seconds": r[3], "eval_type": r[4],
+                "metric_value": r[5], "threshold": r[6],
+                "triggered": r[7], "detail_json": r[8],
+            }
+            out.append(d)
+        return {"alerts": out, "count": len(out)}
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass

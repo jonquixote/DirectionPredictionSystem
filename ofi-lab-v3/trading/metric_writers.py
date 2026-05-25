@@ -103,16 +103,98 @@ class MetricWriters:
                 for r in rows
             ]
             win_rate = sum(1 for r in rows if r["prediction_correct"]) / len(rows)
+            rwev = compute_recency_weighted_ev(ev_values, alpha=0.05)
+            brier = compute_brier_score(cal_rows)
+            calib_err = compute_calibration_error(cal_rows)
             writer.write_snapshot(
                 model_name=model_name, symbol=symbol,
                 market_window_seconds=window,
                 window_size=window_size,
                 rolling_ev=compute_rolling_ev(ev_values),
-                recency_weighted_ev=compute_recency_weighted_ev(ev_values, alpha=0.05),
+                recency_weighted_ev=rwev,
                 rolling_win_rate=win_rate,
-                brier_score=compute_brier_score(cal_rows),
-                calibration_error=compute_calibration_error(cal_rows),
+                brier_score=brier,
+                calibration_error=calib_err,
                 sample_count=len(rows),
+            )
+            self._evaluate_decay_triggers(
+                model_name=model_name,
+                symbol=symbol,
+                market_window_seconds=window,
+                current_rwev=rwev,
+                current_brier=brier,
+                current_calib_err=calib_err,
+                sample_count=len(rows),
+            )
+
+    def _evaluate_decay_triggers(
+        self, *, model_name: str, symbol: str,
+        market_window_seconds: int,
+        current_rwev: float | None,
+        current_brier: float | None,
+        current_calib_err: float | None,
+        sample_count: int,
+    ) -> None:
+        """Evaluate 3 decay triggers and write to decay_evaluations table.
+
+        rwev_drop:         current_rwev < (7d_max_rwev - 0.02), n >= 30
+        brier_rise:        current_brier > (7d_baseline_brier + 0.02), n >= 30
+        calibration_drift: current_calib_err > 0.08, n >= 30
+        """
+        if sample_count < 30:
+            return
+        writer = self._decay_writer
+        # Query 7-day baselines
+        row = self._db_conn.execute(
+            "SELECT MAX(recency_weighted_ev) AS max_rwev,"
+            "       AVG(brier_score) AS avg_brier"
+            "  FROM decay_metrics"
+            " WHERE model_name = ? AND symbol = ?"
+            "   AND market_window_seconds = ?"
+            "   AND ts >= datetime('now','-7 day')",
+            (model_name, symbol, market_window_seconds),
+        ).fetchone()
+        max_rwev_7d = row["max_rwev"] if row and row["max_rwev"] is not None else None
+        avg_brier_7d = row["avg_brier"] if row and row["avg_brier"] is not None else None
+
+        # rwev_drop
+        if current_rwev is not None and max_rwev_7d is not None:
+            threshold = max_rwev_7d - 0.02
+            triggered = current_rwev < threshold
+            writer.write_evaluation(
+                model_name=model_name, symbol=symbol,
+                market_window_seconds=market_window_seconds,
+                eval_type="rwev_drop",
+                metric_value=current_rwev,
+                threshold=threshold,
+                triggered=triggered,
+                detail={"max_rwev_7d": max_rwev_7d, "sample_count": sample_count},
+            )
+        # brier_rise
+        if current_brier is not None and avg_brier_7d is not None:
+            threshold = avg_brier_7d + 0.02
+            triggered = current_brier > threshold
+            writer.write_evaluation(
+                model_name=model_name, symbol=symbol,
+                market_window_seconds=market_window_seconds,
+                eval_type="brier_rise",
+                metric_value=current_brier,
+                threshold=threshold,
+                triggered=triggered,
+                detail={"avg_brier_7d": avg_brier_7d, "sample_count": sample_count},
+            )
+        # calibration_drift
+        if current_calib_err is not None:
+            threshold = 0.08
+            triggered = current_calib_err > threshold
+            writer.write_evaluation(
+                model_name=model_name, symbol=symbol,
+                market_window_seconds=market_window_seconds,
+                eval_type="calibration_drift",
+                metric_value=current_calib_err,
+                threshold=threshold,
+                triggered=triggered,
+                detail={"sample_count": sample_count},
             )
 
     def refresh_price_ranges(
