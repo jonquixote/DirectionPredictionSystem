@@ -1018,6 +1018,7 @@ SUPPORTED_FILTER_KEYS = {
     "regime_trend", "consensus_required", "max_book_age_seconds",
     "min_recency_weighted_ev", "min_p_market_edge",
     "skip_high_divergence_quartile",
+    "regime_gates",
 }
 
 
@@ -1158,8 +1159,21 @@ def _apply_filter_row(p: dict, filter_config: dict,
     """Returns True if prediction passes ALL configured filters."""
     fc = filter_config
 
+    # Resolve per-regime threshold overrides (shared with live trader).
+    try:
+        from filters.regime_gate import resolve_thresholds
+    except ModuleNotFoundError:
+        from ofi_lab_v3.filters.regime_gate import resolve_thresholds  # type: ignore
+    regime_for_row = {
+        "volatility": p.get("regime_volatility"),
+        "liquidity": p.get("regime_liquidity"),
+        "trend": p.get("regime_trend"),
+    }
+    ct, et = resolve_thresholds(
+        fc, regime_for_row, fc.get("confidence_threshold"), fc.get("ev_threshold"),
+    )
+
     # Confidence threshold (side-confidence: max(p, 1-p))
-    ct = fc.get("confidence_threshold")
     if ct is not None:
         pp = p.get("pred_proba_calibrated") or 0.5
         side = max(pp, 1.0 - pp)
@@ -1167,7 +1181,6 @@ def _apply_filter_row(p: dict, filter_config: dict,
             return False
 
     # EV threshold
-    et = fc.get("ev_threshold")
     if et is not None:
         ev = p.get("ev_estimate")
         if ev is None or ev < et:

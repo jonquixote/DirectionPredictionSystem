@@ -241,9 +241,20 @@ class BoundaryScorer:
                 _model_fc = meta.get("filter_config", {})
                 if isinstance(_model_fc, str):
                     _model_fc = json.loads(_model_fc)
-                effective_ct = _model_fc.get("confidence_threshold", _ct)
-                effective_ev_thresh = _model_fc.get("ev_threshold",
+                _base_ct = _model_fc.get("confidence_threshold", _ct)
+                _base_ev = _model_fc.get("ev_threshold",
                     t.filters.get("ev_threshold", 0.0))
+                # Per-regime threshold override (Phase 2b — shared helper).
+                from filters.regime_gate import resolve_thresholds as _resolve_thresholds
+                _regime_tags = t._tag_regime(symbol, features or {})
+                _regime_for_row = {
+                    "volatility": getattr(_regime_tags, "volatility", None),
+                    "liquidity": getattr(_regime_tags, "liquidity", None),
+                    "trend": getattr(_regime_tags, "trend", None),
+                }
+                effective_ct, effective_ev_thresh = _resolve_thresholds(
+                    _model_fc, _regime_for_row, _base_ct, _base_ev,
+                )
 
                 # Per-model warmup override (overrides provisional value set above)
                 effective_warmup_s = _model_fc.get("warmup_seconds", MAD_WARMUP_SECONDS)
