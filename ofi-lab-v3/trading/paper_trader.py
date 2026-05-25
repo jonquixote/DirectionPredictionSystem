@@ -290,7 +290,8 @@ class PaperTrader:
                 "SELECT symbol, training_horizon_seconds, feature_version, "
                 "train_window_start, train_window_end, train_days, "
                 "platform_active_json, filter_config_json, "
-                "fleet_version, live_eligible FROM model_registry WHERE name=?",
+                "fleet_version, live_eligible, kelly_multiplier, tier "
+                "FROM model_registry WHERE name=?",
                 (name,),
             ).fetchone()
             if reg:
@@ -317,6 +318,9 @@ class PaperTrader:
                     "train_cutoff": reg["train_window_end"] or "",
                     "kalshi_dispatch_enabled": pa.get("kalshi", False),
                     "filter_config": fc,
+                    # Phase 5: tier-aware Kelly
+                    "kelly_multiplier": float(reg["kelly_multiplier"]) if reg["kelly_multiplier"] is not None else 0.0,
+                    "tier": reg["tier"] or "watch",
                 }
             elif name in _cfg_meta:
                 self._model_meta[name] = dict(_cfg_meta[name])
@@ -423,7 +427,7 @@ class PaperTrader:
             return
         try:
             rows = self._db_conn.execute(
-                "SELECT name, filter_config_json FROM model_registry"
+                "SELECT name, filter_config_json, kelly_multiplier, tier FROM model_registry"
             ).fetchall()
         except Exception as e:
             logger.warning("reload_model_meta SQL failed: %s", e)
@@ -448,6 +452,11 @@ class PaperTrader:
             if new_fc != old_fc:
                 self._model_meta[name]["filter_config"] = new_fc
                 changed.append(name)
+            # Phase 5: always refresh kelly_multiplier + tier so demotion/promotion is live
+            new_mult = float(row["kelly_multiplier"]) if row["kelly_multiplier"] is not None else 0.0
+            new_tier = row["tier"] or "watch"
+            self._model_meta[name]["kelly_multiplier"] = new_mult
+            self._model_meta[name]["tier"] = new_tier
         if changed:
             logger.info("reloaded filter_config for %d models: %s", len(changed), changed)
 
@@ -474,9 +483,11 @@ class PaperTrader:
                 "train_window_start, train_window_end, train_days, "
                 "artifact_path, feature_names_path, "
                 "platform_active_json, filter_config_json, "
-                "lifecycle_state, paper_active, live_eligible, fleet_version "
+                "lifecycle_state, paper_active, live_eligible, fleet_version, "
+                "kelly_multiplier, tier "
                 "FROM model_registry "
                 "WHERE paper_active = 1 AND lifecycle_state != 'suspended' "
+                "  AND COALESCE(tier, 'gold') != 'retired' "
                 "ORDER BY live_eligible DESC, fleet_version DESC, is_baseline DESC, "
                 "training_horizon_seconds, name"
             ).fetchall()
@@ -516,6 +527,9 @@ class PaperTrader:
                 "lifecycle_state": row["lifecycle_state"],
                 "paper_active": bool(row["paper_active"]),
                 "live_eligible": bool(row["live_eligible"]),
+                # Phase 5: tier-aware Kelly
+                "kelly_multiplier": float(row["kelly_multiplier"]) if row["kelly_multiplier"] is not None else 0.0,
+                "tier": row["tier"] or "watch",
             }
 
             if name not in self.models:
@@ -1010,8 +1024,17 @@ class PaperTrader:
 
         kelly_raw = edge / odds
 
-        # Apply fraction multiplier (half-Kelly = 0.5)
-        kelly_adj = kelly_raw * f["kelly_fraction"]
+        # Phase 5: scale by per-model tier kelly_multiplier (gold=1.0, silver=0.3,
+        # watch=0.0, retired=0.0).  Models with multiplier=0.0 get flat paper stake.
+        kelly_multiplier = float(
+            self._model_meta.get(model_name, {}).get("kelly_multiplier", 0.0) or 0.0
+        )
+        if kelly_multiplier == 0.0:
+            return SIMULATED_STAKE_USDC
+
+        # Apply fraction multiplier (half-Kelly = 0.5) then tier multiplier
+        effective_kelly_fraction = f["kelly_fraction"] * kelly_multiplier
+        kelly_adj = kelly_raw * effective_kelly_fraction
         kelly_adj = max(0, min(kelly_adj, 1.0))  # clamp to [0, 1]
 
         # Sync bankroll with Kalshi if available, otherwise use running P&L
@@ -1033,8 +1056,8 @@ class PaperTrader:
         stake = max(stake, 1.0)
 
         logger.debug(
-            "[%s] Kelly: edge=%.4f odds=%.2f raw=%.4f adj=%.4f bankroll=$%.2f stake=$%.2f",
-            model_name, edge, odds, kelly_raw, kelly_adj, bankroll, stake,
+            "[%s] Kelly: edge=%.4f odds=%.2f raw=%.4f adj=%.4f mult=%.2f bankroll=$%.2f stake=$%.2f",
+            model_name, edge, odds, kelly_raw, kelly_adj, kelly_multiplier, bankroll, stake,
         )
         return round(stake, 2)
 

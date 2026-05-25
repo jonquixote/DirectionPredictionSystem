@@ -86,6 +86,106 @@ def _run_migrations(conn) -> None:
     _add_column_if_missing(conn, "decay_metrics", "ts_ms", "INTEGER")
     _add_column_if_missing(conn, "decay_metrics", "computed_for_max_ts_ms", "INTEGER")
     _migrate_native_to_eval_indexes(conn)
+    # Phase 3 — adaptive governance. Tier lifecycle + composite tier scores +
+    # action audit. All additive; legacy rows backfilled with tier='watch'
+    # except baselines (kept gold) so existing fleet keeps trading.
+    _add_column_if_missing(conn, "model_registry", "tier", "TEXT DEFAULT 'watch'")
+    _add_column_if_missing(conn, "model_registry", "tier_assigned_at", "TEXT")
+    _add_column_if_missing(conn, "model_registry", "tier_assigned_by", "TEXT")
+    _add_column_if_missing(conn, "model_registry", "kelly_multiplier", "REAL DEFAULT 0.0")
+    _add_column_if_missing(conn, "model_registry", "probation_start_at", "TEXT")
+    _add_column_if_missing(conn, "model_registry", "probation_end_at", "TEXT")
+    _add_column_if_missing(conn, "model_registry", "parent_model_name", "TEXT")
+    # Backfill: paper_active=1 + cutover_state='cutover' rows ARE the current
+    # gold incumbents (kelly=1.0). Baselines stay gold. Everything else watch.
+    # Use COALESCE-based condition (not IS NULL) so this is idempotent even when
+    # the column was added with DEFAULT 'watch' in a prior migration run.
+    conn.execute(
+        "UPDATE model_registry SET tier = 'gold', kelly_multiplier = 1.0 "
+        "WHERE paper_active = 1 AND cutover_state = 'cutover' "
+        "  AND COALESCE(is_baseline, 0) = 0 "
+        "  AND COALESCE(tier, 'watch') NOT IN ('silver', 'gold', 'retired')"
+    )
+    conn.execute(
+        "UPDATE model_registry SET tier = 'watch', kelly_multiplier = 0.0 "
+        "WHERE tier IS NULL"
+    )
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS cell_governance (
+            cell_key                TEXT PRIMARY KEY,
+            symbol                  TEXT NOT NULL,
+            horizon_seconds         INTEGER NOT NULL,
+            training_days           INTEGER NOT NULL,
+            incumbent_model_name    TEXT,
+            challenger_model_name   TEXT,
+            last_promotion_at       TEXT,
+            last_demotion_at        TEXT,
+            notes                   TEXT
+        )
+    """)
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS model_tier_score (
+            id                              INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts                              TEXT NOT NULL,
+            model_name                      TEXT NOT NULL,
+            symbol                          TEXT NOT NULL,
+            market_window_seconds           INTEGER NOT NULL,
+            regime_label                    TEXT,
+            composite_score                 REAL NOT NULL,
+            component_live_rwev             REAL,
+            component_paper_rwev            REAL,
+            component_walk_forward_ev       REAL,
+            component_calibration_drift     REAL,
+            component_decay_slope           REAL,
+            component_stability             REAL,
+            weights_json                    TEXT,
+            sample_count                    INTEGER NOT NULL
+        )
+    """)
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_mts_model ON model_tier_score(model_name, ts)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_mts_cell "
+        "ON model_tier_score(symbol, market_window_seconds, ts)"
+    )
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS governance_actions (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts              TEXT NOT NULL,
+            model_name      TEXT NOT NULL,
+            action          TEXT NOT NULL,
+            from_tier       TEXT,
+            to_tier         TEXT,
+            triggered_by    TEXT NOT NULL,
+            reason_json     TEXT NOT NULL,
+            cell_key        TEXT
+        )
+    """)
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_gov_actions_model_ts "
+        "ON governance_actions(model_name, ts)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_gov_actions_cell_ts "
+        "ON governance_actions(cell_key, ts)"
+    )
+    # Phase 6c — retrain queue. Auto-fills when a cell has no gold/silver incumbent.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS retrain_queue (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            cell_key        TEXT NOT NULL,
+            symbol          TEXT NOT NULL,
+            horizon_seconds INTEGER NOT NULL,
+            training_days   INTEGER NOT NULL,
+            requested_at    TEXT NOT NULL,
+            triggered_by    TEXT NOT NULL,
+            picked_up_at    TEXT,
+            picked_up_by    TEXT,
+            notes           TEXT,
+            UNIQUE(cell_key, requested_at)
+        )
+    """)
 
 
 def _migrate_native_to_eval_indexes(conn) -> None:

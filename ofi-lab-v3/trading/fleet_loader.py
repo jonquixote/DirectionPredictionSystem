@@ -26,6 +26,7 @@ def load_active_fleet(conn: sqlite3.Connection) -> list[dict]:
         fleet_version, live_eligible
         FROM model_registry
         WHERE paper_active = 1 AND lifecycle_state != 'suspended'
+        AND COALESCE(tier, 'gold') != 'retired'
         ORDER BY live_eligible DESC, fleet_version DESC, is_baseline DESC,
                  training_horizon_seconds, name
         """

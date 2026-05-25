@@ -267,6 +267,14 @@ class KalshiDispatcher:
             return False
         if market_window_seconds != meta["training_horizon_seconds"]:
             return False
+        # Phase 5c: only gold-tier models dispatch to live Kalshi
+        model_tier = meta.get("tier", "watch")
+        if model_tier != "gold":
+            import logging as _logging
+            _logging.getLogger("dashboard.kalshi").info(
+                "live_dispatch_skipped tier=%s model=%s", model_tier, model_name
+            )
+            return False
         row = t._db_conn.execute(
             "SELECT platform_active_json FROM model_registry WHERE name=?",
             (model_name,),

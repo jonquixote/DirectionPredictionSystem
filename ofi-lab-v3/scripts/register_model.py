@@ -10,6 +10,7 @@ from pathlib import Path
 
 
 DEFAULT_CUTOVER_DELAY_HOURS = 24.0
+DEFAULT_PROBATION_HOURS = 72.0
 
 
 def _utc_now_iso() -> str:
@@ -61,6 +62,7 @@ def register_model(
     evaluation_windows: list[int],
     fleet_version: str | None = None,
     cutover_delay_hours: float = DEFAULT_CUTOVER_DELAY_HOURS,
+    probation_hours: float | None = None,
 ) -> str:
     """
     Register a trained model artifact into model_registry.
@@ -72,6 +74,8 @@ def register_model(
         fleet_version: Explicit fleet grouping label (overrides env var / metrics).
         cutover_delay_hours: Phase 5 — hours from now until the model is
             auto-promoted to paper_active=1. Default 24h. Ignored for baselines.
+        probation_hours: Phase 4 — hours for challenger probation window.
+            Defaults to V3_PROBATION_HOURS env var, then 72.0. Ignored for baselines.
 
     Returns:
         Model name (e.g., "h180_xrp_v3_330d_20260426")
@@ -79,6 +83,8 @@ def register_model(
     If a baseline model with the same name exists, updates only artifact pointers.
     Otherwise, inserts a new fleet model with is_baseline=0, paper_active=0,
     cutover_state='scheduled', cutover_scheduled_at = NOW + cutover_delay_hours.
+    Phase 4: non-baseline models also get probation timestamps + cell_governance
+    challenger slot populated.
     """
     art = Path(artifact_dir)
     metrics = json.loads((art / "metrics.json").read_text())
@@ -162,6 +168,50 @@ def register_model(
                 cutover_scheduled_at,
                 cutover_decided_at,
             ),
+        )
+
+    # Phase 4a: challenger probation + cell_governance tracking
+    # Baselines are exempt — they start as gold and are never challengers.
+    is_baseline = bool(existing and existing["is_baseline"])
+    if not is_baseline:
+        effective_probation_hours = probation_hours or float(
+            os.environ.get("V3_PROBATION_HOURS", DEFAULT_PROBATION_HOURS)
+        )
+        probation_start = _utc_now_iso()
+        probation_end = _utc_plus_hours_iso(effective_probation_hours)
+
+        # Look up current incumbent from cell_governance
+        cell_key = f"{symbol}_{horizon}_{train_days}"
+        cg_row = conn.execute(
+            "SELECT incumbent_model_name FROM cell_governance WHERE cell_key = ?",
+            (cell_key,),
+        ).fetchone()
+        parent_name = cg_row["incumbent_model_name"] if cg_row else None
+
+        # Update probation + tier on the newly registered model
+        conn.execute(
+            "UPDATE model_registry SET "
+            "tier = 'watch', kelly_multiplier = 0.0, "
+            "probation_start_at = ?, probation_end_at = ?, parent_model_name = ? "
+            "WHERE name = ?",
+            (probation_start, probation_end, parent_name, name),
+        )
+
+        # Upsert cell_governance: set challenger_model_name, leave incumbent alone
+        conn.execute(
+            "INSERT INTO cell_governance(cell_key, symbol, horizon_seconds, training_days, "
+            "challenger_model_name) VALUES (?, ?, ?, ?, ?) "
+            "ON CONFLICT(cell_key) DO UPDATE SET challenger_model_name = excluded.challenger_model_name",
+            (cell_key, symbol, horizon, train_days, name),
+        )
+
+        # Write governance_actions row
+        reason = json.dumps({"parent": parent_name})
+        conn.execute(
+            "INSERT INTO governance_actions "
+            "(ts, model_name, action, from_tier, to_tier, triggered_by, reason_json, cell_key) "
+            "VALUES (?, ?, 'register_challenger', NULL, 'watch', 'auto:register_model', ?, ?)",
+            (_utc_now_iso(), name, reason, cell_key),
         )
 
     # Audit
