@@ -302,7 +302,14 @@ _TIER_DEMOTE: dict[str, str] = {"gold": "silver", "silver": "watch"}
 
 
 def _run_governance_probation_tick() -> int:
-    """Evaluate challengers whose probation has ended. Return number acted on."""
+    """Evaluate challengers whose probation has ended. Return number acted on.
+
+    Pause kill-switch: V3_GOVERNANCE_ACTIONS_PAUSED=1 short-circuits this tick
+    too — same reason as _run_governance_action_tick.
+    """
+    if os.environ.get("V3_GOVERNANCE_ACTIONS_PAUSED", "0") == "1":
+        logger.info("governance probation tick: PAUSED via V3_GOVERNANCE_ACTIONS_PAUSED=1")
+        return 0
     import json as _json
     from datetime import datetime as _dt, timezone as _tz
     conn = _cutover_get_db()
@@ -580,7 +587,15 @@ _GOVERNANCE_ACTION_BOOT_DELAY_S = 60
 
 
 def _run_governance_action_tick() -> int:
-    """Scan decay_evaluations for decay alerts; demote/retire models. Return count acted."""
+    """Scan decay_evaluations for decay alerts; demote/retire models. Return count acted.
+
+    Pause kill-switch: V3_GOVERNANCE_ACTIONS_PAUSED=1 short-circuits this tick.
+    Used while we land per-fleet baselines / grace window so we don't keep
+    demoting models on contaminated cross-fleet baselines.
+    """
+    if os.environ.get("V3_GOVERNANCE_ACTIONS_PAUSED", "0") == "1":
+        logger.info("governance action tick: PAUSED via V3_GOVERNANCE_ACTIONS_PAUSED=1")
+        return 0
     import json as _json
     from datetime import datetime as _dt, timezone as _tz
     conn = _cutover_get_db()

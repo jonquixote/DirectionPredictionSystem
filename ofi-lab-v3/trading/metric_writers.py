@@ -137,25 +137,133 @@ class MetricWriters:
     ) -> None:
         """Evaluate 3 decay triggers and write to decay_evaluations table.
 
-        rwev_drop:         current_rwev < (7d_max_rwev - 0.02), n >= 30
-        brier_rise:        current_brier > (7d_baseline_brier + 0.02), n >= 30
-        calibration_drift: current_calib_err > 0.08, n >= 30
+        Baselines are scoped to the model's own fleet_version (lineage-aware):
+        we look at peer rows in decay_metrics belonging to the same fleet for
+        the same (symbol, market_window_seconds). This avoids comparing a
+        freshly-trained descendant against an older fleet's stronger
+        history.
+
+        Grace window: skip rwev_drop and brier_rise triggers when the
+        fleet has < 72h of history for this (symbol, market_window) OR
+        fewer than 200 same-fleet samples in that window. calibration_drift
+        is an absolute threshold and still fires.
+
+        Triggers:
+          rwev_drop:         current_rwev < (peer_p75_rwev_7d - 0.02), n >= 30
+          brier_rise:        current_brier > (peer_avg_brier_7d + 0.02), n >= 30
+          calibration_drift: current_calib_err > 0.08, n >= 30 (no grace)
         """
         if sample_count < 30:
             return
         writer = self._decay_writer
-        # Query 7-day baselines
-        row = self._db_conn.execute(
-            "SELECT MAX(recency_weighted_ev) AS max_rwev,"
-            "       AVG(brier_score) AS avg_brier"
-            "  FROM decay_metrics"
-            " WHERE model_name = ? AND symbol = ?"
-            "   AND market_window_seconds = ?"
-            "   AND ts >= datetime('now','-7 day')",
-            (model_name, symbol, market_window_seconds),
-        ).fetchone()
-        max_rwev_7d = row["max_rwev"] if row and row["max_rwev"] is not None else None
-        avg_brier_7d = row["avg_brier"] if row and row["avg_brier"] is not None else None
+        # Resolve fleet_version for this model. If unknown / table missing,
+        # fall back to self-baseline (legacy behaviour) so we never hard-fail eval.
+        try:
+            fleet_row = self._db_conn.execute(
+                "SELECT fleet_version FROM model_registry WHERE name = ?",
+                (model_name,),
+            ).fetchone()
+            fleet_version = fleet_row["fleet_version"] if fleet_row else None
+        except Exception:
+            fleet_version = None
+
+        # Per-fleet baseline: peer rwev / brier from same fleet_version,
+        # same (symbol, market_window) over last 7 days. We use the
+        # 75th percentile of recency_weighted_ev as the rwev baseline
+        # (instead of MAX) so a single lucky outlier doesn't anchor the
+        # threshold; AVG for brier is stable enough.
+        peer_rows: list = []
+        first_ts_iso: str | None = None
+        peer_sample_total = 0
+        if fleet_version is not None:
+            try:
+                peer_rows = self._db_conn.execute(
+                    "SELECT dm.recency_weighted_ev AS rwev,"
+                    "       dm.brier_score AS brier,"
+                    "       dm.sample_count AS n,"
+                    "       dm.ts AS ts"
+                    "  FROM decay_metrics dm"
+                    "  JOIN model_registry mr ON mr.name = dm.model_name"
+                    " WHERE mr.fleet_version = ?"
+                    "   AND dm.symbol = ?"
+                    "   AND dm.market_window_seconds = ?"
+                    "   AND dm.ts >= datetime('now','-7 day')",
+                    (fleet_version, symbol, market_window_seconds),
+                ).fetchall()
+            except Exception:
+                peer_rows = []
+            if peer_rows:
+                first_ts_iso = min(r["ts"] for r in peer_rows if r["ts"])
+                peer_sample_total = sum((r["n"] or 0) for r in peer_rows)
+        else:
+            # Legacy fallback: self-history only (matches pre-Phase 52 behavior).
+            try:
+                peer_rows = self._db_conn.execute(
+                    "SELECT recency_weighted_ev AS rwev, brier_score AS brier,"
+                    "       sample_count AS n, ts"
+                    "  FROM decay_metrics"
+                    " WHERE model_name = ? AND symbol = ?"
+                    "   AND market_window_seconds = ?"
+                    "   AND ts >= datetime('now','-7 day')",
+                    (model_name, symbol, market_window_seconds),
+                ).fetchall()
+            except Exception:
+                peer_rows = []
+            if peer_rows:
+                first_ts_iso = min(r["ts"] for r in peer_rows if r["ts"])
+                peer_sample_total = sum((r["n"] or 0) for r in peer_rows)
+            # In legacy mode skip the grace window — preserves prior behavior
+            # for tests / non-fleet workflows.
+            # (we'll override grace_active below)
+
+        # Grace window: don't fire rwev/brier triggers until the fleet has
+        # 72h of history AND at least 200 peer samples for this cell.
+        # Legacy mode (no fleet_version) skips grace — preserves prior tests.
+        grace_active = True
+        if fleet_version is None:
+            grace_active = False
+        elif first_ts_iso is not None and peer_sample_total >= 200:
+            from datetime import datetime as _dt, timezone as _tz
+            ts0 = None
+            for fmt in (
+                "%Y-%m-%dT%H:%M:%S.%fZ",
+                "%Y-%m-%dT%H:%M:%SZ",
+                "%Y-%m-%d %H:%M:%S",
+                "%Y-%m-%d %H:%M:%S.%f",
+            ):
+                try:
+                    ts0 = _dt.strptime(first_ts_iso, fmt).replace(tzinfo=_tz.utc)
+                    break
+                except ValueError:
+                    continue
+            if ts0 is not None:
+                age_hours = (_dt.now(_tz.utc) - ts0).total_seconds() / 3600.0
+                grace_active = age_hours < 72.0
+
+        # Compute peer baselines (only if not in grace).
+        peer_p75_rwev_7d: float | None = None
+        peer_avg_brier_7d: float | None = None
+        if peer_rows and not grace_active:
+            rwev_values = sorted(r["rwev"] for r in peer_rows if r["rwev"] is not None)
+            if rwev_values:
+                # P75 via simple linear interpolation
+                k = 0.75 * (len(rwev_values) - 1)
+                lo = int(k)
+                hi = min(lo + 1, len(rwev_values) - 1)
+                peer_p75_rwev_7d = rwev_values[lo] + (rwev_values[hi] - rwev_values[lo]) * (k - lo)
+            brier_values = [r["brier"] for r in peer_rows if r["brier"] is not None]
+            if brier_values:
+                peer_avg_brier_7d = sum(brier_values) / len(brier_values)
+
+        max_rwev_7d = peer_p75_rwev_7d
+        avg_brier_7d = peer_avg_brier_7d
+        if grace_active:
+            logger.debug(
+                "decay_eval grace_active model=%s fleet=%s sym=%s win=%s "
+                "(peer_sample_total=%d, first_ts=%s)",
+                model_name, fleet_version, symbol, market_window_seconds,
+                peer_sample_total, first_ts_iso,
+            )
 
         # rwev_drop
         if current_rwev is not None and max_rwev_7d is not None:

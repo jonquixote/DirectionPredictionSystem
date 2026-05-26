@@ -98,17 +98,22 @@ def _run_migrations(conn) -> None:
     _add_column_if_missing(conn, "model_registry", "parent_model_name", "TEXT")
     # Backfill: paper_active=1 + cutover_state='cutover' rows ARE the current
     # gold incumbents (kelly=1.0). Baselines stay gold. Everything else watch.
-    # Use COALESCE-based condition (not IS NULL) so this is idempotent even when
-    # the column was added with DEFAULT 'watch' in a prior migration run.
+    # CRITICAL: only backfill rows the governance loop hasn't touched yet
+    # (tier_assigned_by IS NULL). Once governance demotes a model, migration
+    # MUST NOT re-promote it on the next restart.
     conn.execute(
-        "UPDATE model_registry SET tier = 'gold', kelly_multiplier = 1.0 "
-        "WHERE paper_active = 1 AND cutover_state = 'cutover' "
-        "  AND COALESCE(is_baseline, 0) = 0 "
-        "  AND COALESCE(tier, 'watch') NOT IN ('silver', 'gold', 'retired')"
+        "UPDATE model_registry "
+        "   SET tier = 'gold', kelly_multiplier = 1.0, "
+        "       tier_assigned_by = 'auto:migration_initial' "
+        " WHERE paper_active = 1 AND cutover_state = 'cutover' "
+        "   AND COALESCE(is_baseline, 0) = 0 "
+        "   AND tier_assigned_by IS NULL"
     )
     conn.execute(
-        "UPDATE model_registry SET tier = 'watch', kelly_multiplier = 0.0 "
-        "WHERE tier IS NULL"
+        "UPDATE model_registry "
+        "   SET tier = 'watch', kelly_multiplier = 0.0, "
+        "       tier_assigned_by = 'auto:migration_initial' "
+        " WHERE tier IS NULL"
     )
     conn.execute("""
         CREATE TABLE IF NOT EXISTS cell_governance (
