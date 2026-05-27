@@ -96,6 +96,22 @@ def _run_migrations(conn) -> None:
     _add_column_if_missing(conn, "model_registry", "probation_start_at", "TEXT")
     _add_column_if_missing(conn, "model_registry", "probation_end_at", "TEXT")
     _add_column_if_missing(conn, "model_registry", "parent_model_name", "TEXT")
+    # Patch B — demote tick should only count alerts from the model's primary
+    # market_window (the contract window nearest its training horizon).
+    # Models trained for h60-h300 -> primary 300s; h600-h900 -> 900s; h1200+ -> 1800s.
+    _add_column_if_missing(
+        conn, "model_registry", "primary_market_window_seconds", "INTEGER"
+    )
+    conn.execute(
+        "UPDATE model_registry SET primary_market_window_seconds = "
+        " CASE "
+        "   WHEN training_horizon_seconds <= 300 THEN 300 "
+        "   WHEN training_horizon_seconds <= 900 THEN 900 "
+        "   ELSE 1800 "
+        " END "
+        " WHERE primary_market_window_seconds IS NULL "
+        "   AND training_horizon_seconds IS NOT NULL"
+    )
     # Backfill: paper_active=1 + cutover_state='cutover' rows ARE the current
     # gold incumbents (kelly=1.0). Baselines stay gold. Everything else watch.
     # CRITICAL: only backfill rows the governance loop hasn't touched yet

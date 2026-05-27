@@ -618,11 +618,12 @@ def _run_governance_action_tick() -> int:
         _acted_this_tick: set[str] = set()
 
         # Find gold models with ≥3 triggered decay evaluations in last 6h.
-        # Stale-alert filter: only count alerts that fired AFTER the current
-        # tier was assigned. Without this, every promotion gets immediately
-        # demoted by pre-existing triggered rows. calibration_drift excluded
-        # from decay-monitor count because it has no grace window and can
-        # fire endlessly on a still-calibrating new fleet.
+        # Filters applied:
+        #   - Stale-alert: ts > tier_assigned_at (fresh accounting per promotion)
+        #   - calibration_drift excluded (no grace; fires on calibrating fleet)
+        #   - PRIMARY WINDOW ONLY (Patch B): a model trained for one horizon
+        #     emits at all 3 contract windows but is OPTIMAL at one.
+        #     Don't demote based on noise in non-primary windows.
         gold_decay = conn.execute(
             "SELECT mr.name, mr.symbol, mr.training_horizon_seconds, mr.train_days "
             "FROM model_registry mr "
@@ -630,6 +631,7 @@ def _run_governance_action_tick() -> int:
             "  AND (SELECT COUNT(*) FROM decay_evaluations de "
             "       WHERE de.model_name = mr.name AND de.triggered = 1 "
             "         AND de.eval_type != 'calibration_drift' "
+            "         AND de.market_window_seconds = mr.primary_market_window_seconds "
             "         AND de.ts >= datetime('now', '-6 hour') "
             "         AND de.ts > COALESCE(mr.tier_assigned_at, '1970-01-01')) >= 3"
         ).fetchall()
@@ -663,7 +665,8 @@ def _run_governance_action_tick() -> int:
 
         # Find silver models with ≥3 triggered decay evaluations in last 12h
         # (exclude models already acted on this tick to prevent double-demotion).
-        # Same stale-alert + calibration-drift exclusions as gold demote.
+        # Same stale-alert + calibration-drift + primary-window-only filters
+        # as gold demote.
         silver_decay = conn.execute(
             "SELECT mr.name, mr.symbol, mr.training_horizon_seconds, mr.train_days "
             "FROM model_registry mr "
@@ -671,6 +674,7 @@ def _run_governance_action_tick() -> int:
             "  AND (SELECT COUNT(*) FROM decay_evaluations de "
             "       WHERE de.model_name = mr.name AND de.triggered = 1 "
             "         AND de.eval_type != 'calibration_drift' "
+            "         AND de.market_window_seconds = mr.primary_market_window_seconds "
             "         AND de.ts >= datetime('now', '-12 hour') "
             "         AND de.ts > COALESCE(mr.tier_assigned_at, '1970-01-01')) >= 3"
         ).fetchall()
