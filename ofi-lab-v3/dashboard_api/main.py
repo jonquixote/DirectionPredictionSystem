@@ -617,14 +617,21 @@ def _run_governance_action_tick() -> int:
         # demoted gold→silver in the same tick should not also be caught by silver→watch).
         _acted_this_tick: set[str] = set()
 
-        # Find gold models with ≥3 triggered decay evaluations in last 6h
+        # Find gold models with ≥3 triggered decay evaluations in last 6h.
+        # Stale-alert filter: only count alerts that fired AFTER the current
+        # tier was assigned. Without this, every promotion gets immediately
+        # demoted by pre-existing triggered rows. calibration_drift excluded
+        # from decay-monitor count because it has no grace window and can
+        # fire endlessly on a still-calibrating new fleet.
         gold_decay = conn.execute(
             "SELECT mr.name, mr.symbol, mr.training_horizon_seconds, mr.train_days "
             "FROM model_registry mr "
             "WHERE mr.tier = 'gold' AND COALESCE(mr.is_baseline, 0) = 0 "
             "  AND (SELECT COUNT(*) FROM decay_evaluations de "
             "       WHERE de.model_name = mr.name AND de.triggered = 1 "
-            "         AND de.ts >= datetime('now', '-6 hour')) >= 3"
+            "         AND de.eval_type != 'calibration_drift' "
+            "         AND de.ts >= datetime('now', '-6 hour') "
+            "         AND de.ts > COALESCE(mr.tier_assigned_at, '1970-01-01')) >= 3"
         ).fetchall()
 
         for row in gold_decay:
@@ -655,14 +662,17 @@ def _run_governance_action_tick() -> int:
             _maybe_insert_retrain_queue(conn, cell_key, symbol, horizon, train_days, now_iso)
 
         # Find silver models with ≥3 triggered decay evaluations in last 12h
-        # (exclude models already acted on this tick to prevent double-demotion)
+        # (exclude models already acted on this tick to prevent double-demotion).
+        # Same stale-alert + calibration-drift exclusions as gold demote.
         silver_decay = conn.execute(
             "SELECT mr.name, mr.symbol, mr.training_horizon_seconds, mr.train_days "
             "FROM model_registry mr "
             "WHERE mr.tier = 'silver' AND COALESCE(mr.is_baseline, 0) = 0 "
             "  AND (SELECT COUNT(*) FROM decay_evaluations de "
             "       WHERE de.model_name = mr.name AND de.triggered = 1 "
-            "         AND de.ts >= datetime('now', '-12 hour')) >= 3"
+            "         AND de.eval_type != 'calibration_drift' "
+            "         AND de.ts >= datetime('now', '-12 hour') "
+            "         AND de.ts > COALESCE(mr.tier_assigned_at, '1970-01-01')) >= 3"
         ).fetchall()
 
         for row in silver_decay:
