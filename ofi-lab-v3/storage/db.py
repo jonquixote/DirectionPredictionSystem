@@ -254,6 +254,15 @@ def _run_migrations(conn) -> None:
             (win, win, win),
         )
 
+    # T1.3 — composite index on decay_evaluations covering governance demote
+    # queries (dashboard_api/main.py gold→silver + silver→watch ticks). They
+    # filter on model_name + market_window_seconds + eval_type + triggered + ts;
+    # existing idx_decay_eval_model only covers (model_name, eval_type, ts).
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_decay_eval_full "
+        "ON decay_evaluations(model_name, market_window_seconds, eval_type, triggered, ts DESC)"
+    )
+
 
 def _migrate_native_to_eval_indexes(conn) -> None:
     existing = {r[0] for r in conn.execute(

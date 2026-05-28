@@ -165,6 +165,11 @@ def analysis_db(tmp_path, monkeypatch):
         return _make_conn(db_path)
 
     monkeypatch.setattr(analysis_svc, "_get_db", _test_get_db)
+    # T1.2 — disable the 30d fast-path bound so historical fixture data
+    # (_BASE_TS = 2023-11) is not silently filtered. Production routers
+    # opt into bounding via full_history=False (the default); tests use
+    # fixed-ts seed data and need the unbounded path.
+    monkeypatch.setattr(analysis_svc, "DEFAULT_HISTORY_DAYS", 10_000)
 
     yield db_path, conn
 
@@ -381,6 +386,7 @@ class TestCommitteeSim:
             return _make_conn(db_path)
 
         monkeypatch.setattr(analysis_svc, "_get_db", _test_get_db)
+        monkeypatch.setattr(analysis_svc, "DEFAULT_HISTORY_DAYS", 10_000)
         return db_path
 
     def test_avg_strategy_win_rate(self, committee_db):
@@ -476,6 +482,7 @@ class TestSkipConditions:
             return _make_conn(db_path)
 
         monkeypatch.setattr(analysis_svc, "_get_db", _test_get_db)
+        monkeypatch.setattr(analysis_svc, "DEFAULT_HISTORY_DAYS", 10_000)
         return db_path
 
     def test_blackout_hours_extracted(self, skip_db):

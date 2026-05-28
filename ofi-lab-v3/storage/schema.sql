@@ -309,6 +309,11 @@ CREATE TABLE IF NOT EXISTS decay_evaluations (
 CREATE INDEX IF NOT EXISTS idx_decay_eval_model
     ON decay_evaluations(model_name, eval_type, ts);
 
+-- T1.3 — composite index for governance demote queries
+-- (model_name + market_window_seconds + eval_type + triggered + ts).
+CREATE INDEX IF NOT EXISTS idx_decay_eval_full
+    ON decay_evaluations(model_name, market_window_seconds, eval_type, triggered, ts DESC);
+
 -- =========================================================================
 -- regime_thresholds: per-symbol volatility/liquidity/trend quartiles.
 -- =========================================================================

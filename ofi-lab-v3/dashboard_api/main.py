@@ -13,23 +13,46 @@ from datetime import datetime, timedelta, timezone
 from fastapi import FastAPI, Depends
 from fastapi.middleware.cors import CORSMiddleware
 
-from services.auth import verify_credentials
-from services.admin_auth import validate_admin_secret
-from services.live_state import LiveState
-from services.alerts_engine import start_alert_worker
-from ws.broadcaster import ws_router
-from routers import (
-    status, predictions, trades, performance,
-    parquet, features, models_registry, alerts, logs,
-    models_admin, overlap, kill_switch, audit, admin,
-    regime, calibration, baseline, dashboard_settings,
-    kalshi_proxy, analysis,
-)
+# Imports tolerate two run contexts: production (cwd = ofi-lab-v3/) where
+# `services.auth` is on the path, and test/local (cwd = repo root) where the
+# same modules live under `dashboard_api.services.auth`. Mirror the same
+# try/except pattern the routers use.
 try:
-    from routers import training as training_router
-    _has_training = True
-except ImportError:
-    _has_training = False
+    from services.auth import verify_credentials
+    from services.admin_auth import validate_admin_secret
+    from services.live_state import LiveState
+    from services.alerts_engine import start_alert_worker
+    from ws.broadcaster import ws_router
+    from routers import (
+        status, predictions, trades, performance,
+        parquet, features, models_registry, alerts, logs,
+        models_admin, overlap, kill_switch, audit, admin,
+        regime, calibration, baseline, dashboard_settings,
+        kalshi_proxy, analysis,
+    )
+    try:
+        from routers import training as training_router
+        _has_training = True
+    except ImportError:
+        _has_training = False
+except ModuleNotFoundError:
+    from dashboard_api.services.auth import verify_credentials  # type: ignore
+    from dashboard_api.services.admin_auth import validate_admin_secret  # type: ignore
+    from dashboard_api.services.live_state import LiveState  # type: ignore
+    from dashboard_api.services.alerts_engine import start_alert_worker  # type: ignore
+    from dashboard_api.ws.broadcaster import ws_router  # type: ignore
+    from dashboard_api.routers import (  # type: ignore
+        status, predictions, trades, performance,
+        parquet, features, models_registry, alerts, logs,
+        models_admin, overlap, kill_switch, audit, admin,
+        regime, calibration, baseline, dashboard_settings,
+        kalshi_proxy, analysis,
+    )
+    try:
+        from dashboard_api.routers import training as training_router  # type: ignore
+        _has_training = True
+    except ImportError:
+        _has_training = False
 
 logging.basicConfig(
     level=logging.INFO,
@@ -704,11 +727,18 @@ def _run_governance_action_tick() -> int:
             logger.info("governance action: demoted %s silver→watch primary_window=%s (decay alerts in 12h)", name, primary_window)
             _maybe_insert_retrain_queue(conn, cell_key, symbol, horizon, train_days, now_iso)
 
-        # Find watch models to retire: sustained negative rwev for 7 days, sample_count >= 100
+        # Find watch models to retire: sustained negative rwev for 7 days, sample_count >= 100.
+        # Phase 57: tier lives in model_window_tier (per-window). Filter on the primary
+        # window's tier, mirroring the gold/silver demote queries at lines ~620/~668.
+        # Legacy mr.tier='watch' filter missed auto-demoted models (only manual promote_model
+        # writes mr.tier), so watch-aged models never reached retire.
         watch_retire = conn.execute(
             "SELECT mr.name, mr.symbol, mr.training_horizon_seconds, mr.train_days "
             "FROM model_registry mr "
-            "WHERE mr.tier = 'watch' AND COALESCE(mr.is_baseline, 0) = 0 "
+            "JOIN model_window_tier mwt "
+            "  ON mwt.model_name = mr.name "
+            " AND mwt.market_window_seconds = COALESCE(mr.primary_market_window_seconds, mr.training_horizon_seconds) "
+            "WHERE mwt.tier = 'watch' AND COALESCE(mr.is_baseline, 0) = 0 "
             "  AND mr.paper_active = 1"
         ).fetchall()
 
@@ -745,12 +775,20 @@ def _run_governance_action_tick() -> int:
             if neg_check["neg_count"] < neg_check["total"]:
                 continue
 
-            # All conditions met — retire
+            # All conditions met — retire. Terminal state: kill predictions across
+            # ALL three windows (300/900/1800), not just the primary window like
+            # gold→silver and silver→watch demotes do.
             conn.execute(
                 "UPDATE model_registry SET tier = 'retired', kelly_multiplier = 0.0, "
                 "paper_active = 0, "
                 "tier_assigned_at = ?, tier_assigned_by = 'auto:decay_monitor' "
                 "WHERE name = ?",
+                (now_iso, name),
+            )
+            conn.execute(
+                "UPDATE model_window_tier SET tier = 'retired', kelly_multiplier = 0.0, "
+                "tier_assigned_at = ?, tier_assigned_by = 'auto:decay_monitor' "
+                "WHERE model_name = ?",
                 (now_iso, name),
             )
             conn.execute(

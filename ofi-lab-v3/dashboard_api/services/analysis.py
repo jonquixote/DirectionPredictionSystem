@@ -165,6 +165,14 @@ ALL_SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT"]
 ALL_WINDOWS = [300, 900, 1800]
 DEFAULT_THRESHOLDS = [round(0.50 + i * 0.01, 2) for i in range(21)]  # 0.50–0.70
 
+# T1.2 — bounded fetch defaults. Fast path bounds the load to recent history +
+# a row cap so a single /analysis call cannot scan the entire predictions table.
+# Operators can opt out per-request with full_history=True (router param), which
+# takes the legacy unbounded path. The meta dict surfaced via response headers
+# always declares which path was taken so analysis is never silently truncated.
+DEFAULT_HISTORY_DAYS = 30
+DEFAULT_PRED_LIMIT = 50_000
+
 
 # ---------------------------------------------------------------------------
 # Internal helpers
@@ -185,6 +193,8 @@ def _load_resolved_predictions(
     market_window: int | None,
     since_ms: int | None,
     model: str | None = None,
+    full_history: bool = False,
+    meta: dict | None = None,
 ) -> list[dict]:
     """
     Pull resolved, non-warmup predictions from the DB.
@@ -194,12 +204,38 @@ def _load_resolved_predictions(
       pred_proba_calibrated, pred_direction, prediction_correct,
       p_market, ts_contract_open_ms, utc_hour, day_of_week,
       relative_spread, p_model_minus_market
+
+    T1.2 — fast path defaults to last ``DEFAULT_HISTORY_DAYS`` and
+    ``LIMIT DEFAULT_PRED_LIMIT`` to keep the event loop unblocked. Pass
+    ``full_history=True`` to take the legacy unbounded path. When ``meta`` is
+    provided, the function records what it actually did: ``path``,
+    ``truncated``, ``since_ms_used``, ``row_count_scanned``, ``full_history``.
+    Callers (routers) surface this via response headers so the operator
+    always knows the scope of evidence used.
     """
-    # T1.1 — in-memory TTL cache for the most-called DB fetch
-    _cache_key = f"_load_resolved:{symbol}:{market_window}:{since_ms}:{model}"
+    # Fast-path defaults — bound since_ms and row count unless the caller
+    # explicitly asked for full history.
+    effective_since_ms = since_ms
+    if not full_history and effective_since_ms is None:
+        effective_since_ms = int(_time.time() * 1000) - DEFAULT_HISTORY_DAYS * 86_400_000
+
+    # T1.1 — in-memory TTL cache for the most-called DB fetch. Include the
+    # bounded since_ms + full_history in the cache key so fast and slow
+    # paths don't poison each other.
+    _cache_key = (
+        f"_load_resolved:{symbol}:{market_window}:{effective_since_ms}:"
+        f"{model}:full={full_history}"
+    )
     _cached = _cache_get(_cache_key)
     if _cached is not None:
-        return _cached
+        if meta is not None:
+            cached_n = len(_cached) if hasattr(_cached, "__len__") else 0
+            meta["path"] = "cache"
+            meta["truncated"] = (not full_history) and (cached_n >= DEFAULT_PRED_LIMIT)
+            meta["since_ms_used"] = effective_since_ms
+            meta["row_count_scanned"] = cached_n
+            meta["full_history"] = full_history
+        return _cached  # type: ignore[return-value]
 
     clauses = ["resolved = 1", "prediction_correct IS NOT NULL", "warmup = 0"]
     params: list[Any] = []
@@ -210,29 +246,53 @@ def _load_resolved_predictions(
     if market_window:
         clauses.append("market_window_seconds = ?")
         params.append(market_window)
-    if since_ms:
+    if effective_since_ms:
         clauses.append("ts_contract_open_ms >= ?")
-        params.append(since_ms)
+        params.append(effective_since_ms)
     if model:
         clauses.append("model_name = ?")
         params.append(model)
 
     where = " AND ".join(clauses)
-    sql = f"""
-        SELECT
-            model_name, symbol, market_window_seconds,
-            pred_proba_calibrated, pred_proba_raw,
-            pred_direction, prediction_correct,
-            p_market, p_model_minus_market,
-            ts_contract_open_ms,
-            utc_hour, day_of_week, is_weekend,
-            relative_spread,
-            ev_estimate
-        FROM predictions
-        WHERE {where}
-        ORDER BY ts_contract_open_ms
-    """
-    rows = db.execute(sql, params).fetchall()
+    if full_history:
+        # Legacy unbounded path — preserve original ordering for callers that
+        # depend on ascending ts. Operator opted in via full_history=True.
+        sql = f"""
+            SELECT
+                model_name, symbol, market_window_seconds,
+                pred_proba_calibrated, pred_proba_raw,
+                pred_direction, prediction_correct,
+                p_market, p_model_minus_market,
+                ts_contract_open_ms,
+                utc_hour, day_of_week, is_weekend,
+                relative_spread,
+                ev_estimate
+            FROM predictions
+            WHERE {where}
+            ORDER BY ts_contract_open_ms
+        """
+        rows = db.execute(sql, params).fetchall()
+    else:
+        # Fast path — recent N rows, then reverse so downstream sees ascending.
+        sql = f"""
+            SELECT
+                model_name, symbol, market_window_seconds,
+                pred_proba_calibrated, pred_proba_raw,
+                pred_direction, prediction_correct,
+                p_market, p_model_minus_market,
+                ts_contract_open_ms,
+                utc_hour, day_of_week, is_weekend,
+                relative_spread,
+                ev_estimate
+            FROM predictions
+            WHERE {where}
+            ORDER BY ts_contract_open_ms DESC
+            LIMIT ?
+        """
+        params.append(DEFAULT_PRED_LIMIT)
+        rows = db.execute(sql, params).fetchall()
+        rows = list(reversed(rows))
+
     result = []
     for row in rows:
         d = dict(row)
@@ -242,6 +302,13 @@ def _load_resolved_predictions(
         pm = d.get("p_market") or 0.5
         d["divergence"] = abs(pp - pm)
         result.append(d)
+    truncated = (not full_history) and (len(result) >= DEFAULT_PRED_LIMIT)
+    if meta is not None:
+        meta["path"] = "full" if full_history else "fast"
+        meta["truncated"] = truncated
+        meta["since_ms_used"] = effective_since_ms
+        meta["row_count_scanned"] = len(result)
+        meta["full_history"] = full_history
     _cache_put(_cache_key, result)
     return result
 
@@ -364,9 +431,14 @@ def compute_leaderboard(
     metric: str = "win_rate",
     since_ms: int | None = None,
     limit: int = 100,
+    full_history: bool = False,
+    meta: dict | None = None,
 ) -> list[dict]:
     db = _get_db()
-    preds = _load_resolved_predictions(db, symbol, market_window, since_ms)
+    preds = _load_resolved_predictions(
+        db, symbol, market_window, since_ms,
+        full_history=full_history, meta=meta,
+    )
 
     # Group by (model, symbol, window)
     groups: dict[tuple, list[dict]] = defaultdict(list)
@@ -456,12 +528,17 @@ def compute_threshold_grid(
     since_ms: int | None = None,
     limit_models: int = 30,
     thresholds: list[float] | None = None,
+    full_history: bool = False,
+    meta: dict | None = None,
 ) -> dict:
     if thresholds is None:
         thresholds = DEFAULT_THRESHOLDS
 
     db = _get_db()
-    preds = _load_resolved_predictions(db, symbol, market_window, since_ms)
+    preds = _load_resolved_predictions(
+        db, symbol, market_window, since_ms,
+        full_history=full_history, meta=meta,
+    )
 
     # Group by model
     by_model: dict[str, list[dict]] = defaultdict(list)
@@ -502,14 +579,25 @@ def compute_committee_sim(
     market_window: int,
     strategy: str = "avg",
     since_ms: int | None = None,
+    full_history: bool = False,
+    meta: dict | None = None,
 ) -> dict:
     # T1.1 outer cache
-    _ck = f"committee_sim:{symbol}:{market_window}:{strategy}:{since_ms}"
+    _ck = f"committee_sim:{symbol}:{market_window}:{strategy}:{since_ms}:full={full_history}"
     _hit = _cache_get(_ck)
     if _hit is not None:
+        if meta is not None:
+            meta["path"] = "cache"
+            meta["truncated"] = False
+            meta["since_ms_used"] = since_ms
+            meta["row_count_scanned"] = 0
+            meta["full_history"] = full_history
         return _hit
     db = _get_db()
-    preds = _load_resolved_predictions(db, symbol, market_window, since_ms)
+    preds = _load_resolved_predictions(
+        db, symbol, market_window, since_ms,
+        full_history=full_history, meta=meta,
+    )
 
     # Group by boundary
     by_boundary: dict[int, list[dict]] = defaultdict(list)
@@ -645,20 +733,37 @@ def compute_skip_conditions(
     market_window: int | None = None,
     min_bucket_size: int = 30,
     since_ms: int | None = None,
+    full_history: bool = False,
+    meta: dict | None = None,
 ) -> dict:
     # T1.1 outer cache (in-memory, per-worker)
-    _ck = f"skip_conditions:{symbol or '_all'}:{market_window or '_all'}:{min_bucket_size}:{since_ms or '_all'}"
+    _ck = f"skip_conditions:{symbol or '_all'}:{market_window or '_all'}:{min_bucket_size}:{since_ms or '_all'}:full={full_history}"
     _hit = _cache_get(_ck)
     if _hit is not None:
+        if meta is not None:
+            meta["path"] = "cache"
+            meta["truncated"] = False
+            meta["since_ms_used"] = since_ms
+            meta["row_count_scanned"] = 0
+            meta["full_history"] = full_history
         return _hit
     # T1.2 persistent cache (shared across workers, repopulated by bg loop)
     _persisted = _persistent_cache_get(_ck)
     if _persisted is not None:
         _cache_put(_ck, _persisted)
+        if meta is not None:
+            meta["path"] = "persistent_cache"
+            meta["truncated"] = False
+            meta["since_ms_used"] = since_ms
+            meta["row_count_scanned"] = 0
+            meta["full_history"] = full_history
         return _persisted
     _t0 = _time.time()
     db = _get_db()
-    preds = _load_resolved_predictions(db, symbol, market_window, since_ms)
+    preds = _load_resolved_predictions(
+        db, symbol, market_window, since_ms,
+        full_history=full_history, meta=meta,
+    )
 
     if not preds:
         return {
@@ -850,16 +955,30 @@ def compute_full_report(
     symbol: str | None = None,
     market_window: int | None = None,
     since_ms: int | None = None,
+    full_history: bool = False,
+    meta: dict | None = None,
 ) -> dict:
     # T1.1 outer cache — most expensive endpoint
-    _ck = f"full_report:{symbol or '_all'}:{market_window or '_all'}:{since_ms or '_all'}"
+    _ck = f"full_report:{symbol or '_all'}:{market_window or '_all'}:{since_ms or '_all'}:full={full_history}"
     _hit = _cache_get(_ck)
     if _hit is not None:
+        if meta is not None:
+            meta["path"] = "cache"
+            meta["truncated"] = False
+            meta["since_ms_used"] = since_ms
+            meta["row_count_scanned"] = 0
+            meta["full_history"] = full_history
         return _hit
     # T1.2 persistent cache (shared across workers, repopulated by bg loop)
     _persisted = _persistent_cache_get(_ck)
     if _persisted is not None:
         _cache_put(_ck, _persisted)
+        if meta is not None:
+            meta["path"] = "persistent_cache"
+            meta["truncated"] = False
+            meta["since_ms_used"] = since_ms
+            meta["row_count_scanned"] = 0
+            meta["full_history"] = full_history
         return _persisted
     _t0 = _time.time()
     symbols = [symbol] if symbol else ALL_SYMBOLS
@@ -867,6 +986,13 @@ def compute_full_report(
 
     results = []
     recommended_configs = []
+    # Aggregate meta across the per-(sym, win) sub-calls. We track the
+    # worst-case path (fast<full<cache prefs irrelevant — what matters is
+    # whether ANY sub-call was truncated and the OLDEST since_ms scanned).
+    sub_meta: dict = {}
+    any_truncated = False
+    earliest_since: int | None = None
+    total_rows = 0
 
     for sym in symbols:
         for win in windows:
@@ -877,25 +1003,45 @@ def compute_full_report(
                 metric="win_rate",
                 since_ms=since_ms,
                 limit=10,
+                full_history=full_history,
+                meta=sub_meta,
             )
+            if sub_meta.get("truncated"):
+                any_truncated = True
+            sm = sub_meta.get("since_ms_used")
+            if sm is not None and (earliest_since is None or sm < earliest_since):
+                earliest_since = sm
+            total_rows += int(sub_meta.get("row_count_scanned") or 0)
             threshold_grid = compute_threshold_grid(
                 symbol=sym,
                 market_window=win,
                 min_samples=50,
                 since_ms=since_ms,
                 limit_models=10,
+                full_history=full_history,
+                meta=sub_meta,
             )
+            if sub_meta.get("truncated"):
+                any_truncated = True
             committee = compute_committee_sim(
                 symbol=sym,
                 market_window=win,
                 strategy="avg",
                 since_ms=since_ms,
+                full_history=full_history,
+                meta=sub_meta,
             )
+            if sub_meta.get("truncated"):
+                any_truncated = True
             skip = compute_skip_conditions(
                 symbol=sym,
                 market_window=win,
                 since_ms=since_ms,
+                full_history=full_history,
+                meta=sub_meta,
             )
+            if sub_meta.get("truncated"):
+                any_truncated = True
 
             results.append({
                 "symbol": sym,
@@ -990,6 +1136,12 @@ def compute_full_report(
         "results": results,
         "recommended_configs": recommended_configs,
     }
+    if meta is not None:
+        meta["path"] = "full" if full_history else "fast"
+        meta["truncated"] = any_truncated
+        meta["since_ms_used"] = earliest_since
+        meta["row_count_scanned"] = total_rows
+        meta["full_history"] = full_history
     _cache_put(_ck, _result)
     _persistent_cache_put(_ck, _result, int((_time.time() - _t0) * 1000))
     return _result

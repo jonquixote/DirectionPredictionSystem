@@ -163,6 +163,7 @@ def v2_db(tmp_path, monkeypatch):
 
     import dashboard_api.services.analysis as svc
     monkeypatch.setattr(svc, "_get_db", lambda: _make_conn(db_path))
+    monkeypatch.setattr(svc, "DEFAULT_HISTORY_DAYS", 10_000)
     monkeypatch.setenv("STORAGE_DB_PATH", db_path)
 
     yield db_path, conn
@@ -177,6 +178,7 @@ def empty_db(tmp_path, monkeypatch):
 
     import dashboard_api.services.analysis as svc
     monkeypatch.setattr(svc, "_get_db", lambda: _make_conn(db_path))
+    monkeypatch.setattr(svc, "DEFAULT_HISTORY_DAYS", 10_000)
     monkeypatch.setenv("STORAGE_DB_PATH", db_path)
 
     yield db_path, conn
@@ -265,6 +267,7 @@ class TestSimulateFilter:
 
         import dashboard_api.services.analysis as svc
         monkeypatch.setattr(svc, "_get_db", lambda: _make_conn(db_path))
+        monkeypatch.setattr(svc, "DEFAULT_HISTORY_DAYS", 10_000)
         result = svc.simulate_filter({"confidence_threshold": 0.85}, "BTCUSDT", 300)
         assert result["status"] == "insufficient_samples"
 
@@ -371,6 +374,7 @@ class TestRegimeMatrix:
 
         import dashboard_api.services.analysis as svc
         monkeypatch.setattr(svc, "_get_db", lambda: _make_conn(db_path))
+        monkeypatch.setattr(svc, "DEFAULT_HISTORY_DAYS", 10_000)
         result = svc.regime_matrix(symbol="BTCUSDT", window=300, min_cell_n=30)
         assert result["status"] == "ok"
         cells = result["result"]["models"][0]["cells"]
@@ -415,6 +419,7 @@ class TestConsensusAnalysis:
 
         import dashboard_api.services.analysis as svc
         monkeypatch.setattr(svc, "_get_db", lambda: _make_conn(db_path))
+        monkeypatch.setattr(svc, "DEFAULT_HISTORY_DAYS", 10_000)
         yield db_path, conn
 
     def test_returns_ok_with_overlap_seeded(self, consensus_db):
@@ -471,6 +476,7 @@ class TestDecayFilter:
 
         import dashboard_api.services.analysis as svc
         monkeypatch.setattr(svc, "_get_db", lambda: _make_conn(db_path))
+        monkeypatch.setattr(svc, "DEFAULT_HISTORY_DAYS", 10_000)
         yield db_path, conn
 
     def test_bucketing_works(self, decay_db):
@@ -517,6 +523,7 @@ class TestCommitteeWeights:
 
         import dashboard_api.services.analysis as svc
         monkeypatch.setattr(svc, "_get_db", lambda: _make_conn(db_path))
+        monkeypatch.setattr(svc, "DEFAULT_HISTORY_DAYS", 10_000)
         yield db_path, conn
 
     def test_converges_and_overweights_strong_model(self, committee_db):
@@ -610,6 +617,7 @@ class TestWalkForward:
 
         import dashboard_api.services.analysis as svc
         monkeypatch.setattr(svc, "_get_db", lambda: _make_conn(db_path))
+        monkeypatch.setattr(svc, "DEFAULT_HISTORY_DAYS", 10_000)
         result = svc.walk_forward_validate(
             {"confidence_threshold": 0.90}, "BTCUSDT", 300, n_folds=5
         )
@@ -639,6 +647,7 @@ class TestRecommendPremium:
 
         import dashboard_api.services.analysis as svc
         monkeypatch.setattr(svc, "_get_db", lambda: _make_conn(db_path))
+        monkeypatch.setattr(svc, "DEFAULT_HISTORY_DAYS", 10_000)
         yield db_path, conn
 
     def test_returns_ok_status_even_when_winner_none(self, v2_db):
@@ -701,6 +710,7 @@ class TestDecayJoinNoLeakage:
 
         import dashboard_api.services.analysis as svc
         monkeypatch.setattr(svc, "_get_db", lambda: _make_conn(db_path))
+        monkeypatch.setattr(svc, "DEFAULT_HISTORY_DAYS", 10_000)
 
         preds = [
             {
@@ -749,6 +759,7 @@ class TestDecayJoinNoLeakage:
 
         import dashboard_api.services.analysis as svc
         monkeypatch.setattr(svc, "_get_db", lambda: _make_conn(db_path))
+        monkeypatch.setattr(svc, "DEFAULT_HISTORY_DAYS", 10_000)
 
         preds = [{
             "model_name": "fm", "symbol": "BTCUSDT",

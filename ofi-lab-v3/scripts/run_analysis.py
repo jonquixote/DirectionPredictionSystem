@@ -111,6 +111,7 @@ def cmd_leaderboard(args):
         metric=args.metric,
         since_ms=args.since_ms,
         limit=args.top,
+        full_history=(not args.bounded),
     )
     _write_output(data, args.json_out)
 
@@ -127,6 +128,7 @@ def cmd_threshold_grid(args):
         market_window=args.window,
         min_samples=args.min_samples,
         since_ms=args.since_ms,
+        full_history=(not args.bounded),
     )
     _write_output(data, args.json_out)
 
@@ -143,6 +145,7 @@ def cmd_committee_sim(args):
         market_window=args.window,
         strategy=args.strategy,
         since_ms=args.since_ms,
+        full_history=(not args.bounded),
     )
     _write_output(data, args.json_out)
 
@@ -155,6 +158,7 @@ def cmd_skip_conditions(args):
         symbol=args.symbol,
         market_window=args.window,
         since_ms=args.since_ms,
+        full_history=(not args.bounded),
     )
     _write_output(data, args.json_out)
 
@@ -175,6 +179,7 @@ def cmd_report(args):
         symbol=symbol,
         market_window=window,
         since_ms=args.since_ms,
+        full_history=(not args.bounded),
     )
     _write_output(data, args.json_out)
 
@@ -372,6 +377,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Minimum resolved predictions per model (default 50)")
     p.add_argument("--since-ms", type=int, default=None, dest="since_ms",
                    help="Only include predictions resolved after this ts_ms")
+    p.add_argument("--bounded", action="store_true", default=False,
+                   help="Apply the dashboard fast-path bound (last 30d + LIMIT 50k). "
+                        "CLI default is full history.")
 
     # Leaderboard params
     p.add_argument("--metric", type=str, default="win_rate",
