@@ -18,7 +18,10 @@ import logging
 import time
 from typing import Any
 
-from services.db import get_db
+try:
+    from services.db import get_db
+except ModuleNotFoundError:
+    from dashboard_api.services.db import get_db  # type: ignore
 
 logger = logging.getLogger("dashboard.sqlite_store")
 

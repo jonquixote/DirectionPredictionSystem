@@ -2,7 +2,10 @@ import asyncio
 import time
 import logging
 import uuid
-from services.live_state import LiveState
+try:
+    from services.live_state import LiveState
+except ModuleNotFoundError:
+    from dashboard_api.services.live_state import LiveState  # type: ignore
 
 logger = logging.getLogger(__name__)
 

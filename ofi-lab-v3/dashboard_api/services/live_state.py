@@ -7,10 +7,16 @@ from __future__ import annotations
 import logging
 import time
 from datetime import datetime, timezone
-from services.sqlite_store import get_store
-from services.metrics import (
-    compute_realized_net, wilson_ci, rolling_accuracy_series, z_test, SYSTEM_FEE,
-)
+try:
+    from services.sqlite_store import get_store
+    from services.metrics import (
+        compute_realized_net, wilson_ci, rolling_accuracy_series, z_test, SYSTEM_FEE,
+    )
+except ModuleNotFoundError:
+    from dashboard_api.services.sqlite_store import get_store  # type: ignore
+    from dashboard_api.services.metrics import (  # type: ignore
+        compute_realized_net, wilson_ci, rolling_accuracy_series, z_test, SYSTEM_FEE,
+    )
 
 logger = logging.getLogger("dashboard.live_state")
 

@@ -35,6 +35,21 @@ try:
         _has_training = True
     except ImportError:
         _has_training = False
+    try:
+        from routers import governance as governance_router
+        _has_governance = True
+    except ImportError:
+        _has_governance = False
+    try:
+        from routers import system as system_router
+        _has_system = True
+    except ImportError:
+        _has_system = False
+    try:
+        from routers import models_summary as models_summary_router
+        _has_models_summary = True
+    except ImportError:
+        _has_models_summary = False
 except ModuleNotFoundError:
     from dashboard_api.services.auth import verify_credentials  # type: ignore
     from dashboard_api.services.admin_auth import validate_admin_secret  # type: ignore
@@ -53,6 +68,21 @@ except ModuleNotFoundError:
         _has_training = True
     except ImportError:
         _has_training = False
+    try:
+        from dashboard_api.routers import governance as governance_router  # type: ignore
+        _has_governance = True
+    except ImportError:
+        _has_governance = False
+    try:
+        from dashboard_api.routers import system as system_router  # type: ignore
+        _has_system = True
+    except ImportError:
+        _has_system = False
+    try:
+        from dashboard_api.routers import models_summary as models_summary_router  # type: ignore
+        _has_models_summary = True
+    except ImportError:
+        _has_models_summary = False
 
 logging.basicConfig(
     level=logging.INFO,
@@ -1121,6 +1151,12 @@ _routers = [
 ]
 if _has_training:
     _routers.append(training_router.router)
+if _has_governance:
+    _routers.append(governance_router.router)
+if _has_system:
+    _routers.append(system_router.router)
+if _has_models_summary:
+    _routers.append(models_summary_router.router)
 for router in _routers:
     app.include_router(
         router,

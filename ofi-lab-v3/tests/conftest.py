@@ -1,4 +1,24 @@
 """Shared pytest fixtures for v3."""
+# Path aliasing: ofi-lab-v3 modules use `from services.X import ...` style
+# imports because production runs cwd=ofi-lab-v3/dashboard_api. When pytest
+# is run from the project root, those bare imports fail. Inject sys.modules
+# aliases so `services`, `ws`, `routers` resolve to dashboard_api.services
+# (etc.) without touching every module.
+import sys as _sys
+import importlib as _importlib
+for _alias, _target in (
+    ("services", "dashboard_api.services"),
+    ("ws", "dashboard_api.ws"),
+    ("routers", "dashboard_api.routers"),
+):
+    if _alias not in _sys.modules:
+        try:
+            _sys.modules[_alias] = _importlib.import_module(_target)
+        except ImportError:
+            # Optional alias — skip if target module isn't importable yet.
+            # Individual test files can still import the real path directly.
+            pass
+
 from pathlib import Path
 
 import numpy as np

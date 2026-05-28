@@ -94,7 +94,29 @@ def list_models():
           ) dm ON dm.model_name = mr.name AND dm.rn = 1
          ORDER BY mr.is_baseline DESC, mr.name
     """).fetchall()
-    return {"models": [dict(r) for r in rows]}
+
+    # Fetch per-(model, window) tier from model_window_tier and aggregate
+    # into a dict keyed by market_window_seconds for each model.
+    tier_map: dict[str, dict[int, str]] = {}
+    try:
+        tier_rows = conn.execute(
+            "SELECT model_name, market_window_seconds, tier FROM model_window_tier"
+        ).fetchall()
+        for tr in tier_rows:
+            name = tr["model_name"]
+            if name not in tier_map:
+                tier_map[name] = {}
+            tier_map[name][int(tr["market_window_seconds"])] = tr["tier"]
+    except Exception:
+        pass  # table may not exist on fresh DB — tier_by_window will be {}
+
+    models = []
+    for r in rows:
+        m = dict(r)
+        m["tier_by_window"] = tier_map.get(r["name"], {})
+        models.append(m)
+
+    return {"models": models}
 
 
 # ── Model selection endpoints (MUST be before /{name} catch-all) ──

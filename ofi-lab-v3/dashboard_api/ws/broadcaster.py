@@ -4,8 +4,12 @@ import asyncio
 import logging
 import time
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query
-from services.auth import verify_ws_token
-from services.live_state import LiveState
+try:
+    from services.auth import verify_ws_token
+    from services.live_state import LiveState
+except ModuleNotFoundError:
+    from dashboard_api.services.auth import verify_ws_token  # type: ignore
+    from dashboard_api.services.live_state import LiveState  # type: ignore
 
 logger = logging.getLogger("dashboard.ws")
 

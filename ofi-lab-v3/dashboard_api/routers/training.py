@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, field_validator
 
 logger = logging.getLogger("training")
@@ -197,6 +197,108 @@ async def training_status():
         log_tail=log_tail,
         exit_code=job.get("exit_code"),
     ).model_dump()
+
+
+# ── Retrain queue endpoints (T2-be-surfaces) ───────────────────
+
+
+def _get_db():
+    try:
+        from services.db import get_db  # type: ignore
+    except ModuleNotFoundError:
+        from dashboard_api.services.db import get_db  # type: ignore
+    return get_db()
+
+
+def _fetch_queue(status_filter: str | None, limit: int) -> dict:
+    """Read retrain_queue rows from DB. Columns per schema:
+       id, cell_key, symbol, horizon_seconds, training_days,
+       requested_at, triggered_by, picked_up_at, picked_up_by, notes
+    retrain_queue has no status column — derive it from picked_up_at:
+       picked_up_at IS NULL  → "pending"
+       picked_up_at NOT NULL → "in_flight"  (no completed sentinel in schema)
+    """
+    conn = _get_db()
+
+    # Build status WHERE clause based on derived status
+    where_clause = ""
+    params: list = []
+    if status_filter == "pending":
+        where_clause = " WHERE picked_up_at IS NULL"
+    elif status_filter == "in_flight":
+        where_clause = " WHERE picked_up_at IS NOT NULL"
+    # "completed" is not stored in retrain_queue (rows are consumed/removed upstream),
+    # so we just return empty for that filter.
+
+    params.append(min(limit, 500))
+
+    try:
+        rows = conn.execute(
+            f"""
+            SELECT id, cell_key, symbol, horizon_seconds, training_days,
+                   requested_at, triggered_by, picked_up_at, picked_up_by, notes
+              FROM retrain_queue{where_clause}
+             ORDER BY requested_at DESC
+             LIMIT ?
+            """,
+            params,
+        ).fetchall()
+    except Exception as exc:
+        logger.warning("retrain_queue query failed: %s", exc)
+        return {
+            "queue": [],
+            "count": 0,
+            "summary": {"pending": 0, "in_flight": 0, "completed_24h": 0},
+        }
+
+    queue = []
+    for r in rows:
+        derived_status = "in_flight" if r["picked_up_at"] else "pending"
+        queue.append({
+            "id": r["id"],
+            "ts_added": r["requested_at"],
+            "cell_key": r["cell_key"],
+            "symbol": r["symbol"],
+            "training_horizon_seconds": r["horizon_seconds"],
+            "train_days": r["training_days"],
+            "reason": r["triggered_by"],
+            "status": derived_status,
+            "ts_started": r["picked_up_at"],
+            "ts_completed": None,  # not tracked in schema
+            "picked_up_by": r["picked_up_by"],
+            "notes": r["notes"],
+        })
+
+    # Summary counts (always full table, regardless of filter)
+    try:
+        total_rows = conn.execute(
+            "SELECT picked_up_at FROM retrain_queue"
+        ).fetchall()
+        n_pending = sum(1 for r in total_rows if r["picked_up_at"] is None)
+        n_in_flight = sum(1 for r in total_rows if r["picked_up_at"] is not None)
+        summary = {
+            "pending": n_pending,
+            "in_flight": n_in_flight,
+            "completed_24h": 0,  # not tracked in schema
+        }
+    except Exception as exc:
+        logger.warning("retrain_queue summary query failed: %s", exc)
+        summary = {"pending": 0, "in_flight": 0, "completed_24h": 0}
+
+    return {"queue": queue, "count": len(queue), "summary": summary}
+
+
+@router.get("/training/queue")
+async def get_training_queue(
+    status: str | None = Query(
+        default=None,
+        description="Filter by status: pending|in_flight|completed",
+    ),
+    limit: int = Query(default=100, ge=1, le=500),
+):
+    """Return pending retrain jobs from the retrain_queue table."""
+    import asyncio as _asyncio
+    return await _asyncio.to_thread(_fetch_queue, status, limit)
 
 
 @router.get("/training/data-status")
