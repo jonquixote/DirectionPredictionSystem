@@ -142,6 +142,15 @@ def register_model(
         # cutover_delay_hours. decided_by='auto' on the schedule itself.
         cutover_scheduled_at = _utc_plus_hours_iso(cutover_delay_hours)
         cutover_decided_at = _utc_now_iso()
+        # Phase 57: primary_market_window_seconds = nearest contract window
+        # to training horizon (300/900/1800). Used by demote tick + per-window
+        # tier governance.
+        if horizon <= 300:
+            primary_window = 300
+        elif horizon <= 900:
+            primary_window = 900
+        else:
+            primary_window = 1800
         conn.execute(
             "INSERT OR REPLACE INTO model_registry "
             "(name, is_baseline, paper_active, live_eligible, lifecycle_state, "
@@ -150,10 +159,10 @@ def register_model(
             "train_window_end, train_days, feature_version, evaluation_windows, "
             "filter_config_json, platform_active_json, fleet_version, "
             "cutover_scheduled_at, cutover_state, cutover_decided_by, "
-            "cutover_decided_at) "
+            "cutover_decided_at, primary_market_window_seconds) "
             "VALUES (?, 0, 0, 0, 'active', ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?, '{}', "
             "'{\"paper\":true,\"kalshi\":false,\"polymarket\":false}', ?, "
-            "?, 'scheduled', 'auto', ?)",
+            "?, 'scheduled', 'auto', ?, ?)",
             (
                 name,
                 symbol,
@@ -169,6 +178,7 @@ def register_model(
                 effective_fleet_version,
                 cutover_scheduled_at,
                 cutover_decided_at,
+                primary_window,
             ),
         )
 
