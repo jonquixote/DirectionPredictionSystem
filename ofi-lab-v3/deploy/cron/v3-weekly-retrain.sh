@@ -48,6 +48,19 @@ if [ $AGE -ge $SENTINEL_MAX_AGE ]; then
 fi
 
 cd /home/johnny/ofi-lab-v3
+
+# Archive prior state.json so train_fleet starts from a fresh slate every
+# week. Without this, the next run sees last week's "completed" entries
+# (same artifact dir names: h60_btc_v3_90d, ...) and skips retraining
+# entirely, producing zero new cells. train_fleet keys state by artifact
+# directory, not by train_end, so cross-week collisions are the default.
+STATE=/data/models/fleet/state.json
+if [ -f "$STATE" ]; then
+    ARCHIVED="${STATE}.before_$(date -u +%Y%m%d_%H%M)"
+    mv "$STATE" "$ARCHIVED"
+    echo "archived prior state.json -> $ARCHIVED"
+fi
+
 TRAIN_LOG="/tmp/fleet_train_$(date -u +%Y%m%d_%H%M).log"
 echo "running train_fleet.py --parallel 1 --buffer-days 0 (log: $TRAIN_LOG)"
 
