@@ -207,6 +207,52 @@ def _run_migrations(conn) -> None:
             UNIQUE(cell_key, requested_at)
         )
     """)
+    # Phase 57 — per-(model, market_window) tier. Signal lives at the
+    # deployment context (window), so tier/kelly/dispatch should too.
+    # Probation stays model-level on model_registry (challenger lifecycle).
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS model_window_tier (
+            model_name              TEXT NOT NULL,
+            market_window_seconds   INTEGER NOT NULL,
+            tier                    TEXT NOT NULL DEFAULT 'watch',
+            kelly_multiplier        REAL NOT NULL DEFAULT 0.0,
+            tier_assigned_at        TEXT,
+            tier_assigned_by        TEXT,
+            PRIMARY KEY (model_name, market_window_seconds)
+        )
+    """)
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_mwt_tier "
+        "ON model_window_tier(tier, market_window_seconds)"
+    )
+    # Backfill: 3 rows per existing non-baseline model (windows 300/900/1800).
+    # Rows whose window matches model_registry.primary_market_window_seconds AND
+    # model_registry.tier='gold' carry forward as gold. All others tier='watch'.
+    # INSERT OR IGNORE keeps this idempotent across restarts.
+    for win in (300, 900, 1800):
+        conn.execute(
+            "INSERT OR IGNORE INTO model_window_tier"
+            " (model_name, market_window_seconds, tier, kelly_multiplier,"
+            "  tier_assigned_at, tier_assigned_by)"
+            " SELECT mr.name, ?,"
+            "        CASE"
+            "          WHEN mr.tier = 'gold' AND mr.primary_market_window_seconds = ?"
+            "            THEN 'gold'"
+            "          WHEN mr.tier = 'retired' THEN 'retired'"
+            "          ELSE 'watch'"
+            "        END,"
+            "        CASE"
+            "          WHEN mr.tier = 'gold' AND mr.primary_market_window_seconds = ?"
+            "            THEN 1.0"
+            "          ELSE 0.0"
+            "        END,"
+            "        COALESCE(mr.tier_assigned_at,"
+            "                 strftime('%Y-%m-%dT%H:%M:%SZ','now')),"
+            "        'auto:phase57_backfill'"
+            "   FROM model_registry mr"
+            "  WHERE COALESCE(mr.is_baseline, 0) = 0",
+            (win, win, win),
+        )
 
 
 def _migrate_native_to_eval_indexes(conn) -> None:

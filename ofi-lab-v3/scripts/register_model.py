@@ -8,6 +8,8 @@ import sys
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
+# Ensure json and sys are available at module level for 3-fleet retention block
+
 
 DEFAULT_CUTOVER_DELAY_HOURS = 24.0
 DEFAULT_PROBATION_HOURS = 72.0
@@ -170,6 +172,17 @@ def register_model(
             ),
         )
 
+    # Phase 57: insert 3 per-window tier rows (INSERT OR IGNORE so existing gold rows survive)
+    _now_for_mwt = _utc_now_iso()
+    for win in (300, 900, 1800):
+        conn.execute(
+            "INSERT OR IGNORE INTO model_window_tier "
+            "(model_name, market_window_seconds, tier, kelly_multiplier, "
+            " tier_assigned_at, tier_assigned_by) "
+            "VALUES (?, ?, 'watch', 0.0, ?, 'auto:register_model')",
+            (name, win, _now_for_mwt),
+        )
+
     # Phase 4a: challenger probation + cell_governance tracking
     # Baselines are exempt — they start as gold and are never challengers.
     is_baseline = bool(existing and existing["is_baseline"])
@@ -213,6 +226,46 @@ def register_model(
             "VALUES (?, ?, 'register_challenger', NULL, 'watch', 'auto:register_model', ?, ?)",
             (_utc_now_iso(), name, reason, cell_key),
         )
+
+    # Phase 57: 3-fleet retention — retire the oldest fleet when >3 distinct fleet_versions exist
+    distinct_fleets = conn.execute(
+        "SELECT DISTINCT fleet_version FROM model_registry "
+        " WHERE COALESCE(is_baseline,0)=0 AND fleet_version IS NOT NULL "
+        " ORDER BY fleet_version DESC"
+    ).fetchall()
+    if len(distinct_fleets) > 3:
+        oldest = distinct_fleets[3][0]
+        now_iso = _utc_now_iso()
+        conn.execute(
+            "UPDATE model_registry SET paper_active=0, "
+            " updated_at=strftime('%Y-%m-%dT%H:%M:%fZ','now') "
+            " WHERE fleet_version=? AND COALESCE(is_baseline,0)=0",
+            (oldest,),
+        )
+        conn.execute(
+            "UPDATE model_window_tier SET tier='retired', kelly_multiplier=0.0, "
+            " tier_assigned_at=?, tier_assigned_by='auto:3fleet_retention' "
+            " WHERE model_name IN (SELECT name FROM model_registry "
+            "                       WHERE fleet_version=? AND COALESCE(is_baseline,0)=0)",
+            (now_iso, oldest),
+        )
+        for n_row in conn.execute(
+            "SELECT name FROM model_registry WHERE fleet_version=? AND COALESCE(is_baseline,0)=0",
+            (oldest,),
+        ).fetchall():
+            try:
+                conn.execute(
+                    "INSERT INTO governance_actions "
+                    "(ts, model_name, action, from_tier, to_tier, triggered_by, reason_json, cell_key) "
+                    "VALUES (?, ?, 'retire', NULL, 'retired', 'auto:3fleet_retention', ?, NULL)",
+                    (now_iso, n_row["name"],
+                     json.dumps({"reason": "fleet aged out of top-3",
+                                 "retired_fleet_version": oldest})),
+                )
+            except Exception:
+                pass  # governance_actions may not exist in all test DBs
+        conn.commit()
+        print(f"3-fleet retention: retired fleet_version={oldest}", file=sys.stderr)
 
     # Audit
     conn.execute(

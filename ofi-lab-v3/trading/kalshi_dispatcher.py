@@ -256,6 +256,9 @@ class KalshiDispatcher:
 
         Checks self._trader._model_meta (kalshi_dispatch_enabled, built from
         model_registry + config fallback) and model_registry.platform_active_json.
+
+        Phase 57: tier gate uses per-window tier_by_window dict. Falls back to
+        legacy model-level scalar when tier_by_window is not populated.
         """
         t = self._trader
         meta = t._model_meta.get(model_name)
@@ -267,12 +270,28 @@ class KalshiDispatcher:
             return False
         if market_window_seconds != meta["training_horizon_seconds"]:
             return False
-        # Phase 5c: only gold-tier models dispatch to live Kalshi
-        model_tier = meta.get("tier", "watch")
+        # Phase 57: use per-window tier when available; fallback to legacy model-level tier
+        tier_by_window = meta.get("tier_by_window")
+        if tier_by_window is not None:
+            window_tier = tier_by_window.get(market_window_seconds)
+            if window_tier is None:
+                # Missing row for this window → gate off by default
+                import logging as _logging
+                _logging.getLogger("dashboard.kalshi").info(
+                    "live_dispatch_skipped no_window_tier model=%s window=%s",
+                    model_name, market_window_seconds
+                )
+                return False
+            model_tier = window_tier
+        else:
+            # Phase 5 legacy fallback
+            model_tier = meta.get("tier", "watch")
+
         if model_tier != "gold":
             import logging as _logging
             _logging.getLogger("dashboard.kalshi").info(
-                "live_dispatch_skipped tier=%s model=%s", model_tier, model_name
+                "live_dispatch_skipped tier=%s model=%s window=%s",
+                model_tier, model_name, market_window_seconds
             )
             return False
         row = t._db_conn.execute(

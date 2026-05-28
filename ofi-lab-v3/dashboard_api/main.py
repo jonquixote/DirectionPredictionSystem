@@ -329,7 +329,8 @@ def _run_governance_probation_tick() -> int:
     try:
         challengers = conn.execute(
             "SELECT name, symbol, training_horizon_seconds, train_days, "
-            "parent_model_name, probation_start_at, probation_end_at "
+            "parent_model_name, probation_start_at, probation_end_at, "
+            "COALESCE(primary_market_window_seconds, training_horizon_seconds) AS primary_window "
             "FROM model_registry "
             "WHERE tier = 'watch' "
             "  AND probation_end_at IS NOT NULL "
@@ -346,6 +347,7 @@ def _run_governance_probation_tick() -> int:
             parent = ch["parent_model_name"]
             win_start = ch["probation_start_at"] or "1970-01-01T00:00:00Z"
             win_end = ch["probation_end_at"] or now_iso
+            primary_window = int(ch["primary_window"]) if ch["primary_window"] else 900
             cell_key = f"{symbol}_{horizon}_{train_days}"
 
             # Challenger avg composite over probation window
@@ -388,32 +390,35 @@ def _run_governance_probation_tick() -> int:
                     (now_iso, model, action, from_tier, to_tier, _json.dumps(reason_data), cell_key),
                 )
 
+            def _update_mwt_primary(model: str, model_primary_window: int, new_tier: str) -> None:
+                """Phase 57: update model_window_tier for primary window only."""
+                conn.execute(
+                    "UPDATE model_window_tier SET tier = ?, kelly_multiplier = ?, "
+                    "tier_assigned_at = ?, tier_assigned_by = 'auto:probation_evaluator' "
+                    "WHERE model_name = ? AND market_window_seconds = ?",
+                    (new_tier, _TIER_KELLY[new_tier], now_iso, model, model_primary_window),
+                )
+                # Also update model_registry.tier_assigned_at as breadcrumb (not tier/kelly)
+                conn.execute(
+                    "UPDATE model_registry SET tier_assigned_at = ? WHERE name = ?",
+                    (now_iso, model),
+                )
+
             # No scores at all — challenger never scored. Retire immediately.
             if ch_avg is None or ch_n == 0:
-                conn.execute(
-                    "UPDATE model_registry SET tier = 'retired', kelly_multiplier = 0.0, "
-                    "tier_assigned_at = ?, tier_assigned_by = 'auto:probation_evaluator' "
-                    "WHERE name = ?",
-                    (now_iso, name),
-                )
+                _update_mwt_primary(name, primary_window, "retired")
                 _write_gov_action("retire", "watch", "retired", name)
                 conn.commit()
                 reload_needed = True
                 acted += 1
-                logger.info("governance: retired %s (no scores during probation)", name)
+                logger.info("governance: retired %s primary_window=%s (no scores during probation)", name, primary_window)
                 continue
 
             # No incumbent — direct promote to silver if positive composite
             if parent is None or inc_avg is None:
                 if ch_avg > 0:
                     new_tier = "silver"
-                    new_kelly = _TIER_KELLY[new_tier]
-                    conn.execute(
-                        "UPDATE model_registry SET tier = ?, kelly_multiplier = ?, "
-                        "tier_assigned_at = ?, tier_assigned_by = 'auto:probation_evaluator' "
-                        "WHERE name = ?",
-                        (new_tier, new_kelly, now_iso, name),
-                    )
+                    _update_mwt_primary(name, primary_window, new_tier)
                     _write_gov_action("promote", "watch", new_tier, name)
                     conn.execute(
                         "INSERT INTO cell_governance(cell_key, symbol, horizon_seconds, training_days, "
@@ -426,19 +431,14 @@ def _run_governance_probation_tick() -> int:
                     conn.commit()
                     reload_needed = True
                     acted += 1
-                    logger.info("governance: promoted %s watch→silver (no incumbent, score=%.4f)", name, ch_avg)
+                    logger.info("governance: promoted %s watch→silver primary_window=%s (no incumbent, score=%.4f)", name, primary_window, ch_avg)
                 else:
-                    conn.execute(
-                        "UPDATE model_registry SET tier = 'retired', kelly_multiplier = 0.0, "
-                        "tier_assigned_at = ?, tier_assigned_by = 'auto:probation_evaluator' "
-                        "WHERE name = ?",
-                        (now_iso, name),
-                    )
+                    _update_mwt_primary(name, primary_window, "retired")
                     _write_gov_action("retire", "watch", "retired", name)
                     conn.commit()
                     reload_needed = True
                     acted += 1
-                    logger.info("governance: retired %s (no incumbent, negative score=%.4f)", name, ch_avg)
+                    logger.info("governance: retired %s primary_window=%s (no incumbent, negative score=%.4f)", name, primary_window, ch_avg)
                 continue
 
             # Compute ratio for decision matrix
@@ -447,27 +447,24 @@ def _run_governance_probation_tick() -> int:
 
             if ratio >= 1.05:
                 # Challenger beats incumbent by >5% — promote challenger, demote incumbent
-                inc_tier_row = conn.execute(
-                    "SELECT tier FROM model_registry WHERE name = ?", (parent,)
+                # Get incumbent's primary window
+                inc_pwin_row = conn.execute(
+                    "SELECT COALESCE(primary_market_window_seconds, training_horizon_seconds) AS pw "
+                    "FROM model_registry WHERE name = ?", (parent,)
                 ).fetchone()
-                inc_tier = inc_tier_row["tier"] if inc_tier_row else "gold"
+                inc_primary_window = int(inc_pwin_row["pw"]) if inc_pwin_row and inc_pwin_row["pw"] else 900
+                inc_mwt_row = conn.execute(
+                    "SELECT tier FROM model_window_tier WHERE model_name = ? AND market_window_seconds = ?",
+                    (parent, inc_primary_window),
+                ).fetchone()
+                inc_tier = inc_mwt_row["tier"] if inc_mwt_row else "gold"
 
                 new_ch_tier = _TIER_PROMOTE.get(inc_tier, "silver")
                 new_inc_tier = _TIER_DEMOTE.get(inc_tier, "watch")
 
-                conn.execute(
-                    "UPDATE model_registry SET tier = ?, kelly_multiplier = ?, "
-                    "tier_assigned_at = ?, tier_assigned_by = 'auto:probation_evaluator' "
-                    "WHERE name = ?",
-                    (new_ch_tier, _TIER_KELLY[new_ch_tier], now_iso, name),
-                )
+                _update_mwt_primary(name, primary_window, new_ch_tier)
                 _write_gov_action("promote", "watch", new_ch_tier, name)
-                conn.execute(
-                    "UPDATE model_registry SET tier = ?, kelly_multiplier = ?, "
-                    "tier_assigned_at = ?, tier_assigned_by = 'auto:probation_evaluator' "
-                    "WHERE name = ?",
-                    (new_inc_tier, _TIER_KELLY[new_inc_tier], now_iso, parent),
-                )
+                _update_mwt_primary(parent, inc_primary_window, new_inc_tier)
                 conn.execute(
                     "INSERT INTO governance_actions "
                     "(ts, model_name, action, from_tier, to_tier, triggered_by, reason_json, cell_key) "
@@ -504,12 +501,7 @@ def _run_governance_probation_tick() -> int:
                 notes["extension_count"] = ext_count
 
                 if ext_count > 2:
-                    conn.execute(
-                        "UPDATE model_registry SET tier = 'retired', kelly_multiplier = 0.0, "
-                        "tier_assigned_at = ?, tier_assigned_by = 'auto:probation_evaluator' "
-                        "WHERE name = ?",
-                        (now_iso, name),
-                    )
+                    _update_mwt_primary(name, primary_window, "retired")
                     _write_gov_action("retire", "watch", "retired", name)
                     conn.commit()
                     reload_needed = True
@@ -536,12 +528,7 @@ def _run_governance_probation_tick() -> int:
 
             else:
                 # ratio < 0.95 — challenger underperforms — retire
-                conn.execute(
-                    "UPDATE model_registry SET tier = 'retired', kelly_multiplier = 0.0, "
-                    "tier_assigned_at = ?, tier_assigned_by = 'auto:probation_evaluator' "
-                    "WHERE name = ?",
-                    (now_iso, name),
-                )
+                _update_mwt_primary(name, primary_window, "retired")
                 _write_gov_action("retire", "watch", "retired", name)
                 conn.commit()
                 reload_needed = True
@@ -621,19 +608,22 @@ def _run_governance_action_tick() -> int:
         # Filters applied:
         #   - Stale-alert: ts > tier_assigned_at (fresh accounting per promotion)
         #   - calibration_drift excluded (no grace; fires on calibrating fleet)
-        #   - PRIMARY WINDOW ONLY (Patch B): a model trained for one horizon
-        #     emits at all 3 contract windows but is OPTIMAL at one.
-        #     Don't demote based on noise in non-primary windows.
+        #   - PRIMARY WINDOW ONLY (Patch B / Phase 57): check decay at primary window.
+        #     Phase 57: JOIN model_window_tier to find gold rows at primary window.
         gold_decay = conn.execute(
-            "SELECT mr.name, mr.symbol, mr.training_horizon_seconds, mr.train_days "
+            "SELECT mr.name, mr.symbol, mr.training_horizon_seconds, mr.train_days, "
+            "mr.primary_market_window_seconds "
             "FROM model_registry mr "
-            "WHERE mr.tier = 'gold' AND COALESCE(mr.is_baseline, 0) = 0 "
+            "JOIN model_window_tier mwt "
+            "  ON mwt.model_name = mr.name "
+            " AND mwt.market_window_seconds = mr.primary_market_window_seconds "
+            "WHERE mwt.tier = 'gold' AND COALESCE(mr.is_baseline, 0) = 0 "
             "  AND (SELECT COUNT(*) FROM decay_evaluations de "
             "       WHERE de.model_name = mr.name AND de.triggered = 1 "
             "         AND de.eval_type != 'calibration_drift' "
             "         AND de.market_window_seconds = mr.primary_market_window_seconds "
             "         AND de.ts >= datetime('now', '-6 hour') "
-            "         AND de.ts > COALESCE(mr.tier_assigned_at, '1970-01-01')) >= 3"
+            "         AND de.ts > COALESCE(mwt.tier_assigned_at, '1970-01-01')) >= 3"
         ).fetchall()
 
         for row in gold_decay:
@@ -641,14 +631,16 @@ def _run_governance_action_tick() -> int:
             symbol = row["symbol"]
             horizon = row["training_horizon_seconds"]
             train_days = row["train_days"]
-            cell_key = f"{symbol}_{horizon}_{train_days}"
+            primary_window = row["primary_market_window_seconds"] or 900
+            cell_key = f"{symbol}_{horizon}_{train_days}_w{primary_window}"
             new_tier = "silver"
             new_kelly = _TIER_KELLY[new_tier]
+            # Phase 57: UPDATE model_window_tier (primary window only), not model_registry.tier
             conn.execute(
-                "UPDATE model_registry SET tier = ?, kelly_multiplier = ?, "
+                "UPDATE model_window_tier SET tier = ?, kelly_multiplier = ?, "
                 "tier_assigned_at = ?, tier_assigned_by = 'auto:decay_monitor' "
-                "WHERE name = ?",
-                (new_tier, new_kelly, now_iso, name),
+                "WHERE model_name = ? AND market_window_seconds = ?",
+                (new_tier, new_kelly, now_iso, name, primary_window),
             )
             conn.execute(
                 "INSERT INTO governance_actions "
@@ -660,23 +652,26 @@ def _run_governance_action_tick() -> int:
             reload_needed = True
             acted += 1
             _acted_this_tick.add(name)
-            logger.info("governance action: demoted %s gold→silver (decay alerts in 6h)", name)
+            logger.info("governance action: demoted %s gold→silver primary_window=%s (decay alerts in 6h)", name, primary_window)
             _maybe_insert_retrain_queue(conn, cell_key, symbol, horizon, train_days, now_iso)
 
         # Find silver models with ≥3 triggered decay evaluations in last 12h
         # (exclude models already acted on this tick to prevent double-demotion).
-        # Same stale-alert + calibration-drift + primary-window-only filters
-        # as gold demote.
+        # Phase 57: JOIN model_window_tier for silver check at primary window.
         silver_decay = conn.execute(
-            "SELECT mr.name, mr.symbol, mr.training_horizon_seconds, mr.train_days "
+            "SELECT mr.name, mr.symbol, mr.training_horizon_seconds, mr.train_days, "
+            "mr.primary_market_window_seconds "
             "FROM model_registry mr "
-            "WHERE mr.tier = 'silver' AND COALESCE(mr.is_baseline, 0) = 0 "
+            "JOIN model_window_tier mwt "
+            "  ON mwt.model_name = mr.name "
+            " AND mwt.market_window_seconds = mr.primary_market_window_seconds "
+            "WHERE mwt.tier = 'silver' AND COALESCE(mr.is_baseline, 0) = 0 "
             "  AND (SELECT COUNT(*) FROM decay_evaluations de "
             "       WHERE de.model_name = mr.name AND de.triggered = 1 "
             "         AND de.eval_type != 'calibration_drift' "
             "         AND de.market_window_seconds = mr.primary_market_window_seconds "
             "         AND de.ts >= datetime('now', '-12 hour') "
-            "         AND de.ts > COALESCE(mr.tier_assigned_at, '1970-01-01')) >= 3"
+            "         AND de.ts > COALESCE(mwt.tier_assigned_at, '1970-01-01')) >= 3"
         ).fetchall()
 
         for row in silver_decay:
@@ -686,14 +681,16 @@ def _run_governance_action_tick() -> int:
             symbol = row["symbol"]
             horizon = row["training_horizon_seconds"]
             train_days = row["train_days"]
-            cell_key = f"{symbol}_{horizon}_{train_days}"
+            primary_window = row["primary_market_window_seconds"] or 900
+            cell_key = f"{symbol}_{horizon}_{train_days}_w{primary_window}"
             new_tier = "watch"
             new_kelly = _TIER_KELLY[new_tier]
+            # Phase 57: UPDATE model_window_tier (primary window only)
             conn.execute(
-                "UPDATE model_registry SET tier = ?, kelly_multiplier = ?, "
+                "UPDATE model_window_tier SET tier = ?, kelly_multiplier = ?, "
                 "tier_assigned_at = ?, tier_assigned_by = 'auto:decay_monitor' "
-                "WHERE name = ?",
-                (new_tier, new_kelly, now_iso, name),
+                "WHERE model_name = ? AND market_window_seconds = ?",
+                (new_tier, new_kelly, now_iso, name, primary_window),
             )
             conn.execute(
                 "INSERT INTO governance_actions "
@@ -704,7 +701,7 @@ def _run_governance_action_tick() -> int:
             conn.commit()
             reload_needed = True
             acted += 1
-            logger.info("governance action: demoted %s silver→watch (decay alerts in 12h)", name)
+            logger.info("governance action: demoted %s silver→watch primary_window=%s (decay alerts in 12h)", name, primary_window)
             _maybe_insert_retrain_queue(conn, cell_key, symbol, horizon, train_days, now_iso)
 
         # Find watch models to retire: sustained negative rwev for 7 days, sample_count >= 100

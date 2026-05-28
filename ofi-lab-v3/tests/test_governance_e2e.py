@@ -18,7 +18,7 @@ def _past_iso(hours: float) -> str:
 
 
 def _make_full_db() -> sqlite3.Connection:
-    """Create an in-memory DB with all Phase 3/4/6 tables."""
+    """Create an in-memory DB with all Phase 3/4/6 + Phase 57 tables."""
     conn = sqlite3.connect(":memory:")
     conn.row_factory = sqlite3.Row
     conn.executescript("""
@@ -36,7 +36,17 @@ def _make_full_db() -> sqlite3.Connection:
             parent_model_name TEXT,
             paper_active INTEGER DEFAULT 1,
             is_baseline INTEGER DEFAULT 0,
-            lifecycle_state TEXT DEFAULT 'active'
+            lifecycle_state TEXT DEFAULT 'active',
+            primary_market_window_seconds INTEGER DEFAULT 300
+        );
+        CREATE TABLE model_window_tier (
+            model_name TEXT NOT NULL,
+            market_window_seconds INTEGER NOT NULL,
+            tier TEXT NOT NULL DEFAULT 'watch',
+            kelly_multiplier REAL NOT NULL DEFAULT 0.0,
+            tier_assigned_at TEXT,
+            tier_assigned_by TEXT,
+            PRIMARY KEY (model_name, market_window_seconds)
         );
         CREATE TABLE decay_evaluations (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -44,7 +54,7 @@ def _make_full_db() -> sqlite3.Connection:
             model_name TEXT NOT NULL,
             symbol TEXT,
             market_window_seconds INTEGER,
-            check_type TEXT,
+            eval_type TEXT NOT NULL DEFAULT 'rwev_drop',
             triggered INTEGER DEFAULT 0,
             detail_json TEXT
         );
@@ -101,14 +111,46 @@ def _make_full_db() -> sqlite3.Connection:
     return conn
 
 
-def _seed_decay_alerts(conn, model_name, n_triggered: int, window_hours: int):
+def _seed_decay_alerts(conn, model_name, n_triggered: int, window_hours: int,
+                        market_window_seconds: int = 300):
     """Insert n_triggered triggered=1 decay_evaluations within window_hours."""
+    # Look up primary_market_window_seconds from model_registry if available
+    row = conn.execute(
+        "SELECT primary_market_window_seconds FROM model_registry WHERE name=?", (model_name,)
+    ).fetchone()
+    if row and row["primary_market_window_seconds"]:
+        market_window_seconds = row["primary_market_window_seconds"]
+
+    # Make sure tier_assigned_at is in the past so alerts are not filtered as stale
+    tier_assigned_row = conn.execute(
+        "SELECT tier_assigned_at FROM model_window_tier WHERE model_name=? AND market_window_seconds=?",
+        (model_name, market_window_seconds)
+    ).fetchone()
+    tier_assigned_at = tier_assigned_row["tier_assigned_at"] if tier_assigned_row and tier_assigned_row["tier_assigned_at"] else _past_iso(window_hours + 2)
+
     for i in range(n_triggered):
-        ts = _past_iso(window_hours - i * 0.5)
+        # Alerts must be AFTER tier_assigned_at and within the window
+        ts = _past_iso(window_hours - i * 0.5 - 0.1)
         conn.execute(
             "INSERT INTO decay_evaluations (ts, model_name, symbol, market_window_seconds, "
-            "check_type, triggered, detail_json) VALUES (?, ?, 'BTCUSDT', 300, 'rwev_drop', 1, '{}')",
-            (ts, model_name),
+            "eval_type, triggered, detail_json) VALUES (?, ?, 'BTCUSDT', ?, 'rwev_drop', 1, '{}')",
+            (ts, model_name, market_window_seconds),
+        )
+    conn.commit()
+
+
+def _seed_mwt(conn, model_name, tier="gold", kelly=1.0, tier_assigned_hours_ago=2.0,
+              windows=(300, 900, 1800), primary_window=300):
+    """Seed model_window_tier rows for a model."""
+    for win in windows:
+        w_tier = tier if win == primary_window else "watch"
+        w_kelly = kelly if win == primary_window else 0.0
+        tier_assigned_at = _past_iso(tier_assigned_hours_ago)
+        conn.execute(
+            "INSERT OR REPLACE INTO model_window_tier "
+            "(model_name, market_window_seconds, tier, kelly_multiplier, tier_assigned_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (model_name, win, w_tier, w_kelly, tier_assigned_at),
         )
     conn.commit()
 
@@ -164,17 +206,25 @@ class TestGoldDemotesSilver:
     def test_gold_demotes_to_silver_on_alerts(self):
         conn = _make_full_db()
         conn.execute(
-            "INSERT INTO model_registry (name, tier, kelly_multiplier, paper_active) "
-            "VALUES ('gold_model', 'gold', 1.0, 1)"
+            "INSERT INTO model_registry "
+            "(name, tier, kelly_multiplier, paper_active, primary_market_window_seconds) "
+            "VALUES ('gold_model', 'gold', 1.0, 1, 300)"
         )
         conn.commit()
+        # Phase 57: also seed model_window_tier — tier_assigned_at must predate the alerts
+        _seed_mwt(conn, "gold_model", tier="gold", kelly=1.0, primary_window=300, tier_assigned_hours_ago=10.0)
         _seed_decay_alerts(conn, "gold_model", n_triggered=4, window_hours=5)
 
         _run_action_tick_with_conn(conn)
 
-        row = conn.execute("SELECT tier, kelly_multiplier FROM model_registry WHERE name='gold_model'").fetchone()
-        assert row["tier"] == "silver"
-        assert row["kelly_multiplier"] == pytest.approx(0.3)
+        # Phase 57: assert on model_window_tier (primary window) rather than model_registry.tier
+        mwt_row = conn.execute(
+            "SELECT tier, kelly_multiplier FROM model_window_tier "
+            "WHERE model_name='gold_model' AND market_window_seconds=300"
+        ).fetchone()
+        assert mwt_row is not None, "model_window_tier row should exist"
+        assert mwt_row["tier"] == "silver"
+        assert mwt_row["kelly_multiplier"] == pytest.approx(0.3)
 
         actions = conn.execute("SELECT action, from_tier, to_tier FROM governance_actions WHERE model_name='gold_model'").fetchall()
         assert any(a["action"] == "demote" and a["from_tier"] == "gold" and a["to_tier"] == "silver" for a in actions)
@@ -186,17 +236,25 @@ class TestSilverDemotesWatch:
     def test_silver_demotes_to_watch_on_alerts(self):
         conn = _make_full_db()
         conn.execute(
-            "INSERT INTO model_registry (name, tier, kelly_multiplier, paper_active) "
-            "VALUES ('silver_model', 'silver', 0.3, 1)"
+            "INSERT INTO model_registry "
+            "(name, tier, kelly_multiplier, paper_active, primary_market_window_seconds) "
+            "VALUES ('silver_model', 'silver', 0.3, 1, 300)"
         )
         conn.commit()
+        # Phase 57: seed model_window_tier with silver at primary window
+        _seed_mwt(conn, "silver_model", tier="silver", kelly=0.3, primary_window=300, tier_assigned_hours_ago=15.0)
         _seed_decay_alerts(conn, "silver_model", n_triggered=4, window_hours=10)
 
         _run_action_tick_with_conn(conn)
 
-        row = conn.execute("SELECT tier, kelly_multiplier FROM model_registry WHERE name='silver_model'").fetchone()
-        assert row["tier"] == "watch"
-        assert row["kelly_multiplier"] == pytest.approx(0.0)
+        # Phase 57: assert on model_window_tier
+        mwt_row = conn.execute(
+            "SELECT tier, kelly_multiplier FROM model_window_tier "
+            "WHERE model_name='silver_model' AND market_window_seconds=300"
+        ).fetchone()
+        assert mwt_row is not None
+        assert mwt_row["tier"] == "watch"
+        assert mwt_row["kelly_multiplier"] == pytest.approx(0.0)
 
 
 class TestWatchRetiresSustainedNegativeRwev:

@@ -16,10 +16,15 @@ def _make_trader_stub(kelly_multiplier: float, tier: str = "gold") -> MagicMock:
         "kelly_bankroll_usdc": 1000.0,
         "kelly_max_bet_usdc": 200.0,
     }
+    # Phase 57: populate kelly_by_window in addition to legacy scalar
+    # Primary window assumed to be 900 for test stubs
     trader._model_meta = {
         "test_model": {
-            "kelly_multiplier": kelly_multiplier,
+            "kelly_multiplier": kelly_multiplier,  # legacy scalar
             "tier": tier,
+            # Phase 57: per-window dicts (same value at primary window for back-compat)
+            "kelly_by_window": {300: kelly_multiplier, 900: kelly_multiplier, 1800: kelly_multiplier},
+            "tier_by_window": {300: tier, 900: tier, 1800: tier},
         }
     }
     trader._running_pnl = {"test_model": 0.0}
@@ -28,7 +33,7 @@ def _make_trader_stub(kelly_multiplier: float, tier: str = "gold") -> MagicMock:
 
 
 def _call_compute_stake(trader, model_name, pred_proba, pred_direction, p_market):
-    """Call PaperTrader._compute_stake unbound."""
+    """Call PaperTrader._compute_stake unbound (no market_window_seconds = legacy path)."""
     from trading.paper_trader import PaperTrader
     return PaperTrader._compute_stake(trader, model_name, pred_proba, pred_direction, p_market)
 

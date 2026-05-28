@@ -40,7 +40,17 @@ def _make_db() -> sqlite3.Connection:
             parent_model_name TEXT,
             paper_active INTEGER DEFAULT 0,
             is_baseline INTEGER DEFAULT 0,
-            lifecycle_state TEXT DEFAULT 'active'
+            lifecycle_state TEXT DEFAULT 'active',
+            primary_market_window_seconds INTEGER DEFAULT 300
+        );
+        CREATE TABLE model_window_tier (
+            model_name TEXT NOT NULL,
+            market_window_seconds INTEGER NOT NULL,
+            tier TEXT NOT NULL DEFAULT 'watch',
+            kelly_multiplier REAL NOT NULL DEFAULT 0.0,
+            tier_assigned_at TEXT,
+            tier_assigned_by TEXT,
+            PRIMARY KEY (model_name, market_window_seconds)
         );
         CREATE TABLE model_tier_score (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -85,6 +95,19 @@ def _make_db() -> sqlite3.Connection:
     return conn
 
 
+def _seed_mwt_for_model(conn, name, tier="watch", kelly=0.0, primary_window=300):
+    """Seed model_window_tier rows for a model (3 windows, tier at primary only)."""
+    for win in (300, 900, 1800):
+        w_tier = tier if win == primary_window else "watch"
+        w_kelly = kelly if win == primary_window else 0.0
+        conn.execute(
+            "INSERT OR REPLACE INTO model_window_tier "
+            "(model_name, market_window_seconds, tier, kelly_multiplier) VALUES (?, ?, ?, ?)",
+            (name, win, w_tier, w_kelly),
+        )
+    conn.commit()
+
+
 def _seed_model(conn, name, tier="watch", parent=None, probation_end_offset_h=-1, paper_active=1):
     """Insert a model whose probation has ended (offset_h < 0 means in the past)."""
     prob_start = _past_iso(abs(probation_end_offset_h) + 2)
@@ -92,8 +115,9 @@ def _seed_model(conn, name, tier="watch", parent=None, probation_end_offset_h=-1
     conn.execute(
         "INSERT OR REPLACE INTO model_registry "
         "(name, symbol, training_horizon_seconds, train_days, tier, kelly_multiplier, "
-        "probation_start_at, probation_end_at, parent_model_name, paper_active) "
-        "VALUES (?, 'BTCUSDT', 300, 330, ?, 0.0, ?, ?, ?, ?)",
+        "probation_start_at, probation_end_at, parent_model_name, paper_active, "
+        "primary_market_window_seconds) "
+        "VALUES (?, 'BTCUSDT', 300, 330, ?, 0.0, ?, ?, ?, ?, 300)",
         (name, tier, prob_start, prob_end, parent, paper_active),
     )
     conn.execute(
@@ -102,6 +126,9 @@ def _seed_model(conn, name, tier="watch", parent=None, probation_end_offset_h=-1
         "VALUES ('BTCUSDT_300_330', 'BTCUSDT', 300, 330, ?, ?)",
         (parent, name),
     )
+    # Phase 57: seed model_window_tier for the challenger
+    kelly = 0.0  # challengers start at watch
+    _seed_mwt_for_model(conn, name, tier=tier, kelly=kelly)
     conn.commit()
 
 
@@ -170,12 +197,15 @@ class TestGoodChallengerPromotes:
 
     def test_challenger_promoted_incumbent_demoted(self):
         conn = _make_db()
-        # Incumbent is gold
+        # Incumbent is gold — seed model_registry AND model_window_tier
         conn.execute(
             "INSERT INTO model_registry "
-            "(name, symbol, training_horizon_seconds, train_days, tier, kelly_multiplier, paper_active) "
-            "VALUES ('incumbent', 'BTCUSDT', 300, 330, 'gold', 1.0, 1)"
+            "(name, symbol, training_horizon_seconds, train_days, tier, kelly_multiplier, "
+            "paper_active, primary_market_window_seconds) "
+            "VALUES ('incumbent', 'BTCUSDT', 300, 330, 'gold', 1.0, 1, 300)"
         )
+        conn.commit()
+        _seed_mwt_for_model(conn, "incumbent", tier="gold", kelly=1.0, primary_window=300)
         _seed_model(conn, "challenger", tier="watch", parent="incumbent")
         _seed_scores(conn, "challenger", [0.15, 0.20, 0.18])   # avg ~0.177
         _seed_scores(conn, "incumbent", [0.08, 0.09, 0.10])    # avg ~0.090
@@ -183,13 +213,20 @@ class TestGoodChallengerPromotes:
 
         n = _run_tick_with_conn(conn)
 
-        ch_row = conn.execute("SELECT tier, kelly_multiplier FROM model_registry WHERE name='challenger'").fetchone()
-        inc_row = conn.execute("SELECT tier, kelly_multiplier FROM model_registry WHERE name='incumbent'").fetchone()
+        # Phase 57: check model_window_tier at primary window (300)
+        ch_mwt = conn.execute(
+            "SELECT tier, kelly_multiplier FROM model_window_tier WHERE model_name='challenger' AND market_window_seconds=300"
+        ).fetchone()
+        inc_mwt = conn.execute(
+            "SELECT tier, kelly_multiplier FROM model_window_tier WHERE model_name='incumbent' AND market_window_seconds=300"
+        ).fetchone()
 
         assert n >= 1
-        assert ch_row["tier"] == "silver", f"expected silver, got {ch_row['tier']}"
-        assert ch_row["kelly_multiplier"] == pytest.approx(0.3)
-        assert inc_row["tier"] == "silver", f"expected silver, got {inc_row['tier']}"
+        assert ch_mwt is not None
+        assert ch_mwt["tier"] == "silver", f"expected silver, got {ch_mwt['tier']}"
+        assert ch_mwt["kelly_multiplier"] == pytest.approx(0.3)
+        assert inc_mwt is not None
+        assert inc_mwt["tier"] == "silver", f"expected silver for incumbent, got {inc_mwt['tier']}"
         # governance_actions should have promote + demote
         actions = conn.execute("SELECT action, model_name FROM governance_actions").fetchall()
         action_map = {r["model_name"]: r["action"] for r in actions}
@@ -204,9 +241,12 @@ class TestBadChallengerRetired:
         conn = _make_db()
         conn.execute(
             "INSERT INTO model_registry "
-            "(name, symbol, training_horizon_seconds, train_days, tier, kelly_multiplier, paper_active) "
-            "VALUES ('incumbent', 'BTCUSDT', 300, 330, 'gold', 1.0, 1)"
+            "(name, symbol, training_horizon_seconds, train_days, tier, kelly_multiplier, "
+            "paper_active, primary_market_window_seconds) "
+            "VALUES ('incumbent', 'BTCUSDT', 300, 330, 'gold', 1.0, 1, 300)"
         )
+        conn.commit()
+        _seed_mwt_for_model(conn, "incumbent", tier="gold", kelly=1.0, primary_window=300)
         _seed_model(conn, "bad_challenger", tier="watch", parent="incumbent")
         _seed_scores(conn, "bad_challenger", [0.04, 0.03, 0.02])   # avg ~0.030
         _seed_scores(conn, "incumbent", [0.12, 0.14, 0.11])         # avg ~0.123
@@ -214,8 +254,12 @@ class TestBadChallengerRetired:
 
         _run_tick_with_conn(conn)
 
-        row = conn.execute("SELECT tier FROM model_registry WHERE name='bad_challenger'").fetchone()
-        assert row["tier"] == "retired"
+        # Phase 57: check model_window_tier
+        mwt_row = conn.execute(
+            "SELECT tier FROM model_window_tier WHERE model_name='bad_challenger' AND market_window_seconds=300"
+        ).fetchone()
+        assert mwt_row is not None
+        assert mwt_row["tier"] == "retired"
         actions = conn.execute("SELECT action FROM governance_actions WHERE model_name='bad_challenger'").fetchall()
         assert any(a["action"] == "retire" for a in actions)
 
@@ -227,9 +271,12 @@ class TestWithinToleranceExtends:
         conn = _make_db()
         conn.execute(
             "INSERT INTO model_registry "
-            "(name, symbol, training_horizon_seconds, train_days, tier, kelly_multiplier, paper_active) "
-            "VALUES ('incumbent', 'BTCUSDT', 300, 330, 'gold', 1.0, 1)"
+            "(name, symbol, training_horizon_seconds, train_days, tier, kelly_multiplier, "
+            "paper_active, primary_market_window_seconds) "
+            "VALUES ('incumbent', 'BTCUSDT', 300, 330, 'gold', 1.0, 1, 300)"
         )
+        conn.commit()
+        _seed_mwt_for_model(conn, "incumbent", tier="gold", kelly=1.0, primary_window=300)
         _seed_model(conn, "near_challenger", tier="watch", parent="incumbent")
         _seed_scores(conn, "near_challenger", [0.101, 0.099, 0.100])  # avg ~0.100
         _seed_scores(conn, "incumbent", [0.10, 0.10, 0.10])            # avg 0.100
@@ -238,7 +285,7 @@ class TestWithinToleranceExtends:
         _run_tick_with_conn(conn)
 
         row = conn.execute("SELECT tier, probation_end_at FROM model_registry WHERE name='near_challenger'").fetchone()
-        # Should still be watch (extended), not retired
+        # Should still be watch (extended), not retired (model_registry.tier unchanged in extend path)
         assert row["tier"] == "watch"
         # probation_end_at should have been updated to future
         new_end = row["probation_end_at"]
@@ -249,9 +296,12 @@ class TestWithinToleranceExtends:
         conn = _make_db()
         conn.execute(
             "INSERT INTO model_registry "
-            "(name, symbol, training_horizon_seconds, train_days, tier, kelly_multiplier, paper_active) "
-            "VALUES ('incumbent', 'BTCUSDT', 300, 330, 'gold', 1.0, 1)"
+            "(name, symbol, training_horizon_seconds, train_days, tier, kelly_multiplier, "
+            "paper_active, primary_market_window_seconds) "
+            "VALUES ('incumbent', 'BTCUSDT', 300, 330, 'gold', 1.0, 1, 300)"
         )
+        conn.commit()
+        _seed_mwt_for_model(conn, "incumbent", tier="gold", kelly=1.0, primary_window=300)
         _seed_model(conn, "stubborn_challenger", tier="watch", parent="incumbent")
         _seed_scores(conn, "stubborn_challenger", [0.100])
         _seed_scores(conn, "incumbent", [0.100])
@@ -264,8 +314,12 @@ class TestWithinToleranceExtends:
 
         _run_tick_with_conn(conn)
 
-        row = conn.execute("SELECT tier FROM model_registry WHERE name='stubborn_challenger'").fetchone()
-        assert row["tier"] == "retired"
+        # Phase 57: check model_window_tier (primary window 300)
+        mwt_row = conn.execute(
+            "SELECT tier FROM model_window_tier WHERE model_name='stubborn_challenger' AND market_window_seconds=300"
+        ).fetchone()
+        assert mwt_row is not None, "model_window_tier row should exist"
+        assert mwt_row["tier"] == "retired"
 
 
 class TestNoIncumbentDirectPromote:
@@ -278,8 +332,12 @@ class TestNoIncumbentDirectPromote:
 
         _run_tick_with_conn(conn)
 
-        row = conn.execute("SELECT tier FROM model_registry WHERE name='orphan_challenger'").fetchone()
-        assert row["tier"] == "silver"
+        # Phase 57: check model_window_tier (primary window 300)
+        mwt_row = conn.execute(
+            "SELECT tier FROM model_window_tier WHERE model_name='orphan_challenger' AND market_window_seconds=300"
+        ).fetchone()
+        assert mwt_row is not None
+        assert mwt_row["tier"] == "silver"
 
     def test_no_incumbent_negative_score_retires(self):
         conn = _make_db()
@@ -288,5 +346,9 @@ class TestNoIncumbentDirectPromote:
 
         _run_tick_with_conn(conn)
 
-        row = conn.execute("SELECT tier FROM model_registry WHERE name='bad_orphan'").fetchone()
-        assert row["tier"] == "retired"
+        # Phase 57: check model_window_tier (primary window 300)
+        mwt_row = conn.execute(
+            "SELECT tier FROM model_window_tier WHERE model_name='bad_orphan' AND market_window_seconds=300"
+        ).fetchone()
+        assert mwt_row is not None
+        assert mwt_row["tier"] == "retired"

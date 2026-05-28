@@ -61,6 +61,18 @@ class BoundaryScorer:
         """Main entry. Pure relocation of _run_predictions body."""
         t = self._trader
         boundary_ts = boundary_ms // 1000
+        # Phase 57 capacity probe — timing + RSS per boundary.
+        _probe_t0 = time.time()
+        try:
+            import psutil as _psutil
+            _probe_rss_mb = _psutil.Process().memory_info().rss / (1024 * 1024)
+        except Exception:
+            _probe_rss_mb = -1.0
+        _probe_n_models = len(getattr(t, "models", {}) or {})
+        logger.info(
+            "boundary_start boundary_ms=%d n_models=%d rss_mb=%.1f",
+            boundary_ms, _probe_n_models, _probe_rss_mb,
+        )
 
         # C5: Initialize accumulator for overlap recording.
         # Keyed by (symbol, market_window_seconds) → list[ModelScore].
@@ -380,12 +392,16 @@ class BoundaryScorer:
                     )
                     continue
 
-                # Compute stake (Kelly or flat depending on config)
+                # Compute stake (Kelly or flat depending on config).
+                # Phase 57: pass training_horizon_seconds as market_window_seconds so
+                # the per-window kelly_multiplier is used for the primary window.
+                _primary_window = meta.get("training_horizon_seconds")
                 stake = t._compute_stake(
                     model_name=model_name,
                     pred_proba=pred_proba,
                     pred_direction=pred_direction,
                     p_market=p_market,
+                    market_window_seconds=_primary_window,
                 )
 
                 t._record_compact_decision(
@@ -576,5 +592,18 @@ class BoundaryScorer:
         if t._model_meta:
             _first_k, _first_v = next(iter(t._model_meta.items()))
             logger.debug("[DIAG] meta_sample: %s=%s", _first_k, _first_v)
+        # Phase 57 capacity probe — wall-clock + RSS at end of boundary.
+        try:
+            import psutil as _psutil
+            _probe_rss_end = _psutil.Process().memory_info().rss / (1024 * 1024)
+        except Exception:
+            _probe_rss_end = -1.0
+        _probe_elapsed_ms = int((time.time() - _probe_t0) * 1000)
+        logger.info(
+            "boundary_done boundary_ms=%d n_models=%d elapsed_ms=%d "
+            "rss_start_mb=%.1f rss_end_mb=%.1f",
+            boundary_ms, _probe_n_models, _probe_elapsed_ms,
+            _probe_rss_mb, _probe_rss_end,
+        )
 
 

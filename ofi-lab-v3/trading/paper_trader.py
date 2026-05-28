@@ -309,6 +309,22 @@ class PaperTrader:
                         fc = _json.loads(reg["filter_config_json"])
                     except Exception:
                         fc = {}
+                # Phase 57: load per-window tier/kelly from model_window_tier at init
+                _init_wdata: dict[int, tuple[str, float]] = {}
+                try:
+                    _mwt_init = self._db_conn.execute(
+                        "SELECT market_window_seconds, tier, kelly_multiplier "
+                        "FROM model_window_tier WHERE model_name=?",
+                        (name,),
+                    ).fetchall()
+                    for _r in _mwt_init:
+                        _w = int(_r["market_window_seconds"])
+                        _t = _r["tier"] or "watch"
+                        _k = float(_r["kelly_multiplier"]) if _r["kelly_multiplier"] is not None else 0.0
+                        _init_wdata[_w] = (_t, _k)
+                except Exception:
+                    pass
+                _default_windows = (300, 900, 1800)
                 self._model_meta[name] = {
                     "symbol": reg["symbol"],
                     "training_horizon_seconds": reg["training_horizon_seconds"],
@@ -318,9 +334,12 @@ class PaperTrader:
                     "train_cutoff": reg["train_window_end"] or "",
                     "kalshi_dispatch_enabled": pa.get("kalshi", False),
                     "filter_config": fc,
-                    # Phase 5: tier-aware Kelly
-                    "kelly_multiplier": float(reg["kelly_multiplier"]) if reg["kelly_multiplier"] is not None else 0.0,
-                    "tier": reg["tier"] or "watch",
+                    # Phase 5: tier-aware Kelly — legacy scalars (prefer *_by_window)
+                    "kelly_multiplier": float(reg["kelly_multiplier"]) if reg["kelly_multiplier"] is not None else 0.0,  # legacy scalar — prefer kelly_by_window
+                    "tier": reg["tier"] or "watch",  # legacy scalar — prefer tier_by_window
+                    # Phase 57: per-window dicts
+                    "kelly_by_window": {w: _init_wdata.get(w, ("watch", 0.0))[1] for w in _default_windows},
+                    "tier_by_window": {w: _init_wdata.get(w, ("watch", 0.0))[0] for w in _default_windows},
                 }
             elif name in _cfg_meta:
                 self._model_meta[name] = dict(_cfg_meta[name])
@@ -422,6 +441,8 @@ class PaperTrader:
         via runtime API POST /reload_meta. Updates self._model_meta in place.
         Only filter_config is updated; symbol/horizon/etc. are left unchanged
         (those require a full restart to pick up).
+
+        Phase 57: also refreshes kelly_by_window / tier_by_window from model_window_tier.
         """
         if not getattr(self, "_db_conn", None):
             return
@@ -432,6 +453,25 @@ class PaperTrader:
         except Exception as e:
             logger.warning("reload_model_meta SQL failed: %s", e)
             return
+
+        # Phase 57: load per-window tier/kelly from model_window_tier
+        try:
+            mwt_rows = self._db_conn.execute(
+                "SELECT model_name, market_window_seconds, tier, kelly_multiplier "
+                "FROM model_window_tier"
+            ).fetchall()
+        except Exception:
+            mwt_rows = []
+
+        # Build per-model lookup: name -> {window: (tier, kelly)}
+        _window_data: dict[str, dict[int, tuple[str, float]]] = {}
+        for mwt in mwt_rows:
+            mn = mwt["model_name"]
+            ws = int(mwt["market_window_seconds"])
+            t = mwt["tier"] or "watch"
+            k = float(mwt["kelly_multiplier"]) if mwt["kelly_multiplier"] is not None else 0.0
+            _window_data.setdefault(mn, {})[ws] = (t, k)
+
         changed = []
         for row in rows:
             name = row["name"] if hasattr(row, "keys") else row[0]
@@ -452,11 +492,22 @@ class PaperTrader:
             if new_fc != old_fc:
                 self._model_meta[name]["filter_config"] = new_fc
                 changed.append(name)
-            # Phase 5: always refresh kelly_multiplier + tier so demotion/promotion is live
+            # Phase 5: legacy scalar refresh (backward compat)
             new_mult = float(row["kelly_multiplier"]) if row["kelly_multiplier"] is not None else 0.0
             new_tier = row["tier"] or "watch"
-            self._model_meta[name]["kelly_multiplier"] = new_mult
-            self._model_meta[name]["tier"] = new_tier
+            self._model_meta[name]["kelly_multiplier"] = new_mult  # legacy scalar — prefer kelly_by_window
+            self._model_meta[name]["tier"] = new_tier              # legacy scalar — prefer tier_by_window
+
+            # Phase 57: per-window tier/kelly dicts
+            wdata = _window_data.get(name, {})
+            _default_windows = (300, 900, 1800)
+            self._model_meta[name]["kelly_by_window"] = {
+                w: wdata.get(w, ("watch", 0.0))[1] for w in _default_windows
+            }
+            self._model_meta[name]["tier_by_window"] = {
+                w: wdata.get(w, ("watch", 0.0))[0] for w in _default_windows
+            }
+
         if changed:
             logger.info("reloaded filter_config for %d models: %s", len(changed), changed)
 
@@ -495,6 +546,22 @@ class PaperTrader:
             logger.error("_reload_fleet SQL failed: %s", e)
             return
 
+        # Phase 57: load per-window tier/kelly for all active models
+        try:
+            mwt_rows = self._db_conn.execute(
+                "SELECT model_name, market_window_seconds, tier, kelly_multiplier "
+                "FROM model_window_tier"
+            ).fetchall()
+            _mwt_lookup: dict[str, dict[int, tuple[str, float]]] = {}
+            for mwt in mwt_rows:
+                mn = mwt["model_name"]
+                ws = int(mwt["market_window_seconds"])
+                t = mwt["tier"] or "watch"
+                k = float(mwt["kelly_multiplier"]) if mwt["kelly_multiplier"] is not None else 0.0
+                _mwt_lookup.setdefault(mn, {})[ws] = (t, k)
+        except Exception:
+            _mwt_lookup = {}
+
         registry_names: set[str] = set()
         added: list[str] = []
         removed: list[str] = []
@@ -515,6 +582,8 @@ class PaperTrader:
             except (json.JSONDecodeError, TypeError):
                 fc_dict = {}
 
+            _wdata = _mwt_lookup.get(row["name"], {})
+            _default_windows = (300, 900, 1800)
             new_meta = {
                 "symbol": row["symbol"],
                 "training_horizon_seconds": row["training_horizon_seconds"],
@@ -527,9 +596,12 @@ class PaperTrader:
                 "lifecycle_state": row["lifecycle_state"],
                 "paper_active": bool(row["paper_active"]),
                 "live_eligible": bool(row["live_eligible"]),
-                # Phase 5: tier-aware Kelly
-                "kelly_multiplier": float(row["kelly_multiplier"]) if row["kelly_multiplier"] is not None else 0.0,
-                "tier": row["tier"] or "watch",
+                # Phase 5: tier-aware Kelly — legacy scalars (prefer *_by_window)
+                "kelly_multiplier": float(row["kelly_multiplier"]) if row["kelly_multiplier"] is not None else 0.0,  # legacy scalar — prefer kelly_by_window
+                "tier": row["tier"] or "watch",  # legacy scalar — prefer tier_by_window
+                # Phase 57: per-window dicts
+                "kelly_by_window": {w: _wdata.get(w, ("watch", 0.0))[1] for w in _default_windows},
+                "tier_by_window": {w: _wdata.get(w, ("watch", 0.0))[0] for w in _default_windows},
             }
 
             if name not in self.models:
@@ -621,6 +693,14 @@ class PaperTrader:
             "fleet_hot_reload complete: added=%d removed=%d updated=%d unchanged=%d",
             len(added), len(removed), len(updated), len(unchanged),
         )
+
+        # Phase 57 startup diagnostic: log a sample model's per-window kelly/tier
+        if self._model_meta:
+            first_name = next(iter(self._model_meta))
+            kbw = self._model_meta[first_name].get("kelly_by_window", {})
+            tbw = self._model_meta[first_name].get("tier_by_window", {})
+            logger.info("phase57 sample: %s kelly_by_window=%s tier_by_window=%s",
+                        first_name, kbw, tbw)
 
     def _handle_sighup(self, *args) -> None:
         """Signal handler for SIGHUP — sets deferred reload flag.
@@ -987,6 +1067,8 @@ class PaperTrader:
         pred_proba: float,
         pred_direction: str,
         p_market: float | None,
+        *,
+        market_window_seconds: int | None = None,
     ) -> float:
         """
         Compute the stake for a trade. Returns SIMULATED_STAKE_USDC (flat $10)
@@ -997,6 +1079,9 @@ class PaperTrader:
           odds = (1 / buy_price) - 1
           kelly_fraction = edge / odds  (capped at [0, 1])
           stake = bankroll * kelly_fraction * kelly_multiplier
+
+        Phase 57: pass market_window_seconds to use per-window kelly_multiplier.
+        Falls back to legacy model-level scalar when market_window_seconds is None.
         """
         f = self.filters
         if not f["kelly_sizing_enabled"] or p_market is None or p_market <= 0 or p_market >= 1:
@@ -1024,11 +1109,17 @@ class PaperTrader:
 
         kelly_raw = edge / odds
 
-        # Phase 5: scale by per-model tier kelly_multiplier (gold=1.0, silver=0.3,
-        # watch=0.0, retired=0.0).  Models with multiplier=0.0 get flat paper stake.
-        kelly_multiplier = float(
-            self._model_meta.get(model_name, {}).get("kelly_multiplier", 0.0) or 0.0
-        )
+        # Phase 57: use per-window kelly_multiplier when market_window_seconds provided.
+        # Falls back to legacy scalar when None (backward compat).
+        meta = self._model_meta.get(model_name, {})
+        if market_window_seconds is not None:
+            kelly_multiplier = float(
+                meta.get("kelly_by_window", {}).get(market_window_seconds, 0.0) or 0.0
+            )
+        else:
+            # Phase 5 legacy fallback: model-level scalar
+            kelly_multiplier = float(meta.get("kelly_multiplier", 0.0) or 0.0)
+
         if kelly_multiplier == 0.0:
             return SIMULATED_STAKE_USDC
 
