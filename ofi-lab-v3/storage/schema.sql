@@ -504,3 +504,36 @@ CREATE TABLE IF NOT EXISTS analysis_cache (
 
 CREATE INDEX IF NOT EXISTS idx_analysis_cache_computed_at
     ON analysis_cache(computed_at_ms);
+
+-- =========================================================================
+-- predictions_daily_rollup (T2): materialized daily aggregates for fast
+-- leaderboard queries over multi-week windows.
+--
+-- PnL (sum_pnl) is NE_t per $1 stake = compute_realized_net() inline:
+--   up+correct:   1 - p_market - 0.009
+--   up+wrong:   -(p_market + 0.009)
+--   down+correct: p_market - 0.009
+--   down+wrong: -(1 - p_market + 0.009)
+-- Rows where p_market IS NULL contribute 0 to pnl sums; n_resolved_trades
+-- counts only rows where p_market IS NOT NULL.
+--
+-- sum_pnl_sq enables Sharpe reconstruction: var = (n*sum_sq - sum^2)/(n*(n-1))
+-- sum_brier_terms = SUM((side_p - outcome)^2) where side_p=max(pp, 1-pp)
+-- =========================================================================
+CREATE TABLE IF NOT EXISTS predictions_daily_rollup (
+  model_name              TEXT NOT NULL,
+  symbol                  TEXT NOT NULL,
+  market_window_seconds   INTEGER NOT NULL,
+  date_utc                TEXT NOT NULL,        -- YYYY-MM-DD
+  n                       INTEGER NOT NULL DEFAULT 0,
+  n_correct               INTEGER NOT NULL DEFAULT 0,
+  sum_pnl                 REAL NOT NULL DEFAULT 0,
+  sum_pnl_sq              REAL NOT NULL DEFAULT 0,
+  sum_p_calibrated        REAL NOT NULL DEFAULT 0,
+  sum_brier_terms         REAL NOT NULL DEFAULT 0,
+  n_resolved_trades       INTEGER NOT NULL DEFAULT 0,
+  updated_at              TEXT NOT NULL,
+  PRIMARY KEY (model_name, symbol, market_window_seconds, date_utc)
+);
+CREATE INDEX IF NOT EXISTS idx_pdr_date ON predictions_daily_rollup(date_utc);
+CREATE INDEX IF NOT EXISTS idx_pdr_symbol_window_date ON predictions_daily_rollup(symbol, market_window_seconds, date_utc);

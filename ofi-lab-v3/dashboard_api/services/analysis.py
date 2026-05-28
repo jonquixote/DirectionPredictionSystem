@@ -424,6 +424,205 @@ SORT_KEY_MAP = {
 }
 
 
+def _midnight_today_ms() -> int:
+    """Return Unix ms for UTC midnight of today."""
+    import time as _t
+    import datetime as _dt
+    today = _dt.datetime.now(_dt.timezone.utc).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+    return int(today.timestamp() * 1000)
+
+
+def compute_leaderboard_rollup(
+    symbol: str | None,
+    market_window: int | None,
+    min_samples: int,
+    metric: str,
+    since_ms: int,
+    limit: int,
+    meta: dict,
+) -> list[dict] | None:
+    """Fast leaderboard path reading from predictions_daily_rollup.
+
+    Returns a list of leaderboard rows if the rollup table has data covering
+    the requested range, or None if the rollup should be skipped and the
+    caller should fall back to the live path.
+
+    Eligibility: since_ms must be provided and must be at least 1 full calendar
+    day older than today's UTC midnight (i.e. the requested window is fully in
+    the past and covered by completed rollup days). The trailing 24h is always
+    handled by the live path.
+
+    Metrics computed from sums:
+      win_rate        = n_correct / n
+      roi_pct         = (sum_pnl / n_resolved_trades) * 100  (NE_t mean * 100)
+      ev_per_trade    = sum_pnl / n_resolved_trades
+      brier_score     = sum_brier_terms / n
+      sharpe          = mean_pnl / std_pnl * sqrt(n_resolved_trades)
+                        where var = (n*sum_sq - sum^2) / (n*(n-1))
+    """
+    # Only eligible when since_ms is fully in the past (before today midnight).
+    midnight_today = _midnight_today_ms()
+    if since_ms >= midnight_today:
+        return None
+
+    since_date = _time.strftime(
+        "%Y-%m-%d", _time.gmtime(since_ms / 1000)
+    )
+
+    db = _get_db()
+    try:
+        # Check whether the rollup table exists and has any rows for this range.
+        table_check = db.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' "
+            "AND name='predictions_daily_rollup'"
+        ).fetchone()
+        if table_check is None:
+            return None
+
+        clauses = ["date_utc >= ?"]
+        params: list[Any] = [since_date]
+        if symbol:
+            clauses.append("symbol = ?")
+            params.append(symbol)
+        if market_window:
+            clauses.append("market_window_seconds = ?")
+            params.append(market_window)
+
+        where = " AND ".join(clauses)
+        agg_sql = f"""
+            SELECT
+                model_name,
+                symbol,
+                market_window_seconds,
+                SUM(n)                  AS tot_n,
+                SUM(n_correct)          AS tot_correct,
+                SUM(sum_pnl)            AS tot_pnl,
+                SUM(sum_pnl_sq)         AS tot_pnl_sq,
+                SUM(n_resolved_trades)  AS tot_resolved,
+                SUM(sum_brier_terms)    AS tot_brier,
+                COUNT(*)                AS n_days,
+                MAX(updated_at)         AS max_updated_at
+            FROM predictions_daily_rollup
+            WHERE {where}
+            GROUP BY model_name, symbol, market_window_seconds
+            HAVING SUM(n) >= {min_samples}
+        """
+        agg_rows = db.execute(agg_sql, params).fetchall()
+        if not agg_rows:
+            return None
+
+        import datetime as _dt
+        now_ts = _time.time()
+
+        rows = []
+        n_total_scanned = 0
+        max_freshness_s: float | None = None
+
+        for agg in agg_rows:
+            model_name = agg["model_name"] if hasattr(agg, "keys") else agg[0]
+            sym = agg["symbol"] if hasattr(agg, "keys") else agg[1]
+            window = agg["market_window_seconds"] if hasattr(agg, "keys") else agg[2]
+            tot_n = int(agg["tot_n"] if hasattr(agg, "keys") else agg[3])
+            tot_correct = int(agg["tot_correct"] if hasattr(agg, "keys") else agg[4])
+            tot_pnl = float(agg["tot_pnl"] if hasattr(agg, "keys") else agg[5])
+            tot_pnl_sq = float(agg["tot_pnl_sq"] if hasattr(agg, "keys") else agg[6])
+            tot_resolved = int(agg["tot_resolved"] if hasattr(agg, "keys") else agg[7])
+            tot_brier = float(agg["tot_brier"] if hasattr(agg, "keys") else agg[8])
+            max_updated_at = agg["max_updated_at"] if hasattr(agg, "keys") else agg[10]
+            n_total_scanned += tot_n
+
+            # Freshness: seconds since latest rollup write
+            freshness_s: float | None = None
+            if max_updated_at:
+                try:
+                    up_ts = _dt.datetime.strptime(
+                        max_updated_at, "%Y-%m-%dT%H:%M:%SZ"
+                    ).replace(tzinfo=_dt.timezone.utc).timestamp()
+                    freshness_s = now_ts - up_ts
+                    if max_freshness_s is None or freshness_s > max_freshness_s:
+                        max_freshness_s = freshness_s
+                except Exception:
+                    pass
+
+            # Win rate
+            win_rate = tot_correct / tot_n if tot_n > 0 else 0.0
+            ci_lo, ci_hi = wilson_ci(tot_correct, tot_n)
+            zt = z_test(tot_n, win_rate)
+
+            # PnL metrics
+            mean_pnl = tot_pnl / tot_resolved if tot_resolved > 0 else 0.0
+            roi_pct = mean_pnl * 100
+
+            # Sharpe from variance reconstruction
+            sharpe: float | None = None
+            if tot_resolved >= 2:
+                numerator = tot_resolved * tot_pnl_sq - tot_pnl * tot_pnl
+                if numerator > 0:
+                    variance = numerator / (tot_resolved * (tot_resolved - 1))
+                    std_pnl = math.sqrt(variance)
+                    if std_pnl > 0:
+                        sharpe = round(mean_pnl / std_pnl * math.sqrt(tot_resolved), 4)
+
+            # Brier
+            brier = round(tot_brier / tot_n, 6) if tot_n > 0 else None
+
+            fc = _load_filter_config(db, model_name)
+
+            rows.append({
+                "model_name": model_name,
+                "symbol": sym,
+                "market_window_seconds": window,
+                "n_samples": tot_n,
+                "n_correct": tot_correct,
+                "win_rate": round(win_rate, 6),
+                "win_rate_ci_lo": round(ci_lo, 6),
+                "win_rate_ci_hi": round(ci_hi, 6),
+                "p_value_vs_50pct": round(zt["p_value_one_tailed"], 6)
+                    if zt["p_value_one_tailed"] is not None else None,
+                "brier_score": brier,
+                "ev_per_trade": round(mean_pnl, 6),
+                "roi_pct": round(roi_pct, 4),
+                "sharpe": sharpe,
+                "n_resolved_trades": tot_resolved,
+                "total_pnl_usdc": round(tot_pnl, 4),
+                "avg_pnl_per_trade": round(mean_pnl, 6),
+                "current_filter_config": fc,
+            })
+
+        if not rows:
+            return None
+
+        # Sort
+        ascending = metric == "brier_score"
+        sort_key = SORT_KEY_MAP.get(metric, "win_rate")
+
+        def _sort_val(r):
+            v = r.get(sort_key)
+            if v is None:
+                return float("inf") if ascending else float("-inf")
+            return v
+
+        rows.sort(key=_sort_val, reverse=(not ascending))
+        result = rows[:limit]
+
+        meta["path"] = "rollup"
+        meta["since_ms_used"] = since_ms
+        meta["row_count_scanned"] = n_total_scanned
+        meta["full_history"] = False
+        meta["truncated"] = False
+        meta["rollup_freshness_seconds"] = max_freshness_s
+
+        return result
+
+    except Exception as exc:
+        # On any rollup error, fall back to live path — never surface rollup
+        # failures to the caller.
+        meta["rollup_error"] = str(exc)
+        return None
+
+
 def compute_leaderboard(
     symbol: str | None = None,
     market_window: int | None = None,
@@ -434,6 +633,27 @@ def compute_leaderboard(
     full_history: bool = False,
     meta: dict | None = None,
 ) -> list[dict]:
+    # T2 — Rollup fast path: use materialized daily aggregates when the request
+    # covers a fully-past window (since_ms set and before today's UTC midnight).
+    # Fallback rule: if since_ms is None, not set, or within today's window,
+    # always use the live path — today's data is only partially rolled up and
+    # the trailing 24h needs fresh predictions rows.
+    if meta is None:
+        meta = {}
+    if since_ms is not None and not full_history:
+        rollup_result = compute_leaderboard_rollup(
+            symbol=symbol,
+            market_window=market_window,
+            min_samples=min_samples,
+            metric=metric,
+            since_ms=since_ms,
+            limit=limit,
+            meta=meta,
+        )
+        if rollup_result is not None:
+            return rollup_result
+        # Rollup returned None → fall through to live path below.
+
     db = _get_db()
     preds = _load_resolved_predictions(
         db, symbol, market_window, since_ms,

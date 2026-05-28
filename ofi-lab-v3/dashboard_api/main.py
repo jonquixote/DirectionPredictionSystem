@@ -880,6 +880,162 @@ async def _governance_action_loop():
             return
 
 
+# T2 — Daily rollup loop. Every 10 min, upsert aggregate rows for today and
+# yesterday into predictions_daily_rollup. The fast leaderboard path
+# reads from this table instead of scanning the full predictions table.
+#
+# PnL is NE_t (realized net per $1 stake) computed inline in SQL:
+#   up+correct  : 1 - p_market - 0.009
+#   up+wrong    : -(p_market + 0.009)
+#   down+correct: p_market - 0.009
+#   down+wrong  : -(1 - p_market + 0.009)
+# Rows where p_market IS NULL contribute 0 to pnl sums.
+_ROLLUP_INTERVAL_S = 600
+_ROLLUP_BOOT_DELAY_S = 45
+
+_ROLLUP_UPSERT_SQL = """
+INSERT INTO predictions_daily_rollup (
+  model_name, symbol, market_window_seconds, date_utc,
+  n, n_correct, sum_pnl, sum_pnl_sq, sum_p_calibrated, sum_brier_terms,
+  n_resolved_trades, updated_at
+)
+SELECT
+  model_name,
+  symbol,
+  market_window_seconds,
+  ? AS date_utc,
+  COUNT(*),
+  SUM(CASE WHEN prediction_correct THEN 1 ELSE 0 END),
+  SUM(
+    CASE
+      WHEN p_market IS NULL THEN 0.0
+      WHEN pred_direction = 'up' AND prediction_correct THEN  1.0 - p_market - 0.009
+      WHEN pred_direction = 'up'                         THEN -(p_market + 0.009)
+      WHEN pred_direction = 'down' AND prediction_correct THEN  p_market - 0.009
+      ELSE                                                    -(1.0 - p_market + 0.009)
+    END
+  ),
+  SUM(
+    CASE
+      WHEN p_market IS NULL THEN 0.0
+      WHEN pred_direction = 'up' AND prediction_correct THEN  (1.0 - p_market - 0.009) * (1.0 - p_market - 0.009)
+      WHEN pred_direction = 'up'                         THEN  (p_market + 0.009) * (p_market + 0.009)
+      WHEN pred_direction = 'down' AND prediction_correct THEN  (p_market - 0.009) * (p_market - 0.009)
+      ELSE                                                    (1.0 - p_market + 0.009) * (1.0 - p_market + 0.009)
+    END
+  ),
+  SUM(COALESCE(pred_proba_calibrated, 0.5)),
+  SUM(
+    (CASE WHEN pred_proba_calibrated >= 0.5
+          THEN pred_proba_calibrated
+          ELSE 1.0 - pred_proba_calibrated END
+     - CAST(prediction_correct AS REAL))
+    *
+    (CASE WHEN pred_proba_calibrated >= 0.5
+          THEN pred_proba_calibrated
+          ELSE 1.0 - pred_proba_calibrated END
+     - CAST(prediction_correct AS REAL))
+  ),
+  SUM(CASE WHEN p_market IS NOT NULL THEN 1 ELSE 0 END),
+  ? AS updated_at
+FROM predictions
+WHERE resolved = 1 AND warmup = 0
+  AND prediction_correct IS NOT NULL
+  AND strftime('%Y-%m-%d', datetime(ts_contract_open_ms / 1000, 'unixepoch')) = ?
+GROUP BY model_name, symbol, market_window_seconds
+ON CONFLICT(model_name, symbol, market_window_seconds, date_utc)
+DO UPDATE SET
+  n                 = excluded.n,
+  n_correct         = excluded.n_correct,
+  sum_pnl           = excluded.sum_pnl,
+  sum_pnl_sq        = excluded.sum_pnl_sq,
+  sum_p_calibrated  = excluded.sum_p_calibrated,
+  sum_brier_terms   = excluded.sum_brier_terms,
+  n_resolved_trades = excluded.n_resolved_trades,
+  updated_at        = excluded.updated_at
+"""
+
+
+def _run_rollup_tick() -> int:
+    """Upsert rollup rows for today + yesterday. Returns total rows upserted."""
+    conn = _cutover_get_db()
+    try:
+        now = datetime.now(timezone.utc)
+        today = now.strftime("%Y-%m-%d")
+        yesterday = (now - timedelta(days=1)).strftime("%Y-%m-%d")
+        updated_at = now.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        total = 0
+        for date_str in (today, yesterday):
+            conn.execute(_ROLLUP_UPSERT_SQL, (date_str, updated_at, date_str))
+            total += conn.execute(
+                "SELECT COUNT(*) FROM predictions_daily_rollup WHERE date_utc = ?",
+                (date_str,),
+            ).fetchone()[0]
+        conn.commit()
+        return total
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+
+async def _rollup_loop():
+    """Background loop: every 10 min, upsert rollup rows for today + yesterday."""
+    try:
+        await asyncio.sleep(_ROLLUP_BOOT_DELAY_S)
+    except asyncio.CancelledError:
+        return
+    while True:
+        try:
+            n = await asyncio.to_thread(_run_rollup_tick)
+            logger.info("rollup loop: upserted %d rows across 2 dates", n)
+        except Exception as exc:
+            logger.warning("rollup loop tick failed: %s", exc)
+        try:
+            await asyncio.sleep(_ROLLUP_INTERVAL_S)
+        except asyncio.CancelledError:
+            return
+
+
+def compute_full_backfill(conn, days: int = 90) -> int:
+    """One-shot backfill: upsert rollup rows for the last ``days`` calendar days.
+
+    Commits every 7 days of inserts to avoid one giant transaction.
+    Designed to be called manually after deploy via CLI entry point.
+
+    Returns total rollup rows present after backfill.
+    """
+    from datetime import date as _date, timedelta as _td
+
+    today = datetime.now(timezone.utc).date()
+    updated_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    total_inserted = 0
+    batch = 0
+    for offset in range(days, -1, -1):  # oldest → newest
+        target_date = (today - _td(days=offset)).strftime("%Y-%m-%d")
+        conn.execute(_ROLLUP_UPSERT_SQL, (target_date, updated_at, target_date))
+        total_inserted += 1
+        batch += 1
+        if batch >= 7:
+            conn.commit()
+            batch = 0
+
+    if batch > 0:
+        conn.commit()
+
+    total_rows = conn.execute(
+        "SELECT COUNT(*) FROM predictions_daily_rollup"
+    ).fetchone()[0]
+    logger.info(
+        "backfill complete: iterated %d dates, rollup table now has %d rows",
+        total_inserted, total_rows,
+    )
+    return total_rows
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup / shutdown lifecycle."""
@@ -906,9 +1062,10 @@ async def lifespan(app: FastAPI):
     tier_task = asyncio.create_task(_tier_scoring_loop())
     governance_probation_task = asyncio.create_task(_governance_probation_loop())
     governance_action_task = asyncio.create_task(_governance_action_loop())
+    rollup_task = asyncio.create_task(_rollup_loop())
     logger.info(
         "Dashboard API ready — background refresh + analysis precompute "
-        "+ cutover scheduler + tier scoring + governance loops started"
+        "+ cutover scheduler + tier scoring + governance + rollup loops started"
     )
     yield
     task.cancel()
@@ -917,6 +1074,7 @@ async def lifespan(app: FastAPI):
     tier_task.cancel()
     governance_probation_task.cancel()
     governance_action_task.cancel()
+    rollup_task.cancel()
     logger.info("Dashboard API shutting down")
 
 
@@ -988,3 +1146,42 @@ async def global_exception_handler(request, exc):
             "timestamp_ms": int(time.time() * 1000),
         },
     )
+
+
+# ---------------------------------------------------------------------------
+# CLI entry point for one-shot backfill
+# Usage: python -m dashboard_api.main backfill_rollups [--days 90]
+# ---------------------------------------------------------------------------
+
+if __name__ == "__main__":
+    import sys
+
+    args = sys.argv[1:]
+    if args and args[0] == "backfill_rollups":
+        import argparse
+
+        parser = argparse.ArgumentParser(description="Backfill predictions_daily_rollup")
+        parser.add_argument("command")
+        parser.add_argument("--days", type=int, default=90,
+                            help="Number of calendar days to backfill (default: 90)")
+        parser.add_argument("--db", type=str,
+                            help="Override DB path (default: $STORAGE_DB_PATH or /data/v3.db)")
+        parsed = parser.parse_args(args)
+
+        db_path = parsed.db or os.environ.get("STORAGE_DB_PATH", "/data/v3.db")
+        try:
+            from storage.db import open_database, init_schema
+        except ModuleNotFoundError:
+            import sys as _sys
+            _sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parents[1]))
+            from storage.db import open_database, init_schema  # type: ignore
+
+        _conn = open_database(db_path)
+        init_schema(_conn)
+        n_rows = compute_full_backfill(_conn, days=parsed.days)
+        _conn.close()
+        print(f"Backfill done — {n_rows} total rows in predictions_daily_rollup")
+        sys.exit(0)
+    else:
+        import uvicorn
+        uvicorn.run("dashboard_api.main:app", host="0.0.0.0", port=8000, reload=False)

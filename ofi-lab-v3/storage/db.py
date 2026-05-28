@@ -262,6 +262,34 @@ def _run_migrations(conn) -> None:
         "CREATE INDEX IF NOT EXISTS idx_decay_eval_full "
         "ON decay_evaluations(model_name, market_window_seconds, eval_type, triggered, ts DESC)"
     )
+    # T2 — predictions_daily_rollup: materialized daily aggregates for fast
+    # leaderboard queries.  The full DDL lives in schema.sql; we also create
+    # it here so _run_migrations() stays the single migration entry point.
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS predictions_daily_rollup (
+          model_name              TEXT NOT NULL,
+          symbol                  TEXT NOT NULL,
+          market_window_seconds   INTEGER NOT NULL,
+          date_utc                TEXT NOT NULL,
+          n                       INTEGER NOT NULL DEFAULT 0,
+          n_correct               INTEGER NOT NULL DEFAULT 0,
+          sum_pnl                 REAL NOT NULL DEFAULT 0,
+          sum_pnl_sq              REAL NOT NULL DEFAULT 0,
+          sum_p_calibrated        REAL NOT NULL DEFAULT 0,
+          sum_brier_terms         REAL NOT NULL DEFAULT 0,
+          n_resolved_trades       INTEGER NOT NULL DEFAULT 0,
+          updated_at              TEXT NOT NULL,
+          PRIMARY KEY (model_name, symbol, market_window_seconds, date_utc)
+        )
+    """)
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_pdr_date "
+        "ON predictions_daily_rollup(date_utc)"
+    )
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_pdr_symbol_window_date "
+        "ON predictions_daily_rollup(symbol, market_window_seconds, date_utc)"
+    )
 
 
 def _migrate_native_to_eval_indexes(conn) -> None:
