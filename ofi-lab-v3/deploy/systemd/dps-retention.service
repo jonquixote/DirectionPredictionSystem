@@ -1,0 +1,17 @@
+[Unit]
+Description=ofi-lab-v3 DB retention sweep (decay_evaluations / model_tier_score / decision_traces / analysis_cache)
+After=network.target
+
+[Service]
+Type=oneshot
+User=johnny
+WorkingDirectory=/home/johnny/ofi-lab-v3
+EnvironmentFile=/etc/v3/env
+Environment="PYTHONPATH=/home/johnny/ofi-lab-v3"
+ExecStart=/home/johnny/ofi-lab-v3/.venv/bin/python -m scripts.retention_cron --apply --vacuum
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=dps-retention
+
+[Install]
+WantedBy=multi-user.target
