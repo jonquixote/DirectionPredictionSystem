@@ -668,6 +668,10 @@ class PaperTrader:
                     changed_fields.append("paper_active")
                 if old_meta.get("live_eligible") != bool(row["live_eligible"]):
                     changed_fields.append("live_eligible")
+                if old_meta.get("kelly_by_window") != new_meta["kelly_by_window"]:
+                    changed_fields.append("kelly_by_window")
+                if old_meta.get("tier_by_window") != new_meta["tier_by_window"]:
+                    changed_fields.append("tier_by_window")
 
                 if changed_fields:
                     self._model_meta[name] = {**old_meta, **new_meta}
