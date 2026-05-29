@@ -262,6 +262,13 @@ def _run_migrations(conn) -> None:
         "CREATE INDEX IF NOT EXISTS idx_decay_eval_full "
         "ON decay_evaluations(model_name, market_window_seconds, eval_type, triggered, ts DESC)"
     )
+    # 2026-05-29 — model_selection.updated_at / updated_by were referenced
+    # by routers/models_admin.py PUT /model-selection but never added to the
+    # schema. SQLite ALTER TABLE ADD COLUMN rejects non-constant defaults
+    # (no strftime); CREATE TABLE in schema.sql carries the default for
+    # fresh DBs, and rows on existing DBs get NULL until the next write.
+    _add_column_if_missing(conn, "model_selection", "updated_at", "TEXT")
+    _add_column_if_missing(conn, "model_selection", "updated_by", "TEXT")
     # T2 — predictions_daily_rollup: materialized daily aggregates for fast
     # leaderboard queries.  The full DDL lives in schema.sql; we also create
     # it here so _run_migrations() stays the single migration entry point.

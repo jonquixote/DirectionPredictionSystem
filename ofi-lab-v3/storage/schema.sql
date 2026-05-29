@@ -448,6 +448,8 @@ CREATE TABLE IF NOT EXISTS model_selection (
     strategy TEXT NOT NULL DEFAULT 'all',
     selected_model_name TEXT,
     committee_config_json TEXT DEFAULT '{}',
+    updated_at TEXT DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    updated_by TEXT,
     PRIMARY KEY (symbol, market_window_seconds)
 );
 
