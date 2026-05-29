@@ -93,10 +93,16 @@ logger = logging.getLogger("dashboard")
 
 
 async def _refresh_loop():
-    """Background task: refresh LiveState every 5 seconds."""
+    """Background task: refresh LiveState every 5 seconds.
+
+    LiveState.refresh() is sync sqlite (~3s under retrain load). Run it
+    on the threadpool so the event loop keeps accepting requests during
+    the scan. Without to_thread the loop pauses every worker for the
+    duration of each refresh and even /api/status starts timing out.
+    """
     while True:
         try:
-            LiveState.refresh()
+            await asyncio.to_thread(LiveState.refresh)
         except Exception as e:
             logger.error("LiveState refresh error: %s", e)
         await asyncio.sleep(5)
@@ -1087,24 +1093,37 @@ async def lifespan(app: FastAPI):
     LiveState.initialize()
     start_alert_worker()
     task = asyncio.create_task(_refresh_loop())
-    precompute_task = asyncio.create_task(_analysis_precompute_loop())
+    # Kill switches for the heaviest background loops. During the weekly
+    # retrain, sqlite WAL contention on /data/v3.db means the precompute
+    # loop alone can starve foreground analysis requests. The rollup loop
+    # also writes a large UPSERT every 10 min. Operators can set these
+    # to "0" / "false" in /etc/v3/env to disable the loops until retrain
+    # completes. Defaults preserve original behavior.
+    _bg_enabled = lambda name, default="1": os.environ.get(name, default).lower() not in ("0", "false", "no", "off")  # noqa: E731
+    precompute_task = asyncio.create_task(_analysis_precompute_loop()) if _bg_enabled("V3_ANALYSIS_PRECOMPUTE_ENABLED") else None
+    if precompute_task is None:
+        logger.info("analysis precompute loop DISABLED via V3_ANALYSIS_PRECOMPUTE_ENABLED")
     cutover_task = asyncio.create_task(_cutover_scheduler_loop())
     tier_task = asyncio.create_task(_tier_scoring_loop())
     governance_probation_task = asyncio.create_task(_governance_probation_loop())
     governance_action_task = asyncio.create_task(_governance_action_loop())
-    rollup_task = asyncio.create_task(_rollup_loop())
+    rollup_task = asyncio.create_task(_rollup_loop()) if _bg_enabled("V3_ROLLUP_LOOP_ENABLED") else None
+    if rollup_task is None:
+        logger.info("rollup loop DISABLED via V3_ROLLUP_LOOP_ENABLED")
     logger.info(
         "Dashboard API ready — background refresh + analysis precompute "
         "+ cutover scheduler + tier scoring + governance + rollup loops started"
     )
     yield
     task.cancel()
-    precompute_task.cancel()
+    if precompute_task is not None:
+        precompute_task.cancel()
     cutover_task.cancel()
     tier_task.cancel()
     governance_probation_task.cancel()
     governance_action_task.cancel()
-    rollup_task.cancel()
+    if rollup_task is not None:
+        rollup_task.cancel()
     logger.info("Dashboard API shutting down")
 
 

@@ -11,6 +11,7 @@ from __future__ import annotations
 import itertools
 import json
 import math
+import os
 import random
 import statistics
 import time as _time
@@ -170,8 +171,13 @@ DEFAULT_THRESHOLDS = [round(0.50 + i * 0.01, 2) for i in range(21)]  # 0.50–0.
 # Operators can opt out per-request with full_history=True (router param), which
 # takes the legacy unbounded path. The meta dict surfaced via response headers
 # always declares which path was taken so analysis is never silently truncated.
-DEFAULT_HISTORY_DAYS = 30
-DEFAULT_PRED_LIMIT = 50_000
+#
+# Tightened 30d -> 7d on 2026-05-29 because the weekly retrain saturates the
+# disk + lock contention on /data/v3.db; raw-prediction scans for committee /
+# threshold / skip during retrain were taking 30s+ at 30d. 7d is enough for
+# the dashboard's live use; deeper analysis uses ?full_history=true.
+DEFAULT_HISTORY_DAYS = int(os.environ.get("V3_ANALYSIS_DEFAULT_HISTORY_DAYS", "7"))
+DEFAULT_PRED_LIMIT = int(os.environ.get("V3_ANALYSIS_DEFAULT_PRED_LIMIT", "50000"))
 
 
 # ---------------------------------------------------------------------------
