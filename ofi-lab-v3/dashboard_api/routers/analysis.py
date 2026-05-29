@@ -103,6 +103,7 @@ class SimulateRequest(BaseModel):
     window: int
     since_ms: int | None = None
     bootstrap_n: int = 0
+    model: str | None = None
 
 
 class WalkForwardRequest(BaseModel):
@@ -223,6 +224,7 @@ async def skip_conditions(
     min_bucket_size: int = Query(30, ge=1),
     since_ms: int | None = Query(None),
     full_history: bool = Query(False),
+    model: str | None = Query(None, description="Scope buckets to a single model_name."),
 ):
     """Surface time/regime buckets where win rate < 50% (skip candidates)."""
     meta: dict = {}
@@ -234,6 +236,7 @@ async def skip_conditions(
         since_ms=since_ms,
         full_history=full_history,
         meta=meta,
+        model=model,
     )
     _set_analysis_meta_headers(response, meta)
     return result
@@ -274,6 +277,7 @@ async def simulate(body: SimulateRequest):
         symbol=body.symbol,
         window=body.window,
         since_ms=body.since_ms,
+        model=body.model,
         bootstrap_n=body.bootstrap_n,
     )
 

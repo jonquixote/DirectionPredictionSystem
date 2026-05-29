@@ -961,9 +961,11 @@ def compute_skip_conditions(
     since_ms: int | None = None,
     full_history: bool = False,
     meta: dict | None = None,
+    model: str | None = None,
 ) -> dict:
-    # T1.1 outer cache (in-memory, per-worker)
-    _ck = f"skip_conditions:{symbol or '_all'}:{market_window or '_all'}:{min_bucket_size}:{since_ms or '_all'}:full={full_history}"
+    # T1.1 outer cache (in-memory, per-worker). Cache key includes model
+    # so per-model breakdowns don't poison the overall-aggregate cache.
+    _ck = f"skip_conditions:{symbol or '_all'}:{market_window or '_all'}:{min_bucket_size}:{since_ms or '_all'}:full={full_history}:model={model or '_all'}"
     _hit = _cache_get(_ck)
     if _hit is not None:
         if meta is not None:
@@ -988,7 +990,7 @@ def compute_skip_conditions(
     db = _get_db()
     preds = _load_resolved_predictions(
         db, symbol, market_window, since_ms,
-        full_history=full_history, meta=meta,
+        model=model, full_history=full_history, meta=meta,
     )
 
     if not preds:
@@ -1688,11 +1690,14 @@ def simulate_filter(
     window: int,
     since_ms: int | None = None,
     bootstrap_n: int = 0,
+    model: str | None = None,
     _preloaded_preds: list[dict] | None = None,
     _preloaded_decay: dict | None = None,
     _preloaded_consensus: dict | None = None,
 ) -> dict:
     """Apply filter_config to historical resolved predictions.
+
+    When ``model`` is provided, scopes the simulation to that single model.
 
     Returns envelope. H2 — validates filter_config keys; AssertionError if
     any unsafe (post-resolution) column appears. H3 — strict envelope.
@@ -1707,7 +1712,7 @@ def simulate_filter(
 
     db = _get_db()
     if _preloaded_preds is None:
-        preds = _load_resolved_predictions(db, symbol, window, since_ms)
+        preds = _load_resolved_predictions(db, symbol, window, since_ms, model=model)
     else:
         preds = _preloaded_preds
     n_in = len(preds)
