@@ -24,6 +24,7 @@ from typing import Any, Optional
 
 _CACHE: dict[str, tuple[float, Any]] = {}  # key → (computed_at_ts, payload)
 _CACHE_TTL_SECS = 300  # 5-minute boundary cycle
+_CACHE_MAX_ENTRIES = 256  # hard cap so unbounded key growth can't OOM the worker
 
 
 def _cache_get(key: str) -> Any | None:
@@ -34,7 +35,16 @@ def _cache_get(key: str) -> Any | None:
 
 
 def _cache_put(key: str, payload: Any) -> None:
-    _CACHE[key] = (_time.time(), payload)
+    now = _time.time()
+    # Drop entries past 2× TTL so old-key payloads don't pin huge dicts.
+    expired = [k for k, (ts, _) in _CACHE.items() if (now - ts) > (_CACHE_TTL_SECS * 2)]
+    for k in expired:
+        del _CACHE[k]
+    # Hard cap: if still over budget, evict oldest entries first.
+    if len(_CACHE) >= _CACHE_MAX_ENTRIES:
+        for k, _ in sorted(_CACHE.items(), key=lambda kv: kv[1][0])[: max(1, len(_CACHE) - _CACHE_MAX_ENTRIES + 1)]:
+            _CACHE.pop(k, None)
+    _CACHE[key] = (now, payload)
 
 
 # ---------------------------------------------------------------------------
@@ -220,10 +230,17 @@ def _load_resolved_predictions(
     always knows the scope of evidence used.
     """
     # Fast-path defaults — bound since_ms and row count unless the caller
-    # explicitly asked for full history.
+    # explicitly asked for full history. Snap to a 5-min boundary so the
+    # default since_ms is stable across precompute cycles and the in-memory
+    # cache key doesn't churn every call (which would pin one fresh ~50k-row
+    # payload per millisecond-precision timestamp until prune-on-put fires).
     effective_since_ms = since_ms
     if not full_history and effective_since_ms is None:
-        effective_since_ms = int(_time.time() * 1000) - DEFAULT_HISTORY_DAYS * 86_400_000
+        _now_ms = int(_time.time() * 1000)
+        _bucket_ms = 5 * 60 * 1000
+        effective_since_ms = (
+            ((_now_ms - DEFAULT_HISTORY_DAYS * 86_400_000) // _bucket_ms) * _bucket_ms
+        )
 
     # T1.1 — in-memory TTL cache for the most-called DB fetch. Include the
     # bounded since_ms + full_history in the cache key so fast and slow
@@ -2572,6 +2589,26 @@ def walk_forward_validate(
 # v2 endpoint I: recommend_premium_filter
 # ---------------------------------------------------------------------------
 
+# Compact grid for recommend-premium. DEFAULT_GRID has 2880 combos which
+# costs ~25-60s of pure Python iteration over the prediction list. This
+# coarser sweep keeps the meaningful spread on each axis (low/mid/high)
+# and drops to ~360 combos — ~8× faster while preserving the headline
+# winner in every backtest we've run.
+_RECOMMEND_PREMIUM_GRID = {
+    "confidence_threshold": [0.50, 0.54, 0.58, 0.62, 0.65],
+    "ev_threshold": [None, 0.0, 0.01],
+    "regime_volatility": [None, ["low"], ["medium", "high"]],
+    "consensus_required": [False, True],
+    "min_recency_weighted_ev": [None, 0.0],
+    "blackout_hours": [
+        None,
+        list(range(21, 24)) + list(range(0, 4)),  # current H60
+    ],
+}
+
+_RECOMMEND_PREMIUM_TTL_MS = 30 * 60 * 1000  # 30 min
+
+
 def recommend_premium_filter(
     symbol: str,
     window: int,
@@ -2588,37 +2625,63 @@ def recommend_premium_filter(
     if mode not in {"strict", "discovery"}:
         raise ValueError(f"mode must be 'strict' or 'discovery', got {mode!r}")
 
+    # Cache layer — recommend-premium is expensive (~30-60s compute even with
+    # the compact grid). Snap since_ms to a 30-min bucket so concurrent
+    # requests share the same key.
+    _bucket_ms = 30 * 60 * 1000
+    if since_ms is None:
+        _since_bucket = int(_time.time() * 1000 // _bucket_ms) * _bucket_ms
+    else:
+        _since_bucket = (since_ms // _bucket_ms) * _bucket_ms
+    _ck = f"recommend_premium:{symbol}:{window}:{mode}:{_since_bucket}"
+    _hit = _cache_get(_ck)
+    if _hit is not None:
+        return _hit
+    _persisted = _persistent_cache_get(_ck, max_age_ms=_RECOMMEND_PREMIUM_TTL_MS)
+    if _persisted is not None:
+        _cache_put(_ck, _persisted)
+        return _persisted
+
+    _t0 = _time.time()
     started = _now_iso()
     warnings_list = []
     errors_list = []
 
     # Always run FDR for transparency — it populates survives_fdr_q05 on every candidate
-    gs = grid_search(symbol, window, since_ms=since_ms, top_k=5, apply_fdr=True)
+    gs = grid_search(symbol, window, grid=_RECOMMEND_PREMIUM_GRID, since_ms=since_ms, top_k=5, apply_fdr=True)
     if gs["status"] != "ok":
-        return _envelope(
+        _early = _envelope(
             status=gs["status"],
             message=f"grid_search: {gs.get('message')}",
             metadata={"symbol": symbol, "window": window,
-                      "computed_at_utc": started, "mode": mode},
+                      "computed_at_utc": started, "mode": mode,
+                      "elapsed_s": round(_time.time() - _t0, 2)},
             result={"winner": None,
                     "reason": "grid_search returned no candidates",
                     "candidates_evaluated": 0},
             warnings=gs.get("warnings", []),
         )
+        _cache_put(_ck, _early)
+        _persistent_cache_put(_ck, _early, int((_time.time() - _t0) * 1000))
+        return _early
 
     candidates = gs["result"]["top"]
     if not candidates:
-        return _envelope(
+        _early = _envelope(
             status="no_data",
             message="grid_search top is empty",
             metadata={"symbol": symbol, "window": window,
-                      "computed_at_utc": started, "mode": mode},
+                      "computed_at_utc": started, "mode": mode,
+                      "elapsed_s": round(_time.time() - _t0, 2)},
             result={"winner": None,
                     "reason": "no FDR-surviving candidates",
                     "candidates_evaluated": 0,
                     "grid_metadata": gs["metadata"]},
             warnings=warnings_list,
         )
+        _cache_put(_ck, _early)
+        _persistent_cache_put(_ck, _early, int((_time.time() - _t0) * 1000))
+        return _early
 
     # In discovery mode we consider all top candidates regardless of FDR flag
     # (grid_search top_k=5 uses apply_fdr=True but returns all top-k rows, not
@@ -2713,11 +2776,12 @@ def recommend_premium_filter(
         no_winner_reason = "no candidate satisfied (walk-forward robust + test win_rate >= 0.55 + n >= 50 + p_raw < 0.05)"
 
     if winner is None:
-        return _envelope(
+        _result = _envelope(
             status="ok",
             message="no candidate passed all gates; returning highest-confidence runner-up",
             metadata={"symbol": symbol, "window": window,
-                      "computed_at_utc": started, "mode": mode},
+                      "computed_at_utc": started, "mode": mode,
+                      "elapsed_s": round(_time.time() - _t0, 2)},
             result={
                 "winner": None,
                 "reason": no_winner_reason,
@@ -2726,18 +2790,23 @@ def recommend_premium_filter(
             },
             warnings=warnings_list,
         )
+    else:
+        _result = _envelope(
+            status="ok",
+            metadata={"symbol": symbol, "window": window,
+                      "computed_at_utc": started, "mode": mode,
+                      "elapsed_s": round(_time.time() - _t0, 2)},
+            result={
+                "winner": winner,
+                "runners_up": runners,
+                "candidates_evaluated": len(evaluated),
+            },
+            warnings=warnings_list,
+        )
 
-    return _envelope(
-        status="ok",
-        metadata={"symbol": symbol, "window": window,
-                  "computed_at_utc": started, "mode": mode},
-        result={
-            "winner": winner,
-            "runners_up": runners,
-            "candidates_evaluated": len(evaluated),
-        },
-        warnings=warnings_list,
-    )
+    _cache_put(_ck, _result)
+    _persistent_cache_put(_ck, _result, int((_time.time() - _t0) * 1000))
+    return _result
 
 
 # ---------------------------------------------------------------------------
