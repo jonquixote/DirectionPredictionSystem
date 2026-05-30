@@ -16,6 +16,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import sqlite3
 import time
 import argparse
 import shutil
@@ -1222,7 +1223,15 @@ class PaperTrader:
                 except Exception as _ke:
                     logger.exception("kill_switch_check_failed", extra={"err": str(_ke)})
 
-                await self._run_predictions(now_ms, boundary_ms)
+                # Wrap prediction write path in try/except so a single sqlite
+                # 'database is locked' tick (from dashboard contention) logs
+                # and continues instead of crashing the whole process.
+                try:
+                    await self._run_predictions(now_ms, boundary_ms)
+                except sqlite3.OperationalError as e:
+                    logger.warning("run_predictions sqlite locked, skipping tick: %s", e)
+                except Exception as e:
+                    logger.exception("run_predictions_failed", extra={"err": str(e)})
 
                 # ── Periodic boundary tasks ──────────────────────────────
                 self._boundary_count += 1
@@ -1257,9 +1266,20 @@ class PaperTrader:
                     except Exception as e:
                         logger.exception("lifecycle_eval_failed", extra={"err": str(e)})
 
-            # Check pending resolutions
-            await self._check_trade_resolutions_v3(now_ms)
-            await self._check_prediction_resolutions_v3(now_ms)
+            # Check pending resolutions. Same lock-resilience as the
+            # prediction path — never crash the loop on a single locked tick.
+            try:
+                await self._check_trade_resolutions_v3(now_ms)
+            except sqlite3.OperationalError as e:
+                logger.warning("check_trade_resolutions sqlite locked: %s", e)
+            except Exception as e:
+                logger.exception("check_trade_resolutions_failed", extra={"err": str(e)})
+            try:
+                await self._check_prediction_resolutions_v3(now_ms)
+            except sqlite3.OperationalError as e:
+                logger.warning("check_prediction_resolutions sqlite locked: %s", e)
+            except Exception as e:
+                logger.exception("check_prediction_resolutions_failed", extra={"err": str(e)})
 
             await asyncio.sleep(1.0)
 
