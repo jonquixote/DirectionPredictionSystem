@@ -25,6 +25,11 @@ from typing import Any, Optional
 _CACHE: dict[str, tuple[float, Any]] = {}  # key → (computed_at_ts, payload)
 _CACHE_TTL_SECS = 300  # 5-minute boundary cycle
 _CACHE_MAX_ENTRIES = 256  # hard cap so unbounded key growth can't OOM the worker
+# Persistent cache TTL for the slow analysis endpoints. 5 min is too tight
+# when the precompute loop takes longer than one cycle to refresh all 13
+# pairs — falls through to cold compute on every request. 15 min keeps
+# warm reads <100 ms while staying within one acceptable staleness window.
+_PERSISTENT_CACHE_TTL_FULL_REPORT_MS = 15 * 60 * 1000
 
 
 def _cache_get(key: str) -> Any | None:
@@ -663,6 +668,15 @@ def compute_leaderboard(
     # the trailing 24h needs fresh predictions rows.
     if meta is None:
         meta = {}
+    # When the caller doesn't specify since_ms and isn't asking for full
+    # history, default to the same 30d bound _load_resolved_predictions uses
+    # so the rollup fast path engages instead of falling through to the slow
+    # 50k-row live aggregate. Snap to a 5-min boundary to keep cache keys
+    # stable across consecutive requests.
+    if since_ms is None and not full_history:
+        _now_ms = int(_time.time() * 1000)
+        _bucket_ms = 5 * 60 * 1000
+        since_ms = (((_now_ms - DEFAULT_HISTORY_DAYS * 86_400_000) // _bucket_ms) * _bucket_ms)
     if since_ms is not None and not full_history:
         rollup_result = compute_leaderboard_rollup(
             symbol=symbol,
@@ -992,8 +1006,11 @@ def compute_skip_conditions(
             meta["row_count_scanned"] = 0
             meta["full_history"] = full_history
         return _hit
-    # T1.2 persistent cache (shared across workers, repopulated by bg loop)
-    _persisted = _persistent_cache_get(_ck)
+    # T1.2 persistent cache (shared across workers, repopulated by bg loop).
+    # Use 15-min TTL so requests hit warm cache even when the precompute
+    # loop runs slow (default 5 min was tighter than the actual refresh
+    # cadence on a 50k-row prediction set).
+    _persisted = _persistent_cache_get(_ck, max_age_ms=_PERSISTENT_CACHE_TTL_FULL_REPORT_MS)
     if _persisted is not None:
         _cache_put(_ck, _persisted)
         if meta is not None:
@@ -1214,8 +1231,11 @@ def compute_full_report(
             meta["row_count_scanned"] = 0
             meta["full_history"] = full_history
         return _hit
-    # T1.2 persistent cache (shared across workers, repopulated by bg loop)
-    _persisted = _persistent_cache_get(_ck)
+    # T1.2 persistent cache (shared across workers, repopulated by bg loop).
+    # Use 15-min TTL so requests hit warm cache even when the precompute
+    # loop runs slow (default 5 min was tighter than the actual refresh
+    # cadence on a 50k-row prediction set).
+    _persisted = _persistent_cache_get(_ck, max_age_ms=_PERSISTENT_CACHE_TTL_FULL_REPORT_MS)
     if _persisted is not None:
         _cache_put(_ck, _persisted)
         if meta is not None:

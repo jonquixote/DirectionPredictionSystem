@@ -16,15 +16,18 @@ def open_database(db_path: str = DEFAULT_DB_PATH) -> sqlite3.Connection:
     """Open (and create if needed) the v3 SQLite database.
 
     Returns a connection with WAL journaling, foreign keys enforced,
-    and a 5-second busy timeout to handle multi-process contention
-    between the API server and the paper trader.
+    and a 30-second busy timeout to handle multi-process contention
+    between the API server (rollup/tier/governance loops) and the paper
+    trader (high-volume prediction writes). 5s was crashing the trader
+    on lock contention during retrain windows.
     """
     Path(db_path).parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(db_path, timeout=5.0, isolation_level=None)
+    conn = sqlite3.connect(db_path, timeout=30.0, isolation_level=None)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode = WAL")
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA synchronous = NORMAL")
+    conn.execute("PRAGMA busy_timeout = 30000")
     return conn
 
 

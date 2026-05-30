@@ -1100,30 +1100,61 @@ async def lifespan(app: FastAPI):
     # to "0" / "false" in /etc/v3/env to disable the loops until retrain
     # completes. Defaults preserve original behavior.
     _bg_enabled = lambda name, default="1": os.environ.get(name, default).lower() not in ("0", "false", "no", "off")  # noqa: E731
-    precompute_task = asyncio.create_task(_analysis_precompute_loop()) if _bg_enabled("V3_ANALYSIS_PRECOMPUTE_ENABLED") else None
-    if precompute_task is None:
-        logger.info("analysis precompute loop DISABLED via V3_ANALYSIS_PRECOMPUTE_ENABLED")
-    cutover_task = asyncio.create_task(_cutover_scheduler_loop())
-    tier_task = asyncio.create_task(_tier_scoring_loop())
-    governance_probation_task = asyncio.create_task(_governance_probation_loop())
-    governance_action_task = asyncio.create_task(_governance_action_loop())
-    rollup_task = asyncio.create_task(_rollup_loop()) if _bg_enabled("V3_ROLLUP_LOOP_ENABLED") else None
-    if rollup_task is None:
-        logger.info("rollup loop DISABLED via V3_ROLLUP_LOOP_ENABLED")
+
+    # Worker-leader election. uvicorn --workers N starts N independent
+    # lifespan handlers, so without this guard EVERY worker spawns the
+    # background loops, doubling WAL write pressure and producing
+    # redundant tier/rollup snapshots. The first worker to acquire the
+    # advisory file lock wins; later workers skip the heavy loops and
+    # only serve foreground requests. The lock is held for the lifetime
+    # of the worker process — it releases naturally on shutdown.
+    import fcntl
+    _BG_LOCK_PATH = "/tmp/v3-dashboard-bg.lock"
+    _bg_lock_fd: object | None = None
+    try:
+        _fd = open(_BG_LOCK_PATH, "w")
+        fcntl.flock(_fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        _bg_lock_fd = _fd
+        _is_bg_leader = True
+        logger.info("worker %s acquired background-loop leader lock", os.getpid())
+    except (BlockingIOError, OSError) as _e:
+        _is_bg_leader = False
+        logger.info("worker %s deferring background loops to leader (%s)", os.getpid(), _e)
+
+    precompute_task = None
+    cutover_task = None
+    tier_task = None
+    governance_probation_task = None
+    governance_action_task = None
+    rollup_task = None
+    if _is_bg_leader:
+        precompute_task = asyncio.create_task(_analysis_precompute_loop()) if _bg_enabled("V3_ANALYSIS_PRECOMPUTE_ENABLED") else None
+        if precompute_task is None:
+            logger.info("analysis precompute loop DISABLED via V3_ANALYSIS_PRECOMPUTE_ENABLED")
+        cutover_task = asyncio.create_task(_cutover_scheduler_loop())
+        tier_task = asyncio.create_task(_tier_scoring_loop())
+        governance_probation_task = asyncio.create_task(_governance_probation_loop())
+        governance_action_task = asyncio.create_task(_governance_action_loop())
+        rollup_task = asyncio.create_task(_rollup_loop()) if _bg_enabled("V3_ROLLUP_LOOP_ENABLED") else None
+        if rollup_task is None:
+            logger.info("rollup loop DISABLED via V3_ROLLUP_LOOP_ENABLED")
     logger.info(
         "Dashboard API ready — background refresh + analysis precompute "
-        "+ cutover scheduler + tier scoring + governance + rollup loops started"
+        "+ cutover scheduler + tier scoring + governance + rollup loops "
+        "started (bg_leader=%s)", _is_bg_leader,
     )
     yield
     task.cancel()
-    if precompute_task is not None:
-        precompute_task.cancel()
-    cutover_task.cancel()
-    tier_task.cancel()
-    governance_probation_task.cancel()
-    governance_action_task.cancel()
-    if rollup_task is not None:
-        rollup_task.cancel()
+    for _bg_task in (precompute_task, cutover_task, tier_task,
+                     governance_probation_task, governance_action_task,
+                     rollup_task):
+        if _bg_task is not None:
+            _bg_task.cancel()
+    if _bg_lock_fd is not None:
+        try:
+            _bg_lock_fd.close()
+        except Exception:
+            pass
     logger.info("Dashboard API shutting down")
 
 
