@@ -27,9 +27,10 @@ _CACHE_TTL_SECS = 300  # 5-minute boundary cycle
 _CACHE_MAX_ENTRIES = 256  # hard cap so unbounded key growth can't OOM the worker
 # Persistent cache TTL for the slow analysis endpoints. 5 min is too tight
 # when the precompute loop takes longer than one cycle to refresh all 13
-# pairs — falls through to cold compute on every request. 15 min keeps
-# warm reads <100 ms while staying within one acceptable staleness window.
-_PERSISTENT_CACHE_TTL_FULL_REPORT_MS = 15 * 60 * 1000
+# pairs — falls through to cold compute on every request. 30 min outlasts
+# the actual precompute cycle even when the ALL/ALL unfiltered view (which
+# itself iterates every pair) dominates the schedule.
+_PERSISTENT_CACHE_TTL_FULL_REPORT_MS = 30 * 60 * 1000
 
 
 def _cache_get(key: str) -> Any | None:
