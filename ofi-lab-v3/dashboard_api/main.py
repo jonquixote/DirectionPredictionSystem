@@ -450,17 +450,25 @@ def _run_governance_probation_tick() -> int:
                 )
 
             def _update_mwt_primary(model: str, model_primary_window: int, new_tier: str) -> None:
-                """Phase 57: update model_window_tier for primary window only."""
+                """Phase 57: update model_window_tier for primary window only.
+
+                Also writes the new tier back to the legacy model_registry.tier
+                column so the eligibility query (WHERE tier='watch') stops
+                re-selecting the same row every 15-min tick. Without this
+                mirror the same 9 models were getting promoted ~36×/hr
+                because mwt was updating but the SELECT still saw watch.
+                """
                 conn.execute(
                     "UPDATE model_window_tier SET tier = ?, kelly_multiplier = ?, "
                     "tier_assigned_at = ?, tier_assigned_by = 'auto:probation_evaluator' "
                     "WHERE model_name = ? AND market_window_seconds = ?",
                     (new_tier, _TIER_KELLY[new_tier], now_iso, model, model_primary_window),
                 )
-                # Also update model_registry.tier_assigned_at as breadcrumb (not tier/kelly)
                 conn.execute(
-                    "UPDATE model_registry SET tier_assigned_at = ? WHERE name = ?",
-                    (now_iso, model),
+                    "UPDATE model_registry SET tier = ?, kelly_multiplier = ?, "
+                    "tier_assigned_at = ?, tier_assigned_by = 'auto:probation_evaluator' "
+                    "WHERE name = ?",
+                    (new_tier, _TIER_KELLY[new_tier], now_iso, model),
                 )
 
             # No scores at all — challenger never scored. Retire immediately.
@@ -1035,6 +1043,49 @@ async def _rollup_loop():
             return
 
 
+_WAL_CHECKPOINT_INTERVAL_S = 300  # 5 min
+_WAL_CHECKPOINT_BOOT_DELAY_S = 90
+
+
+def _run_wal_checkpoint() -> tuple[int, int, int]:
+    """Run PASSIVE checkpoint to merge WAL into the main db file.
+
+    Returns (busy, log_pages, checkpointed_pages). PASSIVE mode never
+    blocks on active readers/writers, so this is safe to call alongside
+    the predict/dispatch path. Without periodic checkpoints the WAL
+    grows past 100 MB under our write rate, which lengthens lock-wait
+    durations and produces the 'database is locked' crashes we keep
+    chasing in the trader.
+    """
+    try:
+        from services.db import get_db  # type: ignore
+    except ModuleNotFoundError:
+        from dashboard_api.services.db import get_db  # type: ignore
+    conn = get_db()
+    row = conn.execute("PRAGMA wal_checkpoint(PASSIVE)").fetchone()
+    if row is None:
+        return (0, 0, 0)
+    return (int(row[0] or 0), int(row[1] or 0), int(row[2] or 0))
+
+
+async def _wal_checkpoint_loop():
+    """Background loop: every 5 min, force a PASSIVE WAL checkpoint."""
+    try:
+        await asyncio.sleep(_WAL_CHECKPOINT_BOOT_DELAY_S)
+    except asyncio.CancelledError:
+        return
+    while True:
+        try:
+            busy, log_pages, ckpt_pages = await asyncio.to_thread(_run_wal_checkpoint)
+            logger.info("wal checkpoint: busy=%d log_pages=%d ckpt_pages=%d", busy, log_pages, ckpt_pages)
+        except Exception as exc:
+            logger.warning("wal checkpoint failed: %s", exc)
+        try:
+            await asyncio.sleep(_WAL_CHECKPOINT_INTERVAL_S)
+        except asyncio.CancelledError:
+            return
+
+
 def compute_full_backfill(conn, days: int = 90) -> int:
     """One-shot backfill: upsert rollup rows for the last ``days`` calendar days.
 
@@ -1127,6 +1178,7 @@ async def lifespan(app: FastAPI):
     governance_probation_task = None
     governance_action_task = None
     rollup_task = None
+    wal_checkpoint_task = None
     if _is_bg_leader:
         precompute_task = asyncio.create_task(_analysis_precompute_loop()) if _bg_enabled("V3_ANALYSIS_PRECOMPUTE_ENABLED") else None
         if precompute_task is None:
@@ -1138,6 +1190,7 @@ async def lifespan(app: FastAPI):
         rollup_task = asyncio.create_task(_rollup_loop()) if _bg_enabled("V3_ROLLUP_LOOP_ENABLED") else None
         if rollup_task is None:
             logger.info("rollup loop DISABLED via V3_ROLLUP_LOOP_ENABLED")
+        wal_checkpoint_task = asyncio.create_task(_wal_checkpoint_loop())
     logger.info(
         "Dashboard API ready — background refresh + analysis precompute "
         "+ cutover scheduler + tier scoring + governance + rollup loops "
@@ -1147,7 +1200,7 @@ async def lifespan(app: FastAPI):
     task.cancel()
     for _bg_task in (precompute_task, cutover_task, tier_task,
                      governance_probation_task, governance_action_task,
-                     rollup_task):
+                     rollup_task, wal_checkpoint_task):
         if _bg_task is not None:
             _bg_task.cancel()
     if _bg_lock_fd is not None:

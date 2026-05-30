@@ -28,6 +28,12 @@ def open_database(db_path: str = DEFAULT_DB_PATH) -> sqlite3.Connection:
     conn.execute("PRAGMA foreign_keys = ON")
     conn.execute("PRAGMA synchronous = NORMAL")
     conn.execute("PRAGMA busy_timeout = 30000")
+    # Auto-checkpoint more aggressively (default = 1000 pages ~ 4 MB).
+    # Without this the WAL grows past 100 MB under our write rate
+    # (predictions + tier_score + rollup + governance_actions) and
+    # explicit checkpoints contend with active writers, producing
+    # 'database is locked' crashes. 200 pages = ~800 KB threshold.
+    conn.execute("PRAGMA wal_autocheckpoint = 200")
     return conn
 
 
