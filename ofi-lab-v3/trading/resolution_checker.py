@@ -101,12 +101,20 @@ class ResolutionChecker:
             " FROM paper_trades WHERE resolved = 0 AND ts_resolve_at_ms <= ?",
             (now_ms,),
         ).fetchall()
+        skipped_no_price = 0
+        resolved_n = 0
         for row in rows:
             try:
                 close = self._feature_computer.price_at(
                     row["symbol"], row["ts_resolve_at_ms"]
                 )
             except (KeyError, AttributeError):
+                # price_at scans an in-memory ~40-min buffer; anything older
+                # than that (e.g. trades opened before the most recent
+                # trader restart) cannot be resolved here. Track + log so
+                # silent skips don't accumulate invisibly into a 25k-row
+                # backlog like we saw 2026-05-30.
+                skipped_no_price += 1
                 continue
             pred = self._db_conn.execute(
                 "SELECT price_at_open FROM predictions WHERE prediction_id = ?",
@@ -132,6 +140,13 @@ class ResolutionChecker:
                 net_pnl=net,
                 trade_result="win" if correct else "loss",
                 pnl_method="binary_polymarket",
+            )
+            resolved_n += 1
+
+        if rows and (skipped_no_price >= 50 or (skipped_no_price > 0 and resolved_n == 0)):
+            logger.warning(
+                "check_trades: resolved=%d skipped_no_price=%d (in-memory price buffer missing)",
+                resolved_n, skipped_no_price,
             )
 
     # ------------------------------------------------------------------
