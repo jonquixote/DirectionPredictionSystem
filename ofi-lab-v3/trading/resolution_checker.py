@@ -23,6 +23,7 @@ class ResolutionChecker:
     def __init__(self, db_conn, sqlite_ledger, feature_computer, calibrators, pending_queue):
         self._db_conn = db_conn
         self._sqlite_ledger = sqlite_ledger
+        self._last_skip_warn_ts = 0.0  # rate-limit no_price warnings to once per 5 min
         self._feature_computer = feature_computer
         self._calibrators = calibrators
         self._pending_queue = pending_queue
@@ -94,6 +95,27 @@ class ResolutionChecker:
         Uses Polymarket-style binary option PnL math (fee coef 0.072).
         Plan B extends this to a per-platform fee model.
         """
+        # Auto-abandon trades whose resolve_at is older than the in-memory
+        # price buffer (~40 min) by a 20-min safety margin. price_at can
+        # never recover those, so they otherwise pollute the per-second
+        # SELECT scan with N hundred no-op rows forever.
+        stale_cutoff_ms = now_ms - 60 * 60 * 1000  # 60 min
+        cur = self._db_conn.execute(
+            "UPDATE paper_trades"
+            " SET resolved=1, net_pnl=0, gross_pnl=0, fee_paid=0,"
+            "     contract_result='unresolved', trade_result='abandoned',"
+            "     pnl_method='abandoned_stale_no_price', ts_resolved_ms=?"
+            " WHERE resolved=0 AND ts_resolve_at_ms < ?",
+            (now_ms, stale_cutoff_ms),
+        )
+        abandoned_n = cur.rowcount or 0
+        if abandoned_n > 0:
+            logger.warning(
+                "check_trades: auto-abandoned %d trades older than 60min "
+                "(price buffer can't recover them)",
+                abandoned_n,
+            )
+
         rows = self._db_conn.execute(
             "SELECT trade_id, prediction_id, symbol,"
             " ts_resolve_at_ms, pred_proba_calibrated, pred_direction,"
@@ -144,10 +166,14 @@ class ResolutionChecker:
             resolved_n += 1
 
         if rows and (skipped_no_price >= 50 or (skipped_no_price > 0 and resolved_n == 0)):
-            logger.warning(
-                "check_trades: resolved=%d skipped_no_price=%d (in-memory price buffer missing)",
-                resolved_n, skipped_no_price,
-            )
+            import time as _time
+            _now = _time.time()
+            if (_now - self._last_skip_warn_ts) >= 300:  # 5-min dedup
+                logger.warning(
+                    "check_trades: resolved=%d skipped_no_price=%d (in-memory price buffer missing)",
+                    resolved_n, skipped_no_price,
+                )
+                self._last_skip_warn_ts = _now
 
     # ------------------------------------------------------------------
     # Helpers (kept as instance methods so check_predictions can call them
