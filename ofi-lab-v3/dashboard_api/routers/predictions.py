@@ -125,6 +125,13 @@ def _enrich_prediction(p: dict) -> dict:
     return {
         "prediction_id": p.get("prediction_id"),
         "ts_model_ran_ms": p.get("ts_model_ran_ms"),
+        # Market-window timing — caller needs these to know when the
+        # contract actually opens / closes vs when the model ran.
+        "ts_contract_open_ms": p.get("ts_contract_open_ms"),
+        "ts_resolve_at_ms": p.get("ts_resolve_at_ms"),
+        "ts_resolved_ms": p.get("ts_resolved_ms"),
+        "resolved": p.get("resolved", False),
+        "contract_duration_seconds": p.get("contract_duration_seconds"),
         "symbol": p.get("symbol"),
         "model": p.get("model"),
         "pred_direction": p.get("pred_direction"),
@@ -137,5 +144,6 @@ def _enrich_prediction(p: dict) -> dict:
         "features": p.get("features", {}),
         "trade_id": p.get("trade_id"),
         "outcome": p.get("outcome"),
+        "prediction_correct": p.get("prediction_correct"),
         "realized_net": realized_net,
     }
