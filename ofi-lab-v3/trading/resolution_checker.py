@@ -96,10 +96,10 @@ class ResolutionChecker:
         Plan B extends this to a per-platform fee model.
         """
         # Auto-abandon trades whose resolve_at is older than the in-memory
-        # price buffer (~40 min) by a 20-min safety margin. price_at can
-        # never recover those, so they otherwise pollute the per-second
-        # SELECT scan with N hundred no-op rows forever.
-        stale_cutoff_ms = now_ms - 60 * 60 * 1000  # 60 min
+        # price buffer (~40 min). Use a 5-min safety margin to absorb clock
+        # skew but tighter than the previous 60-min cutoff, which left a
+        # 20-min window of skip-loop spam (saw 386 stuck rows 2026-05-30).
+        stale_cutoff_ms = now_ms - 45 * 60 * 1000  # 45 min
         cur = self._db_conn.execute(
             "UPDATE paper_trades"
             " SET resolved=1, net_pnl=0, gross_pnl=0, fee_paid=0,"
