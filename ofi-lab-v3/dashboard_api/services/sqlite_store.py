@@ -286,7 +286,11 @@ class DataStore:
         elif outcome == "incorrect":
             clauses.append("prediction_correct = 0")
         elif outcome == "unresolved":
-            clauses.append("prediction_correct IS NULL")
+            # 'unresolved' means the contract hasn't closed yet — i.e. resolved=0.
+            # The 'abandoned stale' cleanup path also sets prediction_correct=NULL
+            # with resolved=1 + contract_result='unresolved'; those should NOT
+            # appear in the unresolved count.
+            clauses.append("resolved = 0")
         if contract_duration is not None:
             clauses.append("market_window_seconds = ?")
             params.append(contract_duration)
@@ -339,7 +343,10 @@ class DataStore:
         elif outcome == "incorrect":
             clauses.append("t.prediction_correct = 0")
         elif outcome == "unresolved":
-            clauses.append("t.prediction_correct IS NULL")
+            # 'unresolved' means resolved=0 (contract hasn't closed). Abandoned
+            # stale rows have prediction_correct=NULL but resolved=1 and
+            # should NOT count as unresolved.
+            clauses.append("t.resolved = 0")
         if contract_duration is not None:
             clauses.append("t.market_window_seconds = ?")
             params.append(contract_duration)
