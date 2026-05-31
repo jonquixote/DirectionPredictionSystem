@@ -43,7 +43,9 @@ async def _proxy(method: str, path: str, request: Request) -> Response:
         headers["Content-Type"] = request.headers.get("content-type", "application/json")
 
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
+        # 30s timeout — Kalshi REST upstream can take 7-15s under load
+        # and 10s was tipping balance reads to 502.
+        async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.request(
                 method, url, content=body, headers=headers,
             )
@@ -58,10 +60,19 @@ async def _proxy(method: str, path: str, request: Request) -> Response:
             status_code=503,
             media_type="application/json",
         )
+    except (httpx.ReadTimeout, httpx.ConnectTimeout, httpx.WriteTimeout) as e:
+        # Distinguish proxy timeout from generic 502 so the frontend can
+        # render a useful 'try again' instead of 'proxy error: '.
+        logger.warning("kalshi proxy timeout: %s -> %s (%s)", method, path, type(e).__name__)
+        return Response(
+            content=f'{{"error":"proxy timeout after 30s: {type(e).__name__}"}}',
+            status_code=504,
+            media_type="application/json",
+        )
     except Exception as e:
         logger.exception("kalshi proxy error")
         return Response(
-            content=f'{{"error":"proxy error: {e}"}}',
+            content=f'{{"error":"proxy error: {type(e).__name__}: {e}"}}',
             status_code=502,
             media_type="application/json",
         )
