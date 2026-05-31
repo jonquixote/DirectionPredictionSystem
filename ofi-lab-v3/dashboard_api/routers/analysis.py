@@ -428,6 +428,72 @@ async def api_recommend_premium(body: RecommendPremiumRequest):
     )
 
 
+# ---------------------------------------------------------------------------
+# Lineage analytics — Tier 1 of the model-lineage spec
+# (docs/2026-05-31-model-lineage-analytics-spec.md)
+# ---------------------------------------------------------------------------
+
+try:
+    from services.lineage import (  # type: ignore
+        compute_best_per_cell,
+        compute_cell_history,
+        list_cells,
+        LEADERBOARD_METRICS,
+    )
+except ModuleNotFoundError:
+    from dashboard_api.services.lineage import (  # type: ignore[no-redef]
+        compute_best_per_cell,
+        compute_cell_history,
+        list_cells,
+        LEADERBOARD_METRICS,
+    )
+
+
+@router.get("/analysis/best-per-cell")
+async def api_best_per_cell(
+    metric: str = Query("composite", description="composite|roi|win_rate|sharpe"),
+    since_ms: int | None = Query(None, description="Default = now - 14d"),
+    min_n_samples: int = Query(50, ge=1, description="Drop models with fewer than N rollup samples"),
+    top_k_runners: int = Query(3, ge=0, le=10, description="Runners-up returned per cell"),
+):
+    """Best model per (symbol, market_window) — 12 cells (4 symbols × 3 windows)."""
+    if metric not in LEADERBOARD_METRICS:
+        raise HTTPException(status_code=422, detail=f"metric must be one of {sorted(LEADERBOARD_METRICS)}")
+    return await asyncio.to_thread(
+        compute_best_per_cell,
+        metric=metric,
+        since_ms=since_ms,
+        min_n_samples=min_n_samples,
+        top_k_runners=top_k_runners,
+    )
+
+
+@router.get("/analysis/cell-history")
+async def api_cell_history(
+    cell_key: str = Query(..., description="SYMBOL_HORIZON_TRAININGDAYS (e.g. BTCUSDT_300_179)"),
+    since_ms: int | None = Query(None, description="Default = oldest train_window_end in cell"),
+):
+    """Per-fleet history for one cell, with daily series per market window."""
+    try:
+        return await asyncio.to_thread(
+            compute_cell_history,
+            cell_key=cell_key,
+            since_ms=since_ms,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
+
+
+@router.get("/analysis/cell-list")
+async def api_cell_list():
+    """All registered cells with their current incumbent.
+
+    Pure index. Lets the frontend populate dropdowns and the matrix grid
+    without fetching the heavier best-per-cell payload first.
+    """
+    return await asyncio.to_thread(list_cells)
+
+
 @router.get("/analysis/decay-alerts")
 async def api_decay_alerts(
     since_ms: int | None = Query(None, description="Only return alerts after this timestamp_ms"),
