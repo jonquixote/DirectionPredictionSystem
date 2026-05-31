@@ -40,7 +40,38 @@ class ResolutionChecker:
         calibration feedback. Each resolved row is removed from the
         queue. The queue is persisted at the end so a crash mid-loop
         leaves the partially-resolved state recoverable.
+
+        Auto-abandon: predictions whose resolve_at is older than the
+        ~40-min in-memory price buffer can never be resolved here.
+        Mark them resolved=1 with contract_result='unresolved' and
+        prediction_correct=NULL so they stop padding the pending
+        count + drop them from the in-memory queue. Same 45-min
+        cutoff as check_trades for consistency.
         """
+        stale_cutoff_ms = now_ms - 45 * 60 * 1000
+        cur = self._db_conn.execute(
+            "UPDATE predictions"
+            " SET resolved=1, ts_resolved_ms=?,"
+            "     contract_result='unresolved', prediction_correct=NULL"
+            " WHERE resolved=0 AND ts_resolve_at_ms < ?",
+            (now_ms, stale_cutoff_ms),
+        )
+        abandoned_n = cur.rowcount or 0
+        if abandoned_n > 0:
+            logger.warning(
+                "check_predictions: auto-abandoned %d predictions older "
+                "than 45min (price buffer can't recover them)",
+                abandoned_n,
+            )
+            # Trim the in-memory queue too — entries past the cutoff will
+            # never resolve via price_at().
+            stale_pids = [
+                e.prediction_id for e in list(self._pending_queue.iter_all())
+                if e.ts_resolve_at_ms < stale_cutoff_ms
+            ] if hasattr(self._pending_queue, "iter_all") else []
+            for pid in stale_pids:
+                self._pending_queue.remove(pid)
+
         ripe = list(self._pending_queue.iter_ripe(now_ms))
         if not ripe:
             return
