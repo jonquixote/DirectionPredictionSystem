@@ -37,6 +37,32 @@ MARKET_WINDOWS = (300, 900, 1800)
 COMPOSITE_METRIC = "composite"
 LEADERBOARD_METRICS = ("composite", "roi", "win_rate", "sharpe")
 
+# Regime dimensions captured at prediction time. The trader writes these
+# alongside every row in `predictions`, so we can slice cell performance by
+# any subset without joining to regime_features_latest.
+REGIME_DIMENSIONS = ("regime_volatility", "regime_liquidity", "regime_trend")
+
+# Buckets for pre-prediction market state proxies. p_market is what the
+# Kalshi book implied at the moment the model fired; p_model_minus_market
+# is the signed divergence (positive = model thinks the side is more likely
+# than market does). These two axes are the cleanest "what was the market
+# saying BEFORE the model predicted" signal we already store.
+P_MARKET_BUCKETS = (
+    ("near_0", 0.0, 0.15),
+    ("0.15_0.35", 0.15, 0.35),
+    ("0.35_0.50", 0.35, 0.50),
+    ("0.50_0.65", 0.50, 0.65),
+    ("0.65_0.85", 0.65, 0.85),
+    ("near_1", 0.85, 1.01),
+)
+DIVERGENCE_BUCKETS = (
+    ("strong_against", -1.01, -0.10),
+    ("mild_against", -0.10, -0.02),
+    ("aligned", -0.02, 0.02),
+    ("mild_with", 0.02, 0.10),
+    ("strong_with", 0.10, 1.01),
+)
+
 
 def _wilson_ci(wins: int, n: int, z: float = 1.96) -> tuple[float, float] | tuple[None, None]:
     """Wilson 95% lower + upper bound for a binomial proportion."""
@@ -486,5 +512,419 @@ def compute_cell_history(cell_key: str, since_ms: int | None = None) -> dict:
             "since_ms": since_ms,
             "since_date": since_date,
             "n_fleets": len(fleets),
+        },
+    }
+
+
+# ===========================================================================
+# Regime + market-context analytics (Tier 2)
+#
+# Slice cell performance by:
+#   - regime_volatility × regime_liquidity × regime_trend triplet
+#   - pre-prediction market state proxies (p_market bucket, p_model_minus_market bucket)
+#   - hour-of-day / day-of-week
+#
+# All three regime dims + p_market + p_model_minus_market are columns on
+# `predictions`, captured at the moment the model fired. So the joins are
+# none — we scan the predictions table directly with WHERE filters. With
+# typical cell scope (one model_name, one market_window, ~30d of 5-min
+# boundaries = ~8k rows) the scan is comfortably under 100ms.
+# ===========================================================================
+
+
+def _wilson_lo(wins: int, n: int) -> float | None:
+    if n <= 0:
+        return None
+    return _wilson_ci(wins, n)[0]
+
+
+def _fleet_models_for_cell(db, symbol: str, horizon: int, train_days: int) -> list[dict]:
+    """All models in this cell, newest fleet first. Includes retired fleets."""
+    rows = db.execute(
+        """
+        SELECT name, fleet_version, paper_active
+        FROM model_registry
+        WHERE symbol=? AND training_horizon_seconds=? AND train_days=?
+        ORDER BY fleet_version DESC, created_at DESC
+        """,
+        (symbol, horizon, train_days),
+    ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def compute_cell_regime_breakdown(
+    cell_key: str,
+    market_window: int | None = None,
+    since_ms: int | None = None,
+    min_n: int = 10,
+) -> dict:
+    """Per-regime performance for every model in this cell.
+
+    For each (fleet's model) × (market_window) × (regime triplet), reports
+    n, win_rate (with Wilson 95% CI), and avg PnL realized.
+
+    Aggregated client-side from `predictions` rather than the daily rollup
+    because the rollup throws away the regime columns.
+    """
+    symbol, horizon, train_days = _parse_cell_key(cell_key)
+    if since_ms is None:
+        since_ms = int(_time.time() * 1000) - 30 * 86_400_000
+    market_windows = [market_window] if market_window else list(MARKET_WINDOWS)
+
+    db = _get_db()
+    models = _fleet_models_for_cell(db, symbol, horizon, train_days)
+    if not models:
+        return {
+            "cell_key": cell_key,
+            "symbol": symbol,
+            "training_horizon_seconds": horizon,
+            "train_days": train_days,
+            "since_ms": since_ms,
+            "market_windows": market_windows,
+            "models": [],
+            "metadata": {"computed_at_ms": int(_time.time() * 1000)},
+        }
+
+    placeholder_names = ",".join("?" for _ in models)
+    name_params = [m["name"] for m in models]
+
+    out_models: list[dict] = []
+    for mw in market_windows:
+        # One round-trip per market window, grouped by (model_name, regime triplet)
+        rows = db.execute(
+            f"""
+            SELECT
+                model_name,
+                COALESCE(regime_volatility, '?')  AS rv,
+                COALESCE(regime_liquidity, '?')   AS rl,
+                COALESCE(regime_trend, '?')       AS rt,
+                COUNT(*)                          AS n,
+                SUM(prediction_correct)           AS n_correct,
+                AVG(p_market)                     AS avg_p_market,
+                AVG(pred_proba_calibrated)        AS avg_p_model,
+                AVG(p_model_minus_market)         AS avg_divergence,
+                AVG(CASE WHEN price_at_close IS NOT NULL AND price_at_open IS NOT NULL AND price_at_open > 0
+                    THEN (price_at_close - price_at_open) / price_at_open ELSE NULL END) AS avg_price_move
+            FROM predictions
+            WHERE model_name IN ({placeholder_names})
+              AND symbol = ? AND market_window_seconds = ?
+              AND resolved = 1 AND warmup = 0
+              AND ts_contract_open_ms >= ?
+            GROUP BY model_name, rv, rl, rt
+            HAVING n >= ?
+            ORDER BY n DESC
+            """,
+            (*name_params, symbol, mw, since_ms, min_n),
+        ).fetchall()
+        by_model: dict[str, list[dict]] = {}
+        for r in rows:
+            mn = r["model_name"]
+            n = int(r["n"])
+            nc = int(r["n_correct"] or 0)
+            wr_lo, wr_hi = _wilson_ci(nc, n)
+            entry = {
+                "regime_volatility": r["rv"],
+                "regime_liquidity": r["rl"],
+                "regime_trend": r["rt"],
+                "n": n,
+                "n_correct": nc,
+                "win_rate": round(nc / n, 6) if n else None,
+                "win_rate_ci_lo": round(wr_lo, 6) if wr_lo is not None else None,
+                "win_rate_ci_hi": round(wr_hi, 6) if wr_hi is not None else None,
+                "avg_p_market": round(r["avg_p_market"], 4) if r["avg_p_market"] is not None else None,
+                "avg_p_model": round(r["avg_p_model"], 4) if r["avg_p_model"] is not None else None,
+                "avg_divergence": round(r["avg_divergence"], 4) if r["avg_divergence"] is not None else None,
+                "avg_price_move_pct": round((r["avg_price_move"] or 0) * 100, 4) if r["avg_price_move"] is not None else None,
+            }
+            by_model.setdefault(mn, []).append(entry)
+        for mn, buckets in by_model.items():
+            out_models.append({
+                "model_name": mn,
+                "market_window_seconds": mw,
+                "fleet_version": next((m["fleet_version"] for m in models if m["name"] == mn), None),
+                "n_regime_buckets": len(buckets),
+                "regime_buckets": buckets,
+            })
+    return {
+        "cell_key": cell_key,
+        "symbol": symbol,
+        "training_horizon_seconds": horizon,
+        "train_days": train_days,
+        "since_ms": since_ms,
+        "market_windows": market_windows,
+        "models": out_models,
+        "metadata": {
+            "computed_at_ms": int(_time.time() * 1000),
+            "min_n": min_n,
+            "n_models": len(models),
+        },
+    }
+
+
+def _bucket_value(v: float | None, buckets) -> str | None:
+    if v is None:
+        return None
+    for label, lo, hi in buckets:
+        if lo <= v < hi:
+            return label
+    return None
+
+
+def compute_context_outcome_correlation(
+    cell_key: str,
+    market_window: int | None = None,
+    since_ms: int | None = None,
+    min_n: int = 5,
+) -> dict:
+    """3-way correlation: pre-prediction market state × model output × outcome.
+
+    For each (model, market_window) we compute two 2-D heatmaps:
+
+      (A) p_market_bucket × divergence_bucket -> {n, win_rate, avg_price_move}
+          "When the market said X and our model diverged by Y, did we win?"
+
+      (B) regime_volatility × utc_hour_bucket -> {n, win_rate}
+          "Does our edge survive different times of day under different vol?"
+
+    Heatmap (A) is the closer match to what the user asked for — it
+    directly answers "what was the market doing right before we predicted,
+    and did our prediction correlate with the outcome?" p_market is the
+    Kalshi book's implied probability AT the boundary, captured by the
+    trader inside the prediction row. p_model_minus_market is the signed
+    divergence (positive = model thought side was more likely than market).
+    """
+    symbol, horizon, train_days = _parse_cell_key(cell_key)
+    if since_ms is None:
+        since_ms = int(_time.time() * 1000) - 30 * 86_400_000
+    market_windows = [market_window] if market_window else list(MARKET_WINDOWS)
+
+    db = _get_db()
+    models = _fleet_models_for_cell(db, symbol, horizon, train_days)
+    if not models:
+        return {
+            "cell_key": cell_key,
+            "symbol": symbol,
+            "training_horizon_seconds": horizon,
+            "train_days": train_days,
+            "since_ms": since_ms,
+            "market_windows": market_windows,
+            "models": [],
+            "metadata": {"computed_at_ms": int(_time.time() * 1000)},
+        }
+    placeholder_names = ",".join("?" for _ in models)
+    name_params = [m["name"] for m in models]
+
+    out_models: list[dict] = []
+    for mw in market_windows:
+        rows = db.execute(
+            f"""
+            SELECT
+                model_name,
+                p_market,
+                p_model_minus_market,
+                COALESCE(regime_volatility, '?') AS rv,
+                utc_hour,
+                prediction_correct,
+                price_at_open,
+                price_at_close
+            FROM predictions
+            WHERE model_name IN ({placeholder_names})
+              AND symbol = ? AND market_window_seconds = ?
+              AND resolved = 1 AND warmup = 0
+              AND ts_contract_open_ms >= ?
+            """,
+            (*name_params, symbol, mw, since_ms),
+        ).fetchall()
+
+        # Bucket client-side so we can express bucket ranges compactly.
+        per_model: dict[str, dict] = {}
+        for r in rows:
+            mn = r["model_name"]
+            pm = r["p_market"]
+            div = r["p_model_minus_market"]
+            rv = r["rv"]
+            uh = r["utc_hour"]
+            correct = bool(r["prediction_correct"])
+            price_open = r["price_at_open"]
+            price_close = r["price_at_close"]
+            move_pct = None
+            if (price_open is not None and price_close is not None
+                    and price_open > 0):
+                move_pct = (price_close - price_open) / price_open
+
+            pm_bucket = _bucket_value(pm, P_MARKET_BUCKETS)
+            div_bucket = _bucket_value(div, DIVERGENCE_BUCKETS)
+            # 4-hour utc buckets: 0-3, 4-7, 8-11, 12-15, 16-19, 20-23
+            uh_bucket = f"{(uh // 4) * 4:02d}-{((uh // 4) * 4) + 3:02d}" if uh is not None else None
+
+            cell_a = per_model.setdefault(mn, {
+                "matrix_a": {},
+                "matrix_b": {},
+                "n_total": 0,
+                "n_correct": 0,
+                "sum_price_move_pct": 0.0,
+                "n_price_move_seen": 0,
+            })
+            cell_a["n_total"] += 1
+            if correct:
+                cell_a["n_correct"] += 1
+            if move_pct is not None:
+                cell_a["sum_price_move_pct"] += move_pct
+                cell_a["n_price_move_seen"] += 1
+
+            if pm_bucket and div_bucket:
+                key = (pm_bucket, div_bucket)
+                a = cell_a["matrix_a"].setdefault(key, {"n": 0, "n_correct": 0, "sum_move": 0.0, "n_move": 0})
+                a["n"] += 1
+                if correct:
+                    a["n_correct"] += 1
+                if move_pct is not None:
+                    a["sum_move"] += move_pct
+                    a["n_move"] += 1
+
+            if uh_bucket:
+                bkey = (rv, uh_bucket)
+                b = cell_a["matrix_b"].setdefault(bkey, {"n": 0, "n_correct": 0})
+                b["n"] += 1
+                if correct:
+                    b["n_correct"] += 1
+
+        for mn, data in per_model.items():
+            matrix_a_rows = []
+            for (pm_bucket, div_bucket), agg in data["matrix_a"].items():
+                if agg["n"] < min_n:
+                    continue
+                wr_lo, _ = _wilson_ci(agg["n_correct"], agg["n"])
+                matrix_a_rows.append({
+                    "p_market_bucket": pm_bucket,
+                    "divergence_bucket": div_bucket,
+                    "n": agg["n"],
+                    "win_rate": round(agg["n_correct"] / agg["n"], 6),
+                    "win_rate_lo_95": round(wr_lo, 6) if wr_lo is not None else None,
+                    "avg_price_move_pct": (
+                        round((agg["sum_move"] / agg["n_move"]) * 100, 4)
+                        if agg["n_move"] else None
+                    ),
+                })
+            matrix_b_rows = []
+            for (rv, uh_bucket), agg in data["matrix_b"].items():
+                if agg["n"] < min_n:
+                    continue
+                wr_lo, _ = _wilson_ci(agg["n_correct"], agg["n"])
+                matrix_b_rows.append({
+                    "regime_volatility": rv,
+                    "utc_hour_bucket": uh_bucket,
+                    "n": agg["n"],
+                    "win_rate": round(agg["n_correct"] / agg["n"], 6),
+                    "win_rate_lo_95": round(wr_lo, 6) if wr_lo is not None else None,
+                })
+            # Sort for stable rendering
+            matrix_a_rows.sort(key=lambda x: (x["p_market_bucket"], x["divergence_bucket"]))
+            matrix_b_rows.sort(key=lambda x: (x["regime_volatility"], x["utc_hour_bucket"]))
+            out_models.append({
+                "model_name": mn,
+                "market_window_seconds": mw,
+                "fleet_version": next((m["fleet_version"] for m in models if m["name"] == mn), None),
+                "n_total": data["n_total"],
+                "win_rate_overall": (
+                    round(data["n_correct"] / data["n_total"], 6)
+                    if data["n_total"] else None
+                ),
+                "avg_price_move_pct": (
+                    round((data["sum_price_move_pct"] / data["n_price_move_seen"]) * 100, 4)
+                    if data["n_price_move_seen"] else None
+                ),
+                "matrix_p_market_x_divergence": matrix_a_rows,
+                "matrix_volatility_x_utc_hour": matrix_b_rows,
+            })
+
+    return {
+        "cell_key": cell_key,
+        "symbol": symbol,
+        "training_horizon_seconds": horizon,
+        "train_days": train_days,
+        "since_ms": since_ms,
+        "market_windows": market_windows,
+        "models": out_models,
+        "metadata": {
+            "computed_at_ms": int(_time.time() * 1000),
+            "min_n": min_n,
+            "p_market_buckets": [b[0] for b in P_MARKET_BUCKETS],
+            "divergence_buckets": [b[0] for b in DIVERGENCE_BUCKETS],
+        },
+    }
+
+
+def compute_cell_hourly_series(
+    cell_key: str,
+    market_window: int = 300,
+    since_ms: int | None = None,
+) -> dict:
+    """Hourly win-rate per fleet model over time.
+
+    Daily rollups are too coarse for 5-min markets — at 288 boundaries/day
+    you can lose a regime shift in the noise. This gives one row per
+    (model_name, hour_utc) so the UI can plot fine-grained trend lines.
+    """
+    symbol, horizon, train_days = _parse_cell_key(cell_key)
+    if since_ms is None:
+        since_ms = int(_time.time() * 1000) - 14 * 86_400_000
+
+    db = _get_db()
+    models = _fleet_models_for_cell(db, symbol, horizon, train_days)
+    placeholder_names = ",".join("?" for _ in models) if models else "''"
+    name_params = [m["name"] for m in models]
+
+    rows = db.execute(
+        f"""
+        SELECT
+            model_name,
+            strftime('%Y-%m-%dT%H', datetime(ts_contract_open_ms/1000, 'unixepoch')) AS hour_utc,
+            COUNT(*) AS n,
+            SUM(prediction_correct) AS n_correct,
+            AVG(p_market) AS avg_p_market,
+            AVG(p_model_minus_market) AS avg_divergence
+        FROM predictions
+        WHERE model_name IN ({placeholder_names})
+          AND symbol = ? AND market_window_seconds = ?
+          AND resolved = 1 AND warmup = 0
+          AND ts_contract_open_ms >= ?
+        GROUP BY model_name, hour_utc
+        ORDER BY hour_utc
+        """,
+        (*name_params, symbol, market_window, since_ms),
+    ).fetchall() if models else []
+
+    by_model: dict[str, list[dict]] = {}
+    for r in rows:
+        mn = r["model_name"]
+        n = int(r["n"])
+        nc = int(r["n_correct"] or 0)
+        wr_lo, _ = _wilson_ci(nc, n)
+        by_model.setdefault(mn, []).append({
+            "hour_utc": r["hour_utc"],
+            "n": n,
+            "win_rate": round(nc / n, 6) if n else None,
+            "win_rate_lo_95": round(wr_lo, 6) if wr_lo is not None else None,
+            "avg_p_market": round(r["avg_p_market"], 4) if r["avg_p_market"] is not None else None,
+            "avg_divergence": round(r["avg_divergence"], 4) if r["avg_divergence"] is not None else None,
+        })
+    return {
+        "cell_key": cell_key,
+        "symbol": symbol,
+        "training_horizon_seconds": horizon,
+        "train_days": train_days,
+        "market_window_seconds": market_window,
+        "since_ms": since_ms,
+        "models": [
+            {
+                "model_name": mn,
+                "fleet_version": next((m["fleet_version"] for m in models if m["name"] == mn), None),
+                "series": series,
+            }
+            for mn, series in by_model.items()
+        ],
+        "metadata": {
+            "computed_at_ms": int(_time.time() * 1000),
         },
     }

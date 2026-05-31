@@ -437,6 +437,9 @@ try:
     from services.lineage import (  # type: ignore
         compute_best_per_cell,
         compute_cell_history,
+        compute_cell_regime_breakdown,
+        compute_context_outcome_correlation,
+        compute_cell_hourly_series,
         list_cells,
         LEADERBOARD_METRICS,
     )
@@ -444,6 +447,9 @@ except ModuleNotFoundError:
     from dashboard_api.services.lineage import (  # type: ignore[no-redef]
         compute_best_per_cell,
         compute_cell_history,
+        compute_cell_regime_breakdown,
+        compute_context_outcome_correlation,
+        compute_cell_hourly_series,
         list_cells,
         LEADERBOARD_METRICS,
     )
@@ -492,6 +498,76 @@ async def api_cell_list():
     without fetching the heavier best-per-cell payload first.
     """
     return await asyncio.to_thread(list_cells)
+
+
+@router.get("/analysis/cell-regime-breakdown")
+async def api_cell_regime_breakdown(
+    cell_key: str = Query(..., description="SYMBOL_HORIZON_TRAININGDAYS"),
+    market_window: int | None = Query(None, description="300 | 900 | 1800. Default = all three."),
+    since_ms: int | None = Query(None, description="Default = now - 30d"),
+    min_n: int = Query(10, ge=1, description="Drop regime buckets with fewer than N predictions"),
+):
+    """Per-(regime_volatility, regime_liquidity, regime_trend) performance per model in the cell.
+
+    Slice predictions by the regime triplet captured at prediction time.
+    Reveals which models work in which market conditions and how that
+    rotates across fleet generations.
+    """
+    try:
+        return await asyncio.to_thread(
+            compute_cell_regime_breakdown,
+            cell_key=cell_key,
+            market_window=market_window,
+            since_ms=since_ms,
+            min_n=min_n,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
+
+
+@router.get("/analysis/cell-context-correlation")
+async def api_cell_context_correlation(
+    cell_key: str = Query(..., description="SYMBOL_HORIZON_TRAININGDAYS"),
+    market_window: int | None = Query(None, description="300 | 900 | 1800. Default = all three."),
+    since_ms: int | None = Query(None, description="Default = now - 30d"),
+    min_n: int = Query(5, ge=1, description="Drop heatmap cells with fewer than N predictions"),
+):
+    """3-way correlation: pre-prediction market state x model output x outcome.
+
+    Returns two heatmaps per model:
+      A. p_market_bucket x divergence_bucket (what the market thought vs
+         what the model thought, vs whether the model was right).
+      B. regime_volatility x utc_hour_bucket (does the edge survive
+         different times of day under different vol).
+    """
+    try:
+        return await asyncio.to_thread(
+            compute_context_outcome_correlation,
+            cell_key=cell_key,
+            market_window=market_window,
+            since_ms=since_ms,
+            min_n=min_n,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
+
+
+@router.get("/analysis/cell-hourly-series")
+async def api_cell_hourly_series(
+    cell_key: str = Query(..., description="SYMBOL_HORIZON_TRAININGDAYS"),
+    market_window: int = Query(300, description="300 | 900 | 1800"),
+    since_ms: int | None = Query(None, description="Default = now - 14d"),
+):
+    """Hourly win-rate per fleet model. Daily rollups are too coarse for 5-min markets."""
+    try:
+        return await asyncio.to_thread(
+            compute_cell_hourly_series,
+            cell_key=cell_key,
+            market_window=market_window,
+            since_ms=since_ms,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
 
 
 @router.get("/analysis/decay-alerts")
