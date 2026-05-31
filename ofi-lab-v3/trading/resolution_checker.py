@@ -111,7 +111,7 @@ class ResolutionChecker:
         abandoned_n = cur.rowcount or 0
         if abandoned_n > 0:
             logger.warning(
-                "check_trades: auto-abandoned %d trades older than 60min "
+                "check_trades: auto-abandoned %d trades older than 45min "
                 "(price buffer can't recover them)",
                 abandoned_n,
             )
