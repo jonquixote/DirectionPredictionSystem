@@ -924,6 +924,38 @@ async def _governance_action_loop():
             return
 
 
+# Tier 4 lineage — retrain confidence realization. Hourly, bg-leader only.
+# Does NOT refit (that's triggered explicitly via POST /api/analysis/retrain-confidence/fit).
+_RETRAIN_CONF_REALIZE_BOOT_DELAY_S = 180
+_RETRAIN_CONF_REALIZE_INTERVAL_S = 3600
+
+
+async def _retrain_confidence_loop():
+    """Hourly: back-fill realized_value for predictions whose window has elapsed."""
+    import time as _t
+    try:
+        await asyncio.sleep(_RETRAIN_CONF_REALIZE_BOOT_DELAY_S)
+    except asyncio.CancelledError:
+        return
+    while True:
+        try:
+            try:
+                from services.retrain_confidence import realize_pending_predictions  # type: ignore
+            except ModuleNotFoundError:
+                from dashboard_api.services.retrain_confidence import realize_pending_predictions  # type: ignore
+            n = await asyncio.to_thread(
+                realize_pending_predictions, int(_t.time() * 1000)
+            )
+            if n:
+                logger.info("retrain_confidence realize: filled %d predictions", n)
+        except Exception as e:
+            logger.warning("retrain_confidence realize failed: %s", e)
+        try:
+            await asyncio.sleep(_RETRAIN_CONF_REALIZE_INTERVAL_S)
+        except asyncio.CancelledError:
+            return
+
+
 # T2 — Daily rollup loop. Every 10 min, upsert aggregate rows for today and
 # yesterday into predictions_daily_rollup. The fast leaderboard path
 # reads from this table instead of scanning the full predictions table.
@@ -1179,6 +1211,7 @@ async def lifespan(app: FastAPI):
     governance_action_task = None
     rollup_task = None
     wal_checkpoint_task = None
+    retrain_confidence_task = None
     if _is_bg_leader:
         precompute_task = asyncio.create_task(_analysis_precompute_loop()) if _bg_enabled("V3_ANALYSIS_PRECOMPUTE_ENABLED") else None
         if precompute_task is None:
@@ -1191,16 +1224,17 @@ async def lifespan(app: FastAPI):
         if rollup_task is None:
             logger.info("rollup loop DISABLED via V3_ROLLUP_LOOP_ENABLED")
         wal_checkpoint_task = asyncio.create_task(_wal_checkpoint_loop())
+        retrain_confidence_task = asyncio.create_task(_retrain_confidence_loop())
     logger.info(
         "Dashboard API ready — background refresh + analysis precompute "
-        "+ cutover scheduler + tier scoring + governance + rollup loops "
-        "started (bg_leader=%s)", _is_bg_leader,
+        "+ cutover scheduler + tier scoring + governance + rollup + "
+        "retrain_confidence loops started (bg_leader=%s)", _is_bg_leader,
     )
     yield
     task.cancel()
     for _bg_task in (precompute_task, cutover_task, tier_task,
                      governance_probation_task, governance_action_task,
-                     rollup_task, wal_checkpoint_task):
+                     rollup_task, wal_checkpoint_task, retrain_confidence_task):
         if _bg_task is not None:
             _bg_task.cancel()
     if _bg_lock_fd is not None:

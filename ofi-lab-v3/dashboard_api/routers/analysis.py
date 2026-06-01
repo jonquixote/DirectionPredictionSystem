@@ -570,6 +570,33 @@ async def api_cell_hourly_series(
         raise HTTPException(status_code=422, detail=str(e)) from e
 
 
+# ---------------------------------------------------------------------------
+# Lineage analytics — Tier 3: training-data drift snapshots
+# (docs/2026-05-31-model-lineage-analytics-spec.md)
+# ---------------------------------------------------------------------------
+
+try:
+    from services.training_drift import compute_cell_drift_chain  # type: ignore
+except ModuleNotFoundError:
+    from dashboard_api.services.training_drift import compute_cell_drift_chain  # type: ignore[no-redef]
+
+
+@router.get("/analysis/cell-drift")
+async def api_cell_drift(
+    cell_key: str = Query(..., description="SYMBOL_HORIZON_TRAININGDAYS (e.g. BTCUSDT_300_179)"),
+):
+    """Pairwise training-data drift between each successive fleet generation for a cell.
+
+    Returns KS distance (approximated from percentile fingerprints) for every
+    (predecessor, successor) fleet pair. max_ks > 0.20 typically warrants
+    closer inspection of feature engineering changes between fleets.
+    """
+    try:
+        return await asyncio.to_thread(compute_cell_drift_chain, cell_key=cell_key)
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
+
+
 @router.get("/analysis/decay-alerts")
 async def api_decay_alerts(
     since_ms: int | None = Query(None, description="Only return alerts after this timestamp_ms"),
@@ -618,5 +645,170 @@ async def api_decay_alerts(
     finally:
         try:
             conn.close()
+        except Exception:
+            pass
+
+
+# ---------------------------------------------------------------------------
+# Lineage analytics — Tier 4: predictive retrain confidence
+# (docs/2026-05-31-model-lineage-analytics-spec.md)
+# ---------------------------------------------------------------------------
+
+try:
+    from services.retrain_confidence import (  # type: ignore
+        fit_predictor,
+        predict_for_model,
+        get_predicted_band,
+    )
+except ModuleNotFoundError:
+    from dashboard_api.services.retrain_confidence import (  # type: ignore[no-redef]
+        fit_predictor,
+        predict_for_model,
+        get_predicted_band,
+    )
+
+
+class RetrainConfidenceFitRequest(BaseModel):
+    metric: str = "composite"
+    predecessor_lookback_days: int = 14
+    successor_lookback_days: int = 7
+
+
+@router.post("/analysis/retrain-confidence/fit")
+async def api_retrain_confidence_fit(body: RetrainConfidenceFitRequest):
+    """Fit (or refit) the OLS predictor for the requested metric.
+
+    Builds (predecessor, successor) regression pairs from historical lineage,
+    fits via numpy lstsq, and inserts a row into retrain_confidence_models.
+    Returns n_train_pairs, r_squared, residual_sd, coefs.
+    """
+    valid = ("composite", "win_rate", "roi")
+    if body.metric not in valid:
+        raise HTTPException(status_code=422, detail=f"metric must be one of {valid}")
+    try:
+        result = await asyncio.to_thread(
+            fit_predictor,
+            metric=body.metric,
+            predecessor_lookback_days=body.predecessor_lookback_days,
+            successor_lookback_days=body.successor_lookback_days,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=422, detail=str(e)) from e
+    return result
+
+
+@router.get("/analysis/retrain-confidence/predict")
+async def api_retrain_confidence_predict(
+    model_name: str = Query(..., description="Registered model name"),
+    metric: str = Query("composite", description="composite|win_rate|roi"),
+):
+    """Return the most-recent predicted band for (model_name, metric).
+
+    If no stored prediction exists, attempts to compute one on the fly using
+    the current fitted model.  Returns predicted_value, predicted_lo,
+    predicted_hi plus realized_value when the window has elapsed.
+    """
+    # Try stored first
+    result = await asyncio.to_thread(get_predicted_band, model_name=model_name, metric=metric)
+    if result is None:
+        # Compute on demand
+        try:
+            result = await asyncio.to_thread(
+                predict_for_model, model_name=model_name, metric=metric
+            )
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e)) from e
+    if result is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No prediction available for model_name={model_name!r} metric={metric!r}. "
+                   "Run POST /api/analysis/retrain-confidence/fit first.",
+        )
+    return result
+
+
+@router.get("/analysis/retrain-confidence/models")
+async def api_retrain_confidence_models(
+    metric: str = Query("composite", description="composite|win_rate|roi"),
+    limit: int = Query(10, ge=1, le=100),
+):
+    """Most-recent fitted OLS models for the given metric.
+
+    Returns fitted_at_ms, n_train_pairs, r_squared, residual_sd, coefs.
+    Useful for monitoring predictor quality over time.
+    """
+    try:
+        from services.db import get_db  # type: ignore
+    except ModuleNotFoundError:
+        from dashboard_api.services.db import get_db  # type: ignore
+    import json as _json
+    db = get_db()
+    try:
+        rows = db.execute(
+            """
+            SELECT fitted_at_ms, metric, predecessor_lookback_days,
+                   successor_lookback_days, coefs_json, n_train_pairs,
+                   r_squared, residual_sd, notes
+            FROM retrain_confidence_models
+            WHERE metric = ?
+            ORDER BY fitted_at_ms DESC
+            LIMIT ?
+            """,
+            (metric, limit),
+        ).fetchall()
+        out = []
+        for r in rows:
+            out.append({
+                "fitted_at_ms": r["fitted_at_ms"],
+                "metric": r["metric"],
+                "predecessor_lookback_days": r["predecessor_lookback_days"],
+                "successor_lookback_days": r["successor_lookback_days"],
+                "n_train_pairs": r["n_train_pairs"],
+                "r_squared": r["r_squared"],
+                "residual_sd": r["residual_sd"],
+                "coefs": _json.loads(r["coefs_json"]) if r["coefs_json"] else None,
+                "notes": r["notes"],
+            })
+        return {"models": out, "count": len(out), "metric": metric}
+    finally:
+        try:
+            db.close()
+        except Exception:
+            pass
+
+
+@router.get("/analysis/retrain-confidence/calibration")
+async def api_retrain_confidence_calibration(
+    metric: str = Query("composite", description="composite|win_rate|roi"),
+    limit: int = Query(200, ge=1, le=1000),
+):
+    """Realized vs predicted scatter data for self-calibration charts.
+
+    Returns rows where realized_value IS NOT NULL, sorted by predicted_at_ms.
+    Each row: model_name, predicted_value, predicted_lo, predicted_hi,
+    realized_value, predicted_at_ms.
+    """
+    try:
+        from services.db import get_db  # type: ignore
+    except ModuleNotFoundError:
+        from dashboard_api.services.db import get_db  # type: ignore
+    db = get_db()
+    try:
+        rows = db.execute(
+            """
+            SELECT model_name, predicted_value, predicted_lo, predicted_hi,
+                   realized_value, predicted_at_ms, realized_at_ms
+            FROM retrain_confidence_predictions
+            WHERE metric = ? AND realized_value IS NOT NULL
+            ORDER BY predicted_at_ms DESC
+            LIMIT ?
+            """,
+            (metric, limit),
+        ).fetchall()
+        out = [dict(r) for r in rows]
+        return {"calibration": out, "count": len(out), "metric": metric}
+    finally:
+        try:
+            db.close()
         except Exception:
             pass

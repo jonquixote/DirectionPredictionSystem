@@ -539,3 +539,93 @@ CREATE TABLE IF NOT EXISTS predictions_daily_rollup (
 );
 CREATE INDEX IF NOT EXISTS idx_pdr_date ON predictions_daily_rollup(date_utc);
 CREATE INDEX IF NOT EXISTS idx_pdr_symbol_window_date ON predictions_daily_rollup(symbol, market_window_seconds, date_utc);
+
+-- =========================================================================
+-- training_data_snapshots (Tier 3 lineage): per-model fingerprint of the
+-- feature distribution the model was trained on, plus the training-time
+-- outcome stats. Computed at registration by scripts/register_model.py
+-- (or by the backfill in scripts/backfill_training_snapshots.py for
+-- existing fleets). One row per model.
+--
+-- feature_dist_json schema:
+--   {
+--     "symbol": "BTCUSDT",
+--     "n_train_obs": 123456,
+--     "features": {
+--       "<feature_name>": {
+--         "p01": ..., "p05": ..., "p25": ..., "p50": ...,
+--         "p75": ..., "p95": ..., "p99": ...,
+--         "mean": ..., "std": ..., "n_nulls": ...
+--       },
+--       ...
+--     }
+--   }
+--
+-- Drift between two snapshots = max KS over per-feature percentile
+-- fingerprints (computed on demand by services/training_drift.py).
+-- =========================================================================
+CREATE TABLE IF NOT EXISTS training_data_snapshots (
+    model_name             TEXT PRIMARY KEY,
+    feature_names_hash     TEXT,
+    feature_dist_json      TEXT,
+    training_brier         REAL,
+    training_log_loss      REAL,
+    training_auc           REAL,
+    n_train_obs            INTEGER,
+    computed_at            TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+);
+
+CREATE INDEX IF NOT EXISTS idx_training_snapshots_computed_at
+    ON training_data_snapshots(computed_at);
+
+-- =========================================================================
+-- retrain_confidence_models (Tier 4 lineage): fitted linear-regression
+-- coefficients that map predecessor metrics + training drift + cell history
+-- into a predicted post-retrain metric band. Refit weekly after each
+-- retrain finishes; older fits retained for audit.
+--
+-- coefs_json = {beta_0, beta_predecessor, beta_drift,
+--               beta_cell_residual_sd, beta_brier_delta, beta_log_n_obs}
+-- residual_sd = std of regression residuals (used as the 1-sigma band)
+-- =========================================================================
+CREATE TABLE IF NOT EXISTS retrain_confidence_models (
+    fitted_at_ms              INTEGER NOT NULL,
+    metric                    TEXT NOT NULL,
+    predecessor_lookback_days INTEGER NOT NULL,
+    successor_lookback_days   INTEGER NOT NULL,
+    coefs_json                TEXT NOT NULL,
+    n_train_pairs             INTEGER NOT NULL,
+    r_squared                 REAL,
+    residual_sd               REAL,
+    feature_importance_json   TEXT,
+    notes                     TEXT,
+    PRIMARY KEY (fitted_at_ms, metric, predecessor_lookback_days, successor_lookback_days)
+);
+
+CREATE INDEX IF NOT EXISTS idx_retrain_conf_models_metric
+    ON retrain_confidence_models(metric, fitted_at_ms DESC);
+
+-- =========================================================================
+-- retrain_confidence_predictions (Tier 4 lineage): per-(new model, metric)
+-- predicted post-retrain band, written at register_model.py time. Compared
+-- against realized values after the successor_lookback window elapses to
+-- self-calibrate the predictor (see services/retrain_confidence.py).
+-- =========================================================================
+CREATE TABLE IF NOT EXISTS retrain_confidence_predictions (
+    model_name        TEXT NOT NULL,
+    metric            TEXT NOT NULL,
+    predicted_value   REAL NOT NULL,
+    predicted_lo      REAL,
+    predicted_hi      REAL,
+    inputs_json       TEXT,
+    fitted_at_ms      INTEGER,
+    predicted_at_ms   INTEGER NOT NULL,
+    realized_value    REAL,
+    realized_at_ms    INTEGER,
+    PRIMARY KEY (model_name, metric, predicted_at_ms)
+);
+
+CREATE INDEX IF NOT EXISTS idx_retrain_conf_pred_model
+    ON retrain_confidence_predictions(model_name);
+CREATE INDEX IF NOT EXISTS idx_retrain_conf_pred_realized
+    ON retrain_confidence_predictions(realized_at_ms);

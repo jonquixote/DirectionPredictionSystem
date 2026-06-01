@@ -284,6 +284,27 @@ def register_model(
         (name, "fleet_trainer", json.dumps(metrics)),
     )
     conn.commit()
+
+    # Tier 4 lineage: write a predicted confidence band immediately after
+    # registration so ModelDetail can render it without waiting for a separate
+    # trigger.  Failure must never block registration.
+    try:
+        try:
+            from dashboard_api.services.retrain_confidence import predict_for_model as _predict
+        except ModuleNotFoundError:
+            try:
+                from services.retrain_confidence import predict_for_model as _predict  # type: ignore[assignment]
+            except ModuleNotFoundError:
+                _predict = None  # type: ignore[assignment]
+        if _predict is not None:
+            for _m in ("composite", "win_rate", "roi"):
+                try:
+                    _predict(name, metric=_m)
+                except Exception:
+                    pass
+    except Exception as _e:
+        print(f"retrain_confidence predict skipped for {name}: {_e}", file=sys.stderr)
+
     return name
 
 
