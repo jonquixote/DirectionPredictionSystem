@@ -1,10 +1,10 @@
-# Post-Retrain Hardening Session — 2026-05-28 → 2026-05-31
+# Post-Retrain Hardening Session — 2026-05-28 → 2026-06-01
 
-Multi-day operations + hardening sprint that started the night the weekly retrain finished and ran through the next ~72 hours of check-ins. Every change here was driven by something we observed in prod: a crash log, a stuck row, a UI bug, a 502, a memory spike.
+Multi-day operations + hardening sprint that started the night the weekly retrain finished and ran through the next ~96 hours of check-ins, then folded the full Tier 1–4 lineage analytics build onto the same branch once the system was stable. Every change here was driven by something we observed in prod: a crash log, a stuck row, a UI bug, a 502, a memory spike — or, in the second half, a request to actually understand cross-fleet model behavior.
 
 **Branch:** `v3-dashboard-upgrade`
-**Commits:** `05b8a3b` → `f56f9f6` (parent), `523d971` → `dacfc96` (dashboard submodule)
-**Outcome:** trader and dashboard now survive ordinary contention without crashing; the Home and Predictions pages match the v3 data model; analysis page loads sub-second on warm cache; the per-window tier architecture is consistent with the live trader.
+**Commits:** `05b8a3b` → `e49a411` (parent), `523d971` → `ef6936e` (dashboard submodule)
+**Outcome:** trader and dashboard now survive ordinary contention without crashing; the Home and Predictions pages match the v3 data model; the analysis page loads sub-second on warm cache; the per-window tier architecture is consistent with the live trader; the dashboard now surfaces a complete model-lineage analytics layer (best-per-cell matrix, fleet history, regime breakdown, 3-way market context correlation, hourly intra-day series, training-data drift, and a predictive retrain-confidence model with self-calibration).
 
 ---
 
@@ -357,3 +357,262 @@ First L2 data received — MAD warmup starts (30 min)
 Within ~1 s of being able to resolve trades: `check_trades: auto-abandoned N trades older than 45min` (one-time cleanup), then the loop goes quiet.
 
 If you see `Fatal error: database is locked` in the trader journal at any point after these changes — that's a bug in `_contract_boundary_loop`, not expected behavior.
+
+---
+
+## Pending count fix (2026-05-31)
+
+**Observed:** Home page showed `PENDING 33,109`. Most of that was stale unresolved predictions, not in-flight markets.
+
+**Two-part bug:**
+
+1. `resolution_checker.check_predictions` lacked the auto-abandon path that `check_trades` had since commit `2fbd767`. After every trader restart, predictions whose `ts_resolve_at_ms` was older than the ~40-min in-memory price buffer accumulated invisibly. By the time we caught it there were 32,736 stuck rows (oldest from `900s_btc_v3_20260315`, the 30-day-old synthetic registry row from Task #34).
+
+2. The `outcome=unresolved` filter in `sqlite_store` keyed on `prediction_correct IS NULL`. The auto-abandon path (for `check_trades`) had been setting `prediction_correct=NULL` on stale rows, so they kept showing up in the unresolved bucket even after being marked `resolved=1`.
+
+**Fixes (commits `647e231`, `173fd3d`):**
+
+- One-shot UPDATE on `predictions` to mark the 32,736 stuck rows resolved=1 with `contract_result='unresolved'`.
+- Added auto-abandon to `check_predictions` mirroring the `check_trades` pattern: 45-min cutoff, also trims the in-memory pending_queue.
+- Changed `outcome=unresolved` filter semantics to `resolved = 0` in `sqlite_store.get_predictions()` + `get_trades()`. Abandoned rows now correctly excluded from "pending" counts.
+
+**Verified:** `/api/predictions/count?outcome=unresolved` dropped from 33,437 to **701** (real in-flight markets) immediately post-deploy.
+
+---
+
+## Model lineage analytics — full Tier 1–4 build (2026-05-31)
+
+Originally specced as a phased plan (`docs/2026-05-31-model-lineage-analytics-spec.md`) with Tier 2/3/4 gated on accumulating retrain history. After shipping the spec doc, the user requested we compress the timeline and build the lot. Done in one session with parallel Sonnet sub-agents.
+
+The unifying primitive is the **training cell**: a `(symbol, training_horizon_seconds, train_days)` triple, already keyed by `cell_governance.cell_key` (`f"{SYMBOL}_{HORIZON}_{TRAINING_DAYS}"`). 84 cells per fleet × 4 fleets in retention = 336 cells of historical data. A **fleet generation** = one `fleet_version` (weekly retrain cadence). **Lineage** walks the chain via `model_registry.parent_model_name`.
+
+The five lineage panels on `/analysis` share `?cell_key=` URL state so the operator picks a cell once and all panels align.
+
+### Tier 1 — Best-per-cell + cell history (commit `2edfef0`)
+
+**Backend `dashboard_api/services/lineage.py` (~400 lines):**
+
+- `list_cells()` — 84 cells with current incumbent. Pure index.
+- `compute_best_per_cell(metric, since_ms, min_n_samples, top_k_runners)` — 12 cells (4 sym × 3 market window). Backed by `predictions_daily_rollup` for win_rate / ROI / sharpe, and `model_tier_score` for composite. Wilson 95% CIs on win_rate.
+- `compute_cell_history(cell_key, since_ms)` — per-fleet history: lifetime metrics, daily series, decay events per market window. Includes retired fleets.
+
+**Endpoints:** `GET /api/analysis/{cell-list, best-per-cell, cell-history}`. All wrapped in `asyncio.to_thread`. Verified cold: cell-list 0.19s, best-per-cell 6.3s (cached after), cell-history 0.29s.
+
+**Frontend** (dashboard submodule commit `90b4aab`):
+
+- `Analysis/BestPerCell.tsx` (186 lines) — 4×3 matrix grid. Metric picker (composite / roi / win_rate / sharpe). Each cell links to ModelDetail.
+- `Analysis/CellLineage.tsx` (357 lines) — fleet ribbon + per-fleet metric table + daily win-rate chart per market window. URL state `?cell_key=`.
+
+### Tier 2 — Regime + context + intra-day granularity (commit `1edcd08`)
+
+**Backend extensions (`lineage.py` +400 lines):**
+
+- `compute_cell_regime_breakdown(cell_key, market_window, since_ms, min_n)` — slices `predictions` by the `(regime_volatility, regime_liquidity, regime_trend)` triplet captured at prediction time. Reveals which models work in which market conditions across fleets.
+- `compute_context_outcome_correlation(cell_key, market_window, since_ms, min_n)` — 3-way correlation: pre-prediction market state × model output × outcome.
+  - **Matrix A:** `p_market_bucket × divergence_bucket → {n, win_rate, avg_price_move}` — directly answers "what was the market saying right before the model fired, what did the model say, and did it work."
+  - **Matrix B:** `regime_volatility × utc_hour_bucket → win_rate` — does the edge survive different times of day under different vol.
+- `compute_cell_hourly_series(cell_key, market_window, since_ms)` — one row per `(model_name, hour_utc)`. Daily rollups are too coarse for 5-min markets (288 boundaries/day); hourly granularity surfaces intra-day regime shifts.
+
+Module constants `P_MARKET_BUCKETS` and `DIVERGENCE_BUCKETS` are exposed in response metadata so the frontend renders the same bin labels the backend used.
+
+**Endpoints:** `GET /api/analysis/{cell-regime-breakdown, cell-context-correlation, cell-hourly-series}`. All <250ms warm.
+
+**Frontend** (commit `732835d`):
+
+- `CellRegimeBreakdown.tsx` (212 lines) — per-model regime-triplet heatmap. Color-coded win_rate cells. Market-window + since-days pickers.
+- `CellContextCorrelation.tsx` (275 lines) — two side-by-side heatmaps per model. Empty cells dim. Color-coded by win_rate.
+- `CellHourlySeries.tsx` (183 lines) — Recharts line per fleet model, x = hour_utc, y = win_rate, reference line at 0.5.
+
+### Tier 3 — Training-data drift instrumentation (commit `e49a411`)
+
+**Schema (`storage/schema.sql` +30 lines):**
+
+```sql
+CREATE TABLE training_data_snapshots (
+    model_name             TEXT PRIMARY KEY,
+    feature_names_hash     TEXT,
+    feature_dist_json      TEXT,            -- per-feature p01/p05/p25/p50/p75/p95/p99/mean/std/n_nulls
+    training_brier         REAL,
+    training_log_loss      REAL,
+    training_auc           REAL,
+    n_train_obs            INTEGER,
+    computed_at            TEXT
+);
+```
+
+**`dashboard_api/services/training_drift.py` (310 lines):**
+
+- `compute_feature_fingerprint(symbol, train_window_start, end)` — streams `/data/features_v3/{SYMBOL}/*.parquet` daily files inside the training window, computes percentiles + mean/std/n_nulls per feature column.
+- `compute_drift(snapshot_a, snapshot_b)` — KS approximation via linear interpolation over the percentile fingerprint grid. Returns `{max_ks, mean_ks, max_ks_feature, per_feature, n_features_compared}`.
+- `get_or_compute_snapshot(model_name)` — DB look-aside with on-demand compute.
+- `compute_cell_drift_chain(cell_key)` — walks the cell's fleet chain, computes pairwise drift between successive (predecessor, successor).
+
+A separate write connection (`_get_write_db()` with 15s `busy_timeout`) avoids WAL contention with the dashboard's reader.
+
+**`scripts/backfill_training_snapshots.py` (115 lines):** one-shot CLI. `--dry-run` + `--limit`. Walks `model_registry` rows missing a snapshot, reads `metrics.json` for training stats, computes fingerprint, INSERTs.
+
+**Backfill result:** all 215 model_registry rows backfilled with 0 errors. ~1-4 s per model (90d window 1s, 180d 2.5s, 330d 4s).
+
+**Endpoint:** `GET /api/analysis/cell-drift?cell_key=...`. Smoke: BTC/300/179 cell, 1 (5/06 → 5/12) pair, max_ks=0.059 on `mid_price`, 33 features compared.
+
+**Frontend** (commit `ef6936e`):
+
+- `CellDrift.tsx` (114 lines) — fleet_chain table with KS color coding (<0.10 green, 0.10–0.25 amber, >0.25 red) + high-drift badge when max_ks > 0.25.
+
+### Tier 4 — Predictive retrain confidence (commit `e49a411`)
+
+**Schema:**
+
+```sql
+CREATE TABLE retrain_confidence_models (
+    fitted_at_ms              INTEGER,
+    metric                    TEXT,          -- composite | win_rate | roi
+    predecessor_lookback_days INTEGER,
+    successor_lookback_days   INTEGER,
+    coefs_json                TEXT,
+    n_train_pairs             INTEGER,
+    r_squared                 REAL,
+    residual_sd               REAL,          -- 1-sigma band
+    feature_importance_json   TEXT,          -- also stores per-cell residual_sd history
+    PRIMARY KEY (fitted_at_ms, metric, predecessor_lookback_days, successor_lookback_days)
+);
+
+CREATE TABLE retrain_confidence_predictions (
+    model_name        TEXT,
+    metric            TEXT,
+    predicted_value   REAL,
+    predicted_lo      REAL,
+    predicted_hi      REAL,
+    inputs_json       TEXT,
+    fitted_at_ms      INTEGER,
+    predicted_at_ms   INTEGER,
+    realized_value    REAL,           -- NULL until successor_lookback elapses
+    realized_at_ms    INTEGER,
+    PRIMARY KEY (model_name, metric, predicted_at_ms)
+);
+```
+
+**`dashboard_api/services/retrain_confidence.py` (380 lines):**
+
+OLS regression via `numpy.linalg.lstsq`. Per `(predecessor, successor)` pair within a cell, features are:
+
+```
+x1 = predecessor metric over its first 14d
+x2 = cell_drift max_ks (from T3; 0 if no snapshot)
+x3 = per-cell historical residual_sd (the self-calibration channel)
+x4 = training_brier_delta (successor_train_brier − predecessor_train_brier)
+x5 = log(n_train_obs)
+```
+
+Target = successor metric over its first 7d. `fit_predictor(metric)` builds the dataset, writes one row. `predict_for_model(model_name, metric)` applies most-recent coefs, writes a `retrain_confidence_predictions` row with predicted ± residual_sd band. `realize_pending_predictions(now_ms)` updates the `realized_value` once 7 days have elapsed since `predicted_at_ms`.
+
+The self-calibration trick: `x3` reads from the **previous** fit's `feature_importance_json`. First fit: x3 = 0 everywhere → r² = 0.001. Second fit: x3 populated from first → r² = 0.057. Each retrain cycle improves the predictor.
+
+**`dashboard_api/main.py` new bg loop `_retrain_confidence_loop()`** (180s boot delay, 3600s interval, only on `_is_bg_leader` worker) — calls `realize_pending_predictions`. Refit is operator-triggered via POST, NOT auto.
+
+**`scripts/register_model.py` hook:** after a model commits, calls `predict_for_model(name)` for all three metrics in a try/except. Failure never blocks registration.
+
+**Endpoints:**
+
+```
+POST /api/analysis/retrain-confidence/fit              { metric }
+GET  /api/analysis/retrain-confidence/predict?model_name=...&metric=...
+GET  /api/analysis/retrain-confidence/models?metric=...&limit=10
+GET  /api/analysis/retrain-confidence/calibration?metric=...&limit=200
+```
+
+**Smoke results:** composite fit `n_train_pairs=84, r_squared=0.057, residual_sd=0.070`. Predict for `h60_btc_v3_89d_20260512` returns composite band `[-0.119, +0.022]`. Calibration scatter empty (correct — no 7-day-old predictions yet; populates after Thursday's retrain cycle + 7d).
+
+**Frontend** (commit `ef6936e`):
+
+- `RetrainConfidence.tsx` (~280 lines) —
+  - Panel A: model picker + per-metric predicted band table with realized-delta column once realized lands.
+  - Panel B: last 5 fits + a Refit button (mutation invalidates predict + models queries).
+  - Panel C: Recharts ScatterChart of predicted vs realized with identity line + client-side R² overlay. Empty-state until ~7 d after first retrain.
+- `ModelDetail.tsx` — small "expected composite" chip in the identity badges row. Renders nothing if no prediction.
+
+### Total lineage build inventory
+
+| File | Lines | Tier |
+|---|---|---|
+| `dashboard_api/services/lineage.py` | 800 (full file) | T1 + T2 |
+| `dashboard_api/services/training_drift.py` | 310 | T3 |
+| `dashboard_api/services/retrain_confidence.py` | 380 | T4 |
+| `scripts/backfill_training_snapshots.py` | 115 | T3 |
+| `scripts/register_model.py` | +40 hook | T4 |
+| `dashboard_api/main.py` | +60 (retrain_confidence_loop) | T4 |
+| `dashboard_api/routers/analysis.py` | +9 endpoints | all |
+| `storage/schema.sql` | +71 (3 new tables) | T3 + T4 |
+| `dashboard/src/lib/api.ts` | +192 (11 helpers) | all |
+| `dashboard/src/pages/Analysis.tsx` | +60 (7 lazy mounts) | all |
+| `dashboard/src/pages/Analysis/BestPerCell.tsx` | 186 | T1 |
+| `dashboard/src/pages/Analysis/CellLineage.tsx` | 357 | T1 |
+| `dashboard/src/pages/Analysis/CellRegimeBreakdown.tsx` | 212 | T2 |
+| `dashboard/src/pages/Analysis/CellContextCorrelation.tsx` | 275 | T2 |
+| `dashboard/src/pages/Analysis/CellHourlySeries.tsx` | 183 | T2 |
+| `dashboard/src/pages/Analysis/CellDrift.tsx` | 114 | T3 |
+| `dashboard/src/pages/Analysis/RetrainConfidence.tsx` | 280 | T4 |
+| `dashboard/src/pages/ModelDetail.tsx` | +1 chip | T4 |
+
+---
+
+## WAL truncation policy update (2026-06-01)
+
+**Observed:** WAL on disk peaked at 81 MB despite the 5-min checkpoint loop running every cycle (log_pages successfully committed each tick).
+
+**Root cause:** PASSIVE checkpoint commits pages into the main DB but doesn't shrink the WAL file itself. After ~24 h of writes the file climbs to peak size and stays there.
+
+**Fix:** opportunistic TRUNCATE in `_run_wal_checkpoint`. PASSIVE every tick (cheap, non-blocking). Then if the on-disk WAL file size > 50 MB, follow with `PRAGMA wal_checkpoint(TRUNCATE)`. TRUNCATE briefly blocks new writers but exits fast because PASSIVE already committed most pages. Manual truncate immediately after deploy returned `busy=0 log=0 ckpt=0` and the file dropped to 0 bytes.
+
+---
+
+## State check 2026-06-01 04:00 UTC
+
+| Metric | Value |
+|---|---|
+| Service uptime | dashboard 21h · trader 21h · ws-feed 16 days |
+| Memory | dashboard 2.0 G · trader 780 M · ws-feed 39 M · 12 G free |
+| Errors in last 1 h | 0 across all services |
+| Lock warnings in last 1 h | 6 — all caught by tick-level try/except, **0 process restarts** |
+| Predictions cadence | 656 in last 10 min, lag 51 s (normal) |
+| Predictions by fleet | 420 (2026-05-12) + 400 (2026-05-06) — balanced |
+| Unresolved predictions | 492, **all future_ok** (zero stuck) |
+| Unresolved paper_trades | 638, **all future_ok** (zero stuck) |
+| Paper trades 1 h | 2 283 created, 1 645 resolved, −$542 PnL |
+| Governance actions 1 h | 0 (no eligible challengers; system at steady state) |
+| Rollup freshness | 6 s |
+| Retrain queue | 0 pending |
+| Training snapshots | 215 / 215 (full backfill) |
+| Retrain-confidence fits | 2 (`composite`, both with `n_train_pairs=84`) |
+| Retrain-confidence predictions | 1 (smoke test; bulk populates next retrain via the register_model hook) |
+| Retrain-confidence realized | 0 (needs Thursday's retrain + 7d to land) |
+| WAL | 0 B after TRUNCATE; will grow / auto-truncate at 50 MB |
+
+System healthy.
+
+---
+
+## What still warrants attention (post-build)
+
+- **Retrain-confidence calibration** is the only remaining unknown. Wide bands (`residual_sd ≈ 0.07` on composite) will narrow as the predictor self-calibrates over weekly retrains. The calibration scatter on `/analysis` is the audit trail — refresh it after the second retrain post-deploy (≈ 14 days from now) and read off the R² to know whether to trust the bands.
+- **Trader resilience covers boundary loop**, not every codepath (still). Hot reload + decay refresh + reconcile_lifecycle have narrower try/except blocks. Any non-OperationalError exception there can still exit the process.
+- **WS-feed crash recovery** still has no redundant ingestion path. 16 days uptime continues; low priority.
+- **Per-window tier promotion** still only promotes the primary window. Models that perform well on a non-primary window remain `watch` for that window. Governance refactor when we have time.
+- **Recommend-premium cold** is 68–130 s. Cached for 30 min so the operator pays that once per (symbol, window, mode, 30-min bucket). Background-task pattern is the next layer if we ever need it faster.
+
+---
+
+## Cumulative commit inventory (2026-05-28 → 2026-06-01)
+
+```
+parent (v3-dashboard-upgrade):
+  05b8a3b → 1f1c92e → b8bbb9f → c34e627 → 9b96670 → 0e17fc1
+  6f5b240 → 2fbd767 → ba46707 → f56f9f6 → 855aa35 → 8917e7d
+  2edfef0 → 1edcd08 → 2af89f0 → 998608b → 173fd3d → 647e231
+  e49a411   (latest)
+
+dashboard submodule:
+  523d971 → dacfc96 → 0da1848 → 90b4aab → 732835d → ef6936e
+```
+
+The first batch (`05b8a3b … f56f9f6`) is hardening. The second (`855aa35 … 173fd3d`) is bug-fix sweeps on the deployed system. The third (`2edfef0 … e49a411`) is the lineage analytics build.

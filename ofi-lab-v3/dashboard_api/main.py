@@ -1080,24 +1080,39 @@ _WAL_CHECKPOINT_BOOT_DELAY_S = 90
 
 
 def _run_wal_checkpoint() -> tuple[int, int, int]:
-    """Run PASSIVE checkpoint to merge WAL into the main db file.
+    """Checkpoint the WAL.
 
-    Returns (busy, log_pages, checkpointed_pages). PASSIVE mode never
-    blocks on active readers/writers, so this is safe to call alongside
-    the predict/dispatch path. Without periodic checkpoints the WAL
-    grows past 100 MB under our write rate, which lengthens lock-wait
-    durations and produces the 'database is locked' crashes we keep
-    chasing in the trader.
+    PASSIVE most of the time (never blocks readers/writers). But PASSIVE
+    only commits pages — it doesn't shrink the on-disk WAL file. Under our
+    write rate the file climbs ~80 MB+ across the day. When the file size
+    crosses 50 MB we opportunistically run TRUNCATE to actually shrink it.
+    TRUNCATE briefly blocks new writers but exits fast when the WAL is
+    already mostly committed (the PASSIVE we just ran ensured that).
+
+    Returns (busy, log_pages, checkpointed_pages).
     """
+    import os
     try:
         from services.db import get_db  # type: ignore
     except ModuleNotFoundError:
         from dashboard_api.services.db import get_db  # type: ignore
     conn = get_db()
     row = conn.execute("PRAGMA wal_checkpoint(PASSIVE)").fetchone()
-    if row is None:
-        return (0, 0, 0)
-    return (int(row[0] or 0), int(row[1] or 0), int(row[2] or 0))
+    busy, log_pages, ckpt_pages = (
+        (int(row[0] or 0), int(row[1] or 0), int(row[2] or 0))
+        if row is not None else (0, 0, 0)
+    )
+    # Opportunistic TRUNCATE when on-disk file is large.
+    try:
+        db_path = os.environ.get(
+            "STORAGE_DB_PATH", "/data/v3.db"
+        )
+        wal_path = db_path + "-wal"
+        if os.path.exists(wal_path) and os.path.getsize(wal_path) > 50 * 1024 * 1024:
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    except Exception:
+        pass
+    return (busy, log_pages, ckpt_pages)
 
 
 async def _wal_checkpoint_loop():
