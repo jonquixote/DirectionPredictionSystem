@@ -42,6 +42,12 @@ def feature_names_hash(names: Iterable[str]) -> str:
     return sha256_canonical_json(sorted(names))
 
 
+def ordered_feature_names_hash(names: Iterable[str]) -> str:
+    """Hash a feature-name list. Order-dependent (retains original sequence)."""
+    return sha256_canonical_json(list(names))
+
+
+
 def policy_config_hash(config: dict) -> str:
     """Hash the active policy config snapshot."""
     return sha256_canonical_json(config)

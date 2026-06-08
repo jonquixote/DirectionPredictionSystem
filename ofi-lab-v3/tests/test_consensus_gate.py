@@ -71,6 +71,11 @@ def _make_mock_trader(
     t.models = models
     t._model_meta = model_meta
     t.feature_names = feature_names
+    from storage.provenance import feature_names_hash, ordered_feature_names_hash
+    t._trained_num_features = {name: len(cols) for name, cols in feature_names.items()}
+    t._trained_contract_hash = {name: feature_names_hash(cols) for name, cols in feature_names.items()}
+    t._trained_contract_order_hash = {name: ordered_feature_names_hash(cols) for name, cols in feature_names.items()}
+    t._contract_source = {name: "booster_intrinsic" for name in models}
     t._prediction_count = 0
     t._trade_count = 0
     t._current_kalshi_bankroll = None

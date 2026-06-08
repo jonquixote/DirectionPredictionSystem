@@ -60,7 +60,7 @@ from storage.sqlite_ledger import SQLiteLedger
 from storage.decision_trace import DecisionTraceWriter, FilterEval
 from storage.pending_queue import PendingResolutionQueue, PendingEntry
 from storage.window_planner import plan_resolution_rows
-from storage.provenance import sha256_file, feature_names_hash, ProvenanceEnvelope, calibration_map_hash
+from storage.provenance import sha256_file, feature_names_hash, ordered_feature_names_hash, ProvenanceEnvelope, calibration_map_hash
 from storage.lifecycle import evaluate_lifecycle_transitions
 from execution.calibration import CalibratorRegistry
 from regime.tagger import compute_regime, RegimeTags
@@ -195,16 +195,54 @@ class PaperTrader:
         # Load models
         self.models: dict[str, lgb.Booster] = {}
         self.feature_names: dict[str, list[str]] = {}
+        self._trained_num_features: dict[str, int] = {}
+        self._trained_contract_hash: dict[str, str] = {}
+        self._trained_contract_order_hash: dict[str, str] = {}
+        self._contract_source: dict[str, str] = {}
+
         for name, path in list(model_paths.items()):
             try:
                 booster = lgb.Booster(model_file=path)
                 model_dir = Path(path).parent
                 fn_path = model_dir / "feature_names.json"
+
+                # Check what source booster feature names have
+                raw_names = None
+                try:
+                    raw_names = booster.feature_name()
+                except Exception:
+                    pass
+                is_generic = True
+                if raw_names and all(isinstance(n, str) for n in raw_names) and len(raw_names) > 0:
+                    if not any(n.startswith("Column_") for n in raw_names):
+                        is_generic = False
+
                 feat_names = resolve_model_feature_contract(booster, fn_path)
+
+                # Validation check at load time: dimension mismatch
+                if booster.num_feature() != len(feat_names):
+                    logger.error(
+                        "LOAD_ALIGNMENT_MISMATCH: %s booster.num_feature()=%d != len(resolved_contract)=%d — refusing to load",
+                        name, booster.num_feature(), len(feat_names),
+                    )
+                    continue
+
                 self.models[name] = booster
                 self.feature_names[name] = feat_names
-                logger.info("Loaded model %s from %s (%d features)",
-                            name, path, len(self.feature_names[name]))
+                self._trained_num_features[name] = booster.num_feature()
+
+                # Store hashes and contract source
+                if is_generic:
+                    self._contract_source[name] = "sidecar"
+                    self._trained_contract_hash[name] = feature_names_hash(feat_names)
+                    self._trained_contract_order_hash[name] = ordered_feature_names_hash(feat_names)
+                else:
+                    self._contract_source[name] = "booster_intrinsic"
+                    self._trained_contract_hash[name] = feature_names_hash(raw_names)
+                    self._trained_contract_order_hash[name] = ordered_feature_names_hash(raw_names)
+
+                logger.info("Loaded model %s from %s (%d features, source=%s)",
+                            name, path, len(self.feature_names[name]), self._contract_source[name])
             except Exception as e:
                 logger.error("Failed to load model or resolve feature contract for %s from %s: %s",
                              name, path, e)
@@ -633,9 +671,51 @@ class PaperTrader:
                 if row["feature_names_path"] and Path(row["feature_names_path"]).exists():
                     fn_path = Path(row["feature_names_path"])
                 try:
+                    # Check what source booster feature names have
+                    raw_names = None
+                    try:
+                        raw_names = new_booster.feature_name()
+                    except Exception:
+                        pass
+                    is_generic = True
+                    if raw_names and all(isinstance(n, str) for n in raw_names) and len(raw_names) > 0:
+                        if not any(n.startswith("Column_") for n in raw_names):
+                            is_generic = False
+
                     feat_names = resolve_model_feature_contract(new_booster, fn_path)
+
+                    # Validation check at load time: dimension mismatch
+                    if new_booster.num_feature() != len(feat_names):
+                        logger.error(
+                            "fleet_hot_reload: LOAD_ALIGNMENT_MISMATCH: %s booster.num_feature()=%d != len(resolved_contract)=%d — skipping",
+                            name, new_booster.num_feature(), len(feat_names),
+                        )
+                        registry_names.discard(name)
+                        continue
+
                     self.models[name] = new_booster
                     self.feature_names[name] = feat_names
+
+                    if not hasattr(self, "_trained_num_features"):
+                        self._trained_num_features = {}
+                    if not hasattr(self, "_trained_contract_hash"):
+                        self._trained_contract_hash = {}
+                    if not hasattr(self, "_trained_contract_order_hash"):
+                        self._trained_contract_order_hash = {}
+                    if not hasattr(self, "_contract_source"):
+                        self._contract_source = {}
+
+                    self._trained_num_features[name] = new_booster.num_feature()
+
+                    if is_generic:
+                        self._contract_source[name] = "sidecar"
+                        self._trained_contract_hash[name] = feature_names_hash(feat_names)
+                        self._trained_contract_order_hash[name] = ordered_feature_names_hash(feat_names)
+                    else:
+                        self._contract_source[name] = "booster_intrinsic"
+                        self._trained_contract_hash[name] = feature_names_hash(raw_names)
+                        self._trained_contract_order_hash[name] = ordered_feature_names_hash(raw_names)
+
                 except Exception as contract_err:
                     logger.error(
                         "fleet_hot_reload: failed to resolve feature contract for %s: %s — skipping",
@@ -645,7 +725,6 @@ class PaperTrader:
                     continue
 
                 # Compute provenance envelope
-                from storage.provenance import sha256_file, feature_names_hash
                 self._model_envelopes[name] = {
                     "model_artifact_hash": sha256_file(artifact_path),
                     "feature_names_hash": feature_names_hash(feat_names),
@@ -653,8 +732,8 @@ class PaperTrader:
 
                 self._model_meta[name] = new_meta
                 logger.info(
-                    "fleet_hot_reload: added model %s (%d features) from %s",
-                    name, len(feat_names), artifact_path,
+                    "fleet_hot_reload: added model %s (%d features, source=%s) from %s",
+                    name, len(feat_names), self._contract_source[name], artifact_path,
                 )
                 added.append(name)
             else:
@@ -694,6 +773,14 @@ class PaperTrader:
                 self.feature_names.pop(name, None)
                 self._model_envelopes.pop(name, None)
                 self._model_meta.pop(name, None)
+                if hasattr(self, "_trained_num_features"):
+                    self._trained_num_features.pop(name, None)
+                if hasattr(self, "_trained_contract_hash"):
+                    self._trained_contract_hash.pop(name, None)
+                if hasattr(self, "_trained_contract_order_hash"):
+                    self._trained_contract_order_hash.pop(name, None)
+                if hasattr(self, "_contract_source"):
+                    self._contract_source.pop(name, None)
                 logger.info("fleet_hot_reload: removed model %s (deactivated or suspended)", name)
                 removed.append(name)
 

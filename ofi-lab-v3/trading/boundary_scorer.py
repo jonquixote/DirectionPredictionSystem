@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 import numpy as np
+from storage.provenance import feature_names_hash, ordered_feature_names_hash
 
 # Module-level constants are duplicated here from paper_trader to avoid a
 # circular import (paper_trader imports BoundaryScorer; if boundary_scorer
@@ -161,6 +162,60 @@ class BoundaryScorer:
                 if model_name in blocked_models:
                     _diag_blocked_skip += 1
                     continue
+
+                # ── Predict-time alignment assertion ──────────────────────
+                served_cols = t.feature_names[model_name]
+                served_dim = len(served_cols)
+                expected_dim = t._trained_num_features[model_name]
+
+                served_set_hash = feature_names_hash(served_cols)
+                expected_set_hash = t._trained_contract_hash[model_name]
+
+                served_order_hash = ordered_feature_names_hash(served_cols)
+                expected_order_hash = t._trained_contract_order_hash[model_name]
+
+                source = t._contract_source[model_name]
+
+                dim_ok = (served_dim == expected_dim)
+                set_ok = (served_set_hash == expected_set_hash)
+                order_ok = (served_order_hash == expected_order_hash)
+
+                if not (dim_ok and set_ok and order_ok):
+                    logger.error(
+                        "ALIGNMENT_MISMATCH model=%s source=%s dim_ok=%s (expected=%d, served=%d) "
+                        "set_ok=%s (expected=%.16s, served=%.16s) "
+                        "order_ok=%s (expected=%.16s, served=%.16s) — REFUSING PREDICTION",
+                        model_name, source,
+                        dim_ok, expected_dim, served_dim,
+                        set_ok, expected_set_hash, served_set_hash,
+                        order_ok, expected_order_hash, served_order_hash,
+                    )
+                    logger.error(
+                        "ALIGNMENT_MISMATCH diagnostic: served_first3=%s served_last3=%s",
+                        served_cols[:3], served_cols[-3:],
+                    )
+                    if source == "sidecar":
+                        logger.error(
+                            "ALIGNMENT_MISMATCH legacy model: validation compared served contract "
+                            "against sidecar feature_names.json (provenance unproven), not booster intrinsic names."
+                        )
+                    else:
+                        logger.error(
+                            "ALIGNMENT_MISMATCH intrinsic model: validation compared served contract "
+                            "against booster intrinsic feature names."
+                        )
+                    continue  # Refuse prediction
+
+                if source == "sidecar":
+                    logger.debug(
+                        "ALIGNMENT_PASS model=%s source=%s — served order is consistent with sidecar",
+                        model_name, source,
+                    )
+                else:
+                    logger.debug(
+                        "ALIGNMENT_PASS model=%s source=%s — served order is provably correct",
+                        model_name, source,
+                    )
 
                 features = {col: bar.get(col, 0.0) for col in t.feature_names[model_name]}
                 feature_vec = np.array(
