@@ -248,9 +248,11 @@ class BoundaryScorer:
                 ev = 0.0
                 if p_market is not None and 0 < p_market < 1:
                     from execution.ev import compute_ev_polymarket
+                    # For DOWN predictions, entry price is the NO contract = 1 - p_market
+                    ev_p_market = (1.0 - p_market) if pred_direction == "down" else p_market
                     ev_result = compute_ev_polymarket(
                         calibrated_p=calibrated_p,
-                        p_market=p_market,
+                        p_market=ev_p_market,
                         stake=SIMULATED_STAKE_USDC,
                     )
                     ev = ev_result.ev
