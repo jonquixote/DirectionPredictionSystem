@@ -22,7 +22,7 @@ from trading.ledger import (
     read_records, merge_predictions_with_resolutions,
     merge_trades_with_resolutions,
 )
-from trading.live_features import V3_FEATURE_COLS
+from feature_engineering.feature_contract import FEATURE_COLS
 
 LEGACY_NAME_MAP = {
     "h300":   "900s_btc_v3_20260315",
@@ -38,7 +38,7 @@ LEGACY_HORIZON_SECONDS = {"h300": 900, "h60": 60, "h60_v3": 60}
 
 
 def _legacy_envelope(legacy_name, calibration_path, policy_path):
-    feat_hash = feature_names_hash(V3_FEATURE_COLS)
+    feat_hash = feature_names_hash(FEATURE_COLS)
     if Path(calibration_path).exists():
         cal = json.loads(Path(calibration_path).read_text())
         cal_hash = calibration_map_hash(cal)

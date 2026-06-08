@@ -44,7 +44,8 @@ import numpy as np
 import lightgbm as lgb
 
 from api.bybit import BybitOrderBookManager
-from trading.live_features import LiveFeatureComputer, V3_FEATURE_COLS, V3_MODEL_FEATURE_COLS
+from trading.live_features import LiveFeatureComputer
+from feature_engineering.feature_contract import resolve_model_feature_contract
 from trading.polymarket_discovery import get_p_market
 
 logging.basicConfig(
@@ -245,21 +246,24 @@ class BTC900sPaperTrader:
         # Load models
         self.models: dict[str, lgb.Booster] = {}
         self.feature_names: dict[str, list[str]] = {}
-        for name, path in model_paths.items():
-            model_dir = Path(path).parent
-            self.models[name] = lgb.Booster(model_file=path)
-            fn_path = model_dir / "feature_names.json"
-            if fn_path.exists():
-                with open(fn_path) as f:
-                    self.feature_names[name] = json.load(f)
-            else:
-                self.feature_names[name] = V3_MODEL_FEATURE_COLS
-            cfg = MODEL_CONFIG[name]
-            logger.info(
-                "Loaded %s: %d features, accuracy_est=%.2f, kelly=%.1f%%",
-                name, len(self.feature_names[name]),
-                cfg["accuracy_estimate"], cfg["kelly_fraction"] * 100,
-            )
+        for name, path in list(model_paths.items()):
+            try:
+                booster = lgb.Booster(model_file=path)
+                model_dir = Path(path).parent
+                fn_path = model_dir / "feature_names.json"
+                feat_names = resolve_model_feature_contract(booster, fn_path)
+                self.models[name] = booster
+                self.feature_names[name] = feat_names
+                cfg = MODEL_CONFIG[name]
+                logger.info(
+                    "Loaded %s: %d features, accuracy_est=%.2f, kelly=%.1f%%",
+                    name, len(self.feature_names[name]),
+                    cfg["accuracy_estimate"], cfg["kelly_fraction"] * 100,
+                )
+            except Exception as e:
+                logger.error("Failed to load model or resolve feature contract for %s from %s: %s",
+                             name, path, e)
+                raise RuntimeError(f"Could not load model {name}: {e}") from e
 
         # Feature computer (BTC only)
         self.feature_computer = LiveFeatureComputer(

@@ -40,6 +40,9 @@ def _make_dummy_lgb_model(path: Path) -> None:
                         callbacks=[lgb.early_stopping(10, verbose=False),
                                    lgb.log_evaluation(-1)])
     booster.save_model(str(path))
+    import json
+    with open(path.parent / "feature_names.json", "w") as f:
+        json.dump([f"f{i}" for i in range(5)], f)
 
 
 def _insert_model(conn, name, artifact_path, paper_active=1,

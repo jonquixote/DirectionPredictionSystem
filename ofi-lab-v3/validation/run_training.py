@@ -65,31 +65,7 @@ _LEGACY_VAL_END_DEFAULT = "2026-02-15"
 # TEST = 2026-02-16 → 2026-03-23 (legacy)
 
 # Full feature set — includes symbol_cat, used in joint training mode.
-FEATURE_COLS = [
-    # Point-in-time features (vpin dropped — SHAP-confirmed noise)
-    "mlofi", "ofi", "mid_price", "spread", "relative_spread",
-    "vwap_deviation", "roll",
-    "mlofi_1", "mlofi_2", "mlofi_3", "mlofi_4", "mlofi_5",
-    "mlofi_6", "mlofi_7", "mlofi_8", "mlofi_9", "mlofi_10",
-    # Rolling window features (mlofi_120s_mean dropped — diminishing returns)
-    "mlofi_30s_mean", "mlofi_60s_mean",
-    "ofi_30s_mean", "ofi_60s_mean",
-    "mlofi_30s_std", "mlofi_60s_std",
-    "ofi_60s_std",
-    "spread_5m_pct",
-    # VWAP enrichment (strengthen rank-1 SHAP signal)
-    "vwap_2m_deviation", "vwap_dev_velocity", "vwap_dev_30s_std",
-    # Order flow enrichment (strengthen rank-2/4 SHAP signal)
-    "mlofi_momentum",
-    # Cross-asset features
-    "btc_vwap_deviation", "btc_mlofi_30s_mean", "eth_mlofi_30s_mean",
-    # Categorical
-    "symbol_cat",
-]
-
-# Per-symbol feature set — drops symbol_cat (constant within a per-symbol
-# DataFrame, so it adds no information).
-FEATURE_COLS_PER_SYMBOL = [c for c in FEATURE_COLS if c != "symbol_cat"]
+from feature_engineering.feature_contract import FEATURE_COLS, FEATURE_COLS_PER_SYMBOL
 
 GO_NOGO_AUC = 0.53  # applied to auc_at_contract_times, NOT auc_full
 
@@ -342,6 +318,7 @@ def walk_forward_cv(
         model = lgb.LGBMClassifier(**lgbm_params)
         model.fit(
             X_tr, y_tr,
+            feature_name=feature_names,
             eval_set=[(X_va, y_va)],
             callbacks=[lgb.log_evaluation(period=0)],  # suppress per-iteration logging
         )
@@ -407,7 +384,7 @@ def train_final_model(
     y_test = df_test["target"].values
 
     model = lgb.LGBMClassifier(**lgbm_params)
-    model.fit(X_trainval, y_trainval)
+    model.fit(X_trainval, y_trainval, feature_name=feature_names)
 
     empty_test = len(df_test) == 0
 

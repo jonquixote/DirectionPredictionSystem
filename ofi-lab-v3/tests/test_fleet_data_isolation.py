@@ -24,13 +24,13 @@ import pytest
 
 def _make_feature_parquet(path: Path, symbol: str, dates: list[str], n_per_day: int = 5):
     """Create a minimal parquet file that matches the schema load_features expects."""
-    from trading.live_features import V3_FEATURE_COLS
+    from feature_engineering.feature_contract import FEATURE_COLS
 
     rows = []
     for date_str in dates:
         base_ts = int(pd.Timestamp(date_str, tz="UTC").timestamp() * 1000)
         for i in range(n_per_day):
-            row = {col: float(np.random.default_rng(42).normal()) for col in V3_FEATURE_COLS if col != "symbol_cat"}
+            row = {col: float(np.random.default_rng(42).normal()) for col in FEATURE_COLS if col != "symbol_cat"}
             row["symbol_cat"] = 0.0
             row["cts"] = base_ts + i * 60_000  # 1-min spacing
             row["mid_price"] = 60000.0 + i

@@ -23,7 +23,8 @@ import polars as pl
 # Add project root to path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from trading.live_features import LiveFeatureComputer, V3_FEATURE_COLS
+from trading.live_features import LiveFeatureComputer
+from feature_engineering.feature_contract import FEATURE_COLS
 
 
 # ── Test configuration ──
@@ -141,17 +142,17 @@ class TestLiveFeaturesMatchOffline:
     def test_feature_vector_shape(self):
         """Feature vector should have the right number of columns."""
         self._feed_l2_data(max_rows=700)
-        vec = self.computer.get_feature_vector(TEST_SYMBOL)
+        vec = self.computer.get_feature_vector(TEST_SYMBOL, FEATURE_COLS)
         assert vec is not None, "Feature vector should not be None"
-        assert len(vec) == len(V3_FEATURE_COLS), \
-            f"Expected {len(V3_FEATURE_COLS)} features, got {len(vec)}"
+        assert len(vec) == len(FEATURE_COLS), \
+            f"Expected {len(FEATURE_COLS)} features, got {len(vec)}"
 
     def test_feature_dict_has_all_columns(self):
         """Feature dict should contain all V3 columns."""
         self._feed_l2_data(max_rows=700)
-        fd = self.computer.get_feature_dict(TEST_SYMBOL)
+        fd = self.computer.get_feature_dict(TEST_SYMBOL, FEATURE_COLS)
         assert fd is not None
-        for col in V3_FEATURE_COLS:
+        for col in FEATURE_COLS:
             assert col in fd, f"Missing feature column: {col}"
 
     def test_mid_price_matches_offline(self):
@@ -355,10 +356,10 @@ class TestLiveFeatureComputerUnit:
             cts = 60_000 * 5 + sec * 1000
             c.on_book_update("BTCUSDT", bids, asks, cts)
 
-        vec = c.get_feature_vector("BTCUSDT")
+        vec = c.get_feature_vector("BTCUSDT", FEATURE_COLS)
         if vec is not None:
-            assert len(vec) == len(V3_FEATURE_COLS), \
-                f"Expected {len(V3_FEATURE_COLS)}, got {len(vec)}"
+            assert len(vec) == len(FEATURE_COLS), \
+                f"Expected {len(FEATURE_COLS)}, got {len(vec)}"
 
 
 if __name__ == "__main__":

@@ -37,41 +37,6 @@ DOWNSAMPLE_MS = 1000  # 1-second downsample
 SYMBOLS = ["BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT"]
 SYMBOL_MAP = {s: i for i, s in enumerate(SYMBOLS)}
 
-# v3 feature columns in training order (must match run_training.py FEATURE_COLS)
-# V1/V2 models use this list (includes raw mid_price)
-V3_FEATURE_COLS = [
-    "mlofi", "ofi", "mid_price", "spread", "relative_spread",
-    "vwap_deviation", "roll",
-    "mlofi_1", "mlofi_2", "mlofi_3", "mlofi_4", "mlofi_5",
-    "mlofi_6", "mlofi_7", "mlofi_8", "mlofi_9", "mlofi_10",
-    "mlofi_30s_mean", "mlofi_60s_mean",
-    "ofi_30s_mean", "ofi_60s_mean",
-    "mlofi_30s_std", "mlofi_60s_std",
-    "ofi_60s_std",
-    "spread_5m_pct",
-    "vwap_2m_deviation", "vwap_dev_velocity", "vwap_dev_30s_std",
-    "mlofi_momentum",
-    "btc_vwap_deviation", "btc_mlofi_30s_mean", "eth_mlofi_30s_mean",
-    "symbol_cat",
-]
-
-# V3 model feature columns (mid_price replaced with mid_price_dev_30d, spread dropped)
-V3_MODEL_FEATURE_COLS = [
-    "mlofi", "ofi", "mid_price_dev_30d", "relative_spread",
-    "vwap_deviation", "roll",
-    "mlofi_1", "mlofi_2", "mlofi_3", "mlofi_4", "mlofi_5",
-    "mlofi_6", "mlofi_7", "mlofi_8", "mlofi_9", "mlofi_10",
-    "mlofi_30s_mean", "mlofi_60s_mean",
-    "ofi_30s_mean", "ofi_60s_mean",
-    "mlofi_30s_std", "mlofi_60s_std",
-    "ofi_60s_std",
-    "spread_5m_pct",
-    "vwap_2m_deviation", "vwap_dev_velocity", "vwap_dev_30s_std",
-    "mlofi_momentum",
-    "btc_vwap_deviation", "btc_mlofi_30s_mean", "eth_mlofi_30s_mean",
-    "symbol_cat",
-]
-
 # EWM constants
 EWM_SPAN_30D = 43200      # 30 days × 1440 1-min bars
 EWM_ALPHA = 2.0 / (EWM_SPAN_30D + 1)  # ~4.6e-5
@@ -320,25 +285,23 @@ class LiveFeatureComputer:
 
         return bar
 
-    def get_feature_vector(self, symbol: str, feature_cols: list[str] | None = None) -> Optional[np.ndarray]:
+    def get_feature_vector(self, symbol: str, feature_cols: list[str]) -> Optional[np.ndarray]:
         """Get feature vector as numpy array in training column order."""
-        cols = feature_cols or V3_FEATURE_COLS
         bar = self.get_1min_bar(symbol)
         if bar is None:
             return None
         try:
-            return np.array([bar[col] for col in cols], dtype=np.float64)
+            return np.array([bar[col] for col in feature_cols], dtype=np.float64)
         except KeyError as e:
             logger.error("Missing feature column %s for %s", e, symbol)
             return None
 
-    def get_feature_dict(self, symbol: str, feature_cols: list[str] | None = None) -> Optional[dict]:
+    def get_feature_dict(self, symbol: str, feature_cols: list[str]) -> Optional[dict]:
         """Get feature dict with only the columns needed for prediction."""
-        cols = feature_cols or V3_FEATURE_COLS
         bar = self.get_1min_bar(symbol)
         if bar is None:
             return None
-        return {col: bar.get(col, 0.0) for col in cols}
+        return {col: bar.get(col, 0.0) for col in feature_cols}
 
     # ── Internal: point-in-time features (matches build_features.py) ──
 

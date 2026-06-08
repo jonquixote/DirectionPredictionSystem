@@ -36,7 +36,8 @@ import lightgbm as lgb
 import numpy as np
 
 from api.bybit import BybitOrderBookManager
-from trading.live_features import LiveFeatureComputer, V3_FEATURE_COLS
+from trading.live_features import LiveFeatureComputer
+from feature_engineering.feature_contract import resolve_model_feature_contract
 from trading.polymarket_discovery import get_p_market
 
 logging.basicConfig(
@@ -184,11 +185,7 @@ class H60V2PaperTrader:
         model_dir = Path(model_path).parent
         self.model = lgb.Booster(model_file=model_path)
         fn_path = model_dir / "feature_names.json"
-        if fn_path.exists():
-            with open(fn_path) as f:
-                self.feature_names = json.load(f)
-        else:
-            self.feature_names = V3_FEATURE_COLS
+        self.feature_names = resolve_model_feature_contract(self.model, fn_path)
         logger.info("Loaded h60_v2 from %s (%d features)", model_path, len(self.feature_names))
 
         # Feature computer (BTC only)

@@ -168,6 +168,14 @@ class BoundaryScorer:
                     dtype=np.float64,
                 ).reshape(1, -1)
 
+                logger.debug(
+                    "[FORENSIC] %s: feature_count=%d first_col=%s last_col=%s",
+                    model_name,
+                    len(t.feature_names[model_name]),
+                    t.feature_names[model_name][0] if t.feature_names[model_name] else None,
+                    t.feature_names[model_name][-1] if t.feature_names[model_name] else None,
+                )
+
                 pred_proba = float(model.predict(feature_vec)[0])
                 pred_direction = "up" if pred_proba > 0.5 else "down"
 

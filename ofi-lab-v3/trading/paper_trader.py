@@ -31,7 +31,8 @@ import numpy as np
 import lightgbm as lgb
 
 from api.bybit import BybitOrderBookManager
-from trading.live_features import LiveFeatureComputer, V3_FEATURE_COLS
+from trading.live_features import LiveFeatureComputer
+from feature_engineering.feature_contract import resolve_model_feature_contract
 from trading.ledger import Ledger
 from trading.polymarket_discovery import get_p_market
 
@@ -194,17 +195,19 @@ class PaperTrader:
         # Load models
         self.models: dict[str, lgb.Booster] = {}
         self.feature_names: dict[str, list[str]] = {}
-        for name, path in model_paths.items():
-            model_dir = Path(path).parent
-            self.models[name] = lgb.Booster(model_file=path)
-            fn_path = model_dir / "feature_names.json"
-            if fn_path.exists():
-                with open(fn_path) as f:
-                    self.feature_names[name] = json.load(f)
-            else:
-                self.feature_names[name] = V3_FEATURE_COLS
-            logger.info("Loaded model %s from %s (%d features)",
-                        name, path, len(self.feature_names[name]))
+        for name, path in list(model_paths.items()):
+            try:
+                booster = lgb.Booster(model_file=path)
+                model_dir = Path(path).parent
+                fn_path = model_dir / "feature_names.json"
+                feat_names = resolve_model_feature_contract(booster, fn_path)
+                self.models[name] = booster
+                self.feature_names[name] = feat_names
+                logger.info("Loaded model %s from %s (%d features)",
+                            name, path, len(self.feature_names[name]))
+            except Exception as e:
+                logger.error("Failed to load model or resolve feature contract for %s from %s: %s",
+                             name, path, e)
 
         # Ledgers (one per model)
         self.ledgers: dict[str, Ledger] = {}  # legacy retired in T22; SQLite is canonical
@@ -629,17 +632,17 @@ class PaperTrader:
                 fn_path = Path(artifact_path).parent / "feature_names.json"
                 if row["feature_names_path"] and Path(row["feature_names_path"]).exists():
                     fn_path = Path(row["feature_names_path"])
-                if fn_path.exists():
-                    try:
-                        with open(fn_path) as _f:
-                            feat_names = json.load(_f)
-                    except Exception:
-                        feat_names = V3_FEATURE_COLS
-                else:
-                    feat_names = V3_FEATURE_COLS
-
-                self.models[name] = new_booster
-                self.feature_names[name] = feat_names
+                try:
+                    feat_names = resolve_model_feature_contract(new_booster, fn_path)
+                    self.models[name] = new_booster
+                    self.feature_names[name] = feat_names
+                except Exception as contract_err:
+                    logger.error(
+                        "fleet_hot_reload: failed to resolve feature contract for %s: %s — skipping",
+                        name, contract_err,
+                    )
+                    registry_names.discard(name)
+                    continue
 
                 # Compute provenance envelope
                 from storage.provenance import sha256_file, feature_names_hash

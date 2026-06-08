@@ -41,24 +41,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger("retrain_v3")
 
-# ── V3 Feature list ──────────────────────────────────────────
-# mid_price → replaced by mid_price_dev_30d
-# spread → dropped (price-level dependent)
-V3_FEATURE_COLS = [
-    "mlofi", "ofi", "mid_price_dev_30d", "relative_spread",
-    "vwap_deviation", "roll",
-    "mlofi_1", "mlofi_2", "mlofi_3", "mlofi_4", "mlofi_5",
-    "mlofi_6", "mlofi_7", "mlofi_8", "mlofi_9", "mlofi_10",
-    "mlofi_30s_mean", "mlofi_60s_mean",
-    "ofi_30s_mean", "ofi_60s_mean",
-    "mlofi_30s_std", "mlofi_60s_std",
-    "ofi_60s_std",
-    "spread_5m_pct",
-    "vwap_2m_deviation", "vwap_dev_velocity", "vwap_dev_30s_std",
-    "mlofi_momentum",
-    "btc_vwap_deviation", "btc_mlofi_30s_mean", "eth_mlofi_30s_mean",
-    "symbol_cat",
-]
+from feature_engineering.feature_contract import V3_MODEL_FEATURE_COLS as V3_FEATURE_COLS
 
 # V3 splits: 90-day window ending 2026-03-23
 # Train: Jan 1 – Mar 4 (~63 days)
@@ -295,7 +278,7 @@ def main():
 
     logger.info("Training final model...")
     model = lgb.LGBMClassifier(**LGBM_PARAMS)
-    model.fit(X_trainval, y_trainval)
+    model.fit(X_trainval, y_trainval, feature_name=feature_names)
 
     y_pred = model.predict_proba(X_test)[:, 1]
 
