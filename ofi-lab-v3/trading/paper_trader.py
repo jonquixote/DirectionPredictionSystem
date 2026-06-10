@@ -199,6 +199,10 @@ class PaperTrader:
         self._trained_contract_hash: dict[str, str] = {}
         self._trained_contract_order_hash: dict[str, str] = {}
         self._contract_source: dict[str, str] = {}
+        # Canonical training contract — independent of sidecar.
+        # This is the order X = df[FEATURE_COLS_PER_SYMBOL].values was built in run_training.py.
+        from feature_engineering.feature_contract import FEATURE_COLS_PER_SYMBOL as _CANONICAL_CONTRACT
+        self._canonical_contract: list[str] = list(_CANONICAL_CONTRACT)
 
         for name, path in list(model_paths.items()):
             try:
@@ -231,15 +235,17 @@ class PaperTrader:
                 self.feature_names[name] = feat_names
                 self._trained_num_features[name] = booster.num_feature()
 
-                # Store hashes and contract source
+                # Store hashes and contract source.
+                # The "trained" hashes come from the CANONICAL contract in feature_contract.py
+                # (the module run_training.py imports), NOT from the sidecar. This ensures
+                # the serve-time assertion compares two independent sources:
+                #   served (sidecar-resolved) vs trained (canonical module).
+                self._trained_contract_hash[name] = feature_names_hash(self._canonical_contract)
+                self._trained_contract_order_hash[name] = ordered_feature_names_hash(self._canonical_contract)
                 if is_generic:
                     self._contract_source[name] = "sidecar"
-                    self._trained_contract_hash[name] = feature_names_hash(feat_names)
-                    self._trained_contract_order_hash[name] = ordered_feature_names_hash(feat_names)
                 else:
                     self._contract_source[name] = "booster_intrinsic"
-                    self._trained_contract_hash[name] = feature_names_hash(raw_names)
-                    self._trained_contract_order_hash[name] = ordered_feature_names_hash(raw_names)
 
                 logger.info("Loaded model %s from %s (%d features, source=%s)",
                             name, path, len(self.feature_names[name]), self._contract_source[name])
@@ -707,14 +713,16 @@ class PaperTrader:
 
                     self._trained_num_features[name] = new_booster.num_feature()
 
+                    # Canonical contract — same independent source as initial load
+                    if not hasattr(self, "_canonical_contract"):
+                        from feature_engineering.feature_contract import FEATURE_COLS_PER_SYMBOL as _CC
+                        self._canonical_contract = list(_CC)
+                    self._trained_contract_hash[name] = feature_names_hash(self._canonical_contract)
+                    self._trained_contract_order_hash[name] = ordered_feature_names_hash(self._canonical_contract)
                     if is_generic:
                         self._contract_source[name] = "sidecar"
-                        self._trained_contract_hash[name] = feature_names_hash(feat_names)
-                        self._trained_contract_order_hash[name] = ordered_feature_names_hash(feat_names)
                     else:
                         self._contract_source[name] = "booster_intrinsic"
-                        self._trained_contract_hash[name] = feature_names_hash(raw_names)
-                        self._trained_contract_order_hash[name] = ordered_feature_names_hash(raw_names)
 
                 except Exception as contract_err:
                     logger.error(

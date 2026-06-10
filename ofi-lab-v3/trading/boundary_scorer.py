@@ -164,6 +164,10 @@ class BoundaryScorer:
                     continue
 
                 # ── Predict-time alignment assertion ──────────────────────
+                # Two independent sources compared:
+                #   SERVED: t.feature_names[model_name] — resolved from sidecar at load time
+                #   TRAINED: canonical FEATURE_COLS_PER_SYMBOL from feature_contract.py
+                #            (the module run_training.py imports to build X)
                 served_cols = t.feature_names[model_name]
                 served_dim = len(served_cols)
                 expected_dim = t._trained_num_features[model_name]
@@ -191,33 +195,41 @@ class BoundaryScorer:
                         order_ok, expected_order_hash, served_order_hash,
                     )
                     logger.error(
-                        "ALIGNMENT_MISMATCH diagnostic: served_first3=%s served_last3=%s",
+                        "ALIGNMENT_MISMATCH diagnostic: served_first3=%s served_last3=%s "
+                        "canonical_first3=%s canonical_last3=%s",
                         served_cols[:3], served_cols[-3:],
+                        t._canonical_contract[:3], t._canonical_contract[-3:],
                     )
                     if source == "sidecar":
                         logger.error(
-                            "ALIGNMENT_MISMATCH legacy model: validation compared served contract "
-                            "against sidecar feature_names.json (provenance unproven), not booster intrinsic names."
+                            "ALIGNMENT_MISMATCH: served contract (sidecar-resolved) does NOT match "
+                            "canonical training contract (feature_contract.FEATURE_COLS_PER_SYMBOL). "
+                            "Sidecar provenance is unproven — refusing prediction."
                         )
                     else:
                         logger.error(
-                            "ALIGNMENT_MISMATCH intrinsic model: validation compared served contract "
-                            "against booster intrinsic feature names."
+                            "ALIGNMENT_MISMATCH: served contract (booster-intrinsic) does NOT match "
+                            "canonical training contract (feature_contract.FEATURE_COLS_PER_SYMBOL)."
                         )
                     continue  # Refuse prediction
 
-                if source == "sidecar":
-                    logger.debug(
-                        "ALIGNMENT_PASS model=%s source=%s — served order is consistent with sidecar",
-                        model_name, source,
+                # ── Columns-exist guard: no silent zero-fill ──────────────
+                missing_cols = [col for col in served_cols if col not in bar]
+                if missing_cols:
+                    logger.error(
+                        "COLUMNS_MISSING model=%s missing=%s — bar would zero-fill these; "
+                        "REFUSING PREDICTION to avoid garbage input",
+                        model_name, missing_cols,
                     )
-                else:
-                    logger.debug(
-                        "ALIGNMENT_PASS model=%s source=%s — served order is provably correct",
-                        model_name, source,
-                    )
+                    continue  # Refuse prediction
 
-                features = {col: bar.get(col, 0.0) for col in t.feature_names[model_name]}
+                logger.debug(
+                    "ALIGNMENT_PASS model=%s source=%s — served order matches "
+                    "canonical FEATURE_COLS_PER_SYMBOL",
+                    model_name, source,
+                )
+
+                features = {col: bar[col] for col in t.feature_names[model_name]}
                 feature_vec = np.array(
                     [features[col] for col in t.feature_names[model_name]],
                     dtype=np.float64,
