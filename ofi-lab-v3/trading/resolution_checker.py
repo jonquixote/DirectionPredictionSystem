@@ -94,7 +94,9 @@ class ResolutionChecker:
                 price_open=entry.price_at_open,
                 price_close=close_price,
             )
-            feed_cal = entry.market_window_seconds == 300
+            # Flats (correct=None) never feed calibration — a no-contest
+            # outcome is not evidence about the probability estimate.
+            feed_cal = entry.market_window_seconds == 300 and correct is not None
             self._sqlite_ledger.record_resolution(
                 prediction_id=entry.prediction_id,
                 ts_resolved_ms=entry.ts_resolve_at_ms,
@@ -224,22 +226,34 @@ class ResolutionChecker:
 
     @staticmethod
     def compute_outcome(direction, price_open, price_close):
+        """Model-quality lens: directional correctness only.
+
+        Flat (close == open) returns correct=None so flats are EXCLUDED
+        from model win rates. Before 2026-06-10 flats scored correct=0
+        for both directions, dragging fleet win rate ~1pp below its
+        directional value. Trading-lens scoring (flat resolves DOWN on
+        the contract) lives in compute_paper_pnl — never conflate.
+        """
         if price_close > price_open:
             result = "up"
         elif price_close < price_open:
             result = "down"
         else:
-            result = "flat"
+            return "flat", None
         correct = (result == direction)
         return result, correct
 
     @staticmethod
     def compute_paper_pnl(*, direction, calibrated_p, stake,
                           price_open, price_close):
-        """Polymarket-style binary option PnL.
+        """Polymarket-style binary option PnL — trading lens.
 
         Lifted from v2 paper_trader.py _resolve_trade lines ~1100-1141.
         Fee coef 0.072 matches Polymarket's published rate.
+
+        Flat resolves DOWN: the contract pays NO when price fails to
+        rise, so a DOWN call wins on flat. (Model-quality metrics treat
+        flat as no-contest — see compute_outcome.)
         """
         if price_close > price_open:
             result = "up"
@@ -247,7 +261,10 @@ class ResolutionChecker:
             result = "down"
         else:
             result = "flat"
-        correct = (result == direction)
+        if result == "flat":
+            correct = (direction == "down")
+        else:
+            correct = (result == direction)
         fee = 0.072 * calibrated_p * (1 - calibrated_p) * stake
         if correct:
             gross = stake * (1 - calibrated_p) / calibrated_p if calibrated_p > 0 else 0

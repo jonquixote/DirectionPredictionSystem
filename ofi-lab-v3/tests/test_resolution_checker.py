@@ -330,10 +330,15 @@ class TestComputeOutcome:
         assert result == "down"
         assert correct is True
 
-    def test_compute_outcome_flat_when_price_unchanged(self):
+    def test_compute_outcome_flat_is_no_contest_for_model_metrics(self):
+        """Flat = no-contest: correct is None for BOTH directions so flats
+        are excluded from model win rates (NULL in SQL aggregation)."""
         result, correct = ResolutionChecker.compute_outcome("up", 100.0, 100.0)
         assert result == "flat"
-        assert correct is False
+        assert correct is None
+        result, correct = ResolutionChecker.compute_outcome("down", 100.0, 100.0)
+        assert result == "flat"
+        assert correct is None
 
     def test_compute_outcome_correct_when_direction_matches_result(self):
         """Direction 'down' + price falling = correct."""
@@ -390,6 +395,25 @@ class TestComputePaperPnl:
         )
         expected_fee = 0.072 * p * (1 - p) * stake
         assert fee == pytest.approx(expected_fee)
+
+    def test_compute_paper_pnl_flat_resolves_down(self):
+        """Trading lens: contract pays NO when price fails to rise, so a
+        DOWN call wins on flat and an UP call loses."""
+        gross, fee, net, result, correct = ResolutionChecker.compute_paper_pnl(
+            direction="down", calibrated_p=0.6, stake=10.0,
+            price_open=100.0, price_close=100.0,
+        )
+        assert result == "flat"
+        assert correct is True
+        assert gross == pytest.approx(10.0 * 0.4 / 0.6)
+
+        gross, fee, net, result, correct = ResolutionChecker.compute_paper_pnl(
+            direction="up", calibrated_p=0.6, stake=10.0,
+            price_open=100.0, price_close=100.0,
+        )
+        assert result == "flat"
+        assert correct is False
+        assert gross == -10.0
 
     def test_compute_paper_pnl_zero_calibrated_p_no_crash(self):
         """calibrated_p=0 should not raise ZeroDivisionError."""

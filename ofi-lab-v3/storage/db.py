@@ -313,6 +313,24 @@ def _run_migrations(conn) -> None:
     # name list, not the values.
     _add_column_if_missing(conn, "predictions", "features_json", "TEXT")
     _add_column_if_missing(conn, "predictions", "served_contract_json", "TEXT")
+    # 2026-06-10 — flat-scoring separation. Model-quality lens: flats are
+    # no-contest (prediction_correct=NULL, excluded from win rates). Trading
+    # lens (paper_trades): flat resolves DOWN per contract semantics, so a
+    # DOWN call on flat is a win with gross = stake*(1-p)/p. Historical flats
+    # were scored as losses for both directions in both tables. Idempotent:
+    # the WHERE clauses match only legacy-scored rows.
+    conn.execute(
+        "UPDATE predictions SET prediction_correct = NULL "
+        "WHERE contract_result = 'flat' AND prediction_correct = 0"
+    )
+    conn.execute(
+        "UPDATE paper_trades SET prediction_correct = 1, trade_result = 'win', "
+        "  gross_pnl = simulated_stake_usdc * (1 - pred_proba_calibrated) / pred_proba_calibrated, "
+        "  net_pnl   = simulated_stake_usdc * (1 - pred_proba_calibrated) / pred_proba_calibrated - fee_paid "
+        "WHERE contract_result = 'flat' AND pred_direction = 'down' "
+        "  AND trade_result = 'loss' AND pnl_method = 'binary_polymarket' "
+        "  AND pred_proba_calibrated > 0"
+    )
 
 
 def _migrate_native_to_eval_indexes(conn) -> None:

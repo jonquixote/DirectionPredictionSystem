@@ -242,7 +242,7 @@ class SQLiteLedger:
         price_at_open: float,
         price_at_close: float,
         contract_result: str,
-        prediction_correct: bool,
+        prediction_correct: Optional[bool],
         feed_calibrator: bool = False,
     ) -> None:
         with self._lock, self._conn:
@@ -256,6 +256,7 @@ class SQLiteLedger:
             if row is None:
                 logger.warning("record_resolution: unknown prediction_id %r, skipping", prediction_id)
                 return
+            correct_int = None if prediction_correct is None else int(prediction_correct)
             self._conn.execute(
                 "UPDATE predictions SET"
                 " resolved = 1, ts_resolved_ms = ?,"
@@ -263,9 +264,9 @@ class SQLiteLedger:
                 " contract_result = ?, prediction_correct = ?"
                 " WHERE prediction_id = ?",
                 (ts_resolved_ms, price_at_open, price_at_close,
-                 contract_result, int(prediction_correct), prediction_id),
+                 contract_result, correct_int, prediction_id),
             )
-            if feed_calibrator:
+            if feed_calibrator and prediction_correct is not None:
                 self._conn.execute(
                     "INSERT INTO calibration_outcomes ("
                     " ts, prediction_id, model_name, symbol,"
