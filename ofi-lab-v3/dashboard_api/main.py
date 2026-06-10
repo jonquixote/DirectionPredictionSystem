@@ -464,10 +464,11 @@ def _run_governance_probation_tick() -> int:
                     "WHERE model_name = ? AND market_window_seconds = ?",
                     (new_tier, _TIER_KELLY[new_tier], now_iso, model, model_primary_window),
                 )
+                extra_set = ", paper_active = 0" if new_tier == "retired" else ""
                 conn.execute(
-                    "UPDATE model_registry SET tier = ?, kelly_multiplier = ?, "
-                    "tier_assigned_at = ?, tier_assigned_by = 'auto:probation_evaluator' "
-                    "WHERE name = ?",
+                    f"UPDATE model_registry SET tier = ?, kelly_multiplier = ?, "
+                    f"tier_assigned_at = ?, tier_assigned_by = 'auto:probation_evaluator'{extra_set} "
+                    f"WHERE name = ?",
                     (new_tier, _TIER_KELLY[new_tier], now_iso, model),
                 )
 
