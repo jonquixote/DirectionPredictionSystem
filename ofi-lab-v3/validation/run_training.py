@@ -588,6 +588,23 @@ def cleanup_old_runs(models_dir: Path, keep_best: int = MAX_MODELS_TO_KEEP):
         if item.is_symlink():
             protected.add(item.resolve())
 
+    # Protect active models in registry
+    db_path = os.environ.get("V3_DB_PATH") or os.environ.get("STORAGE_DB_PATH") or "/data/v3.db"
+    if os.path.exists(db_path):
+        try:
+            import sqlite3
+            conn = sqlite3.connect(db_path, timeout=5.0)
+            rows = conn.execute(
+                "SELECT DISTINCT artifact_path FROM model_registry "
+                "WHERE paper_active = 1 OR COALESCE(tier, 'gold') != 'retired'"
+            ).fetchall()
+            for r in rows:
+                if r[0]:
+                    protected.add(Path(r[0]).parent.resolve())
+            conn.close()
+        except Exception as e:
+            logger.warning("Failed to query model registry for cleanup protection: %s", e)
+
     runs.sort(key=lambda x: x[0], reverse=True)
     for _, run_dir in runs[keep_best:]:
         if run_dir.resolve() in protected:
