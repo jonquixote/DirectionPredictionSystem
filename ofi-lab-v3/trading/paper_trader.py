@@ -857,6 +857,8 @@ class PaperTrader:
         is_weekend: Optional[int] = None,
         relative_spread: Optional[float] = None,
         regime_features: Optional[dict] = None,
+        features_json: Optional[str] = None,
+        served_contract_json: Optional[str] = None,
     ) -> str:
         """Insert evaluation prediction rows for one boundary
         and enqueue each in the pending resolution queue. Returns the
@@ -892,6 +894,8 @@ class PaperTrader:
             regime_volatility=tags.volatility,
             regime_liquidity=tags.liquidity,
             regime_trend=tags.trend,
+            features_json=features_json,
+            served_contract_json=served_contract_json,
         )
     # Build prediction_id for each row to enqueue. Mirror SQLiteLedger's
     # suffix scheme: <prefix>_<window>e.

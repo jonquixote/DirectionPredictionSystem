@@ -306,6 +306,13 @@ def _run_migrations(conn) -> None:
         "CREATE INDEX IF NOT EXISTS idx_pdr_symbol_window_date "
         "ON predictions_daily_rollup(symbol, market_window_seconds, date_utc)"
     )
+    # 2026-06-09 — per-prediction feature observability. The exact feature
+    # vector fed to the booster + the served contract order, written on the
+    # canonical (first) row of each prediction set. Enables faithful replay
+    # and continuous alignment auditing; feature_names_hash alone proves the
+    # name list, not the values.
+    _add_column_if_missing(conn, "predictions", "features_json", "TEXT")
+    _add_column_if_missing(conn, "predictions", "served_contract_json", "TEXT")
 
 
 def _migrate_native_to_eval_indexes(conn) -> None:

@@ -66,19 +66,26 @@ class SQLiteLedger:
         regime_volatility: Optional[str] = None,
         regime_liquidity: Optional[str] = None,
         regime_trend: Optional[str] = None,
+        features_json: Optional[str] = None,
+        served_contract_json: Optional[str] = None,
     ) -> str:
         """Insert evaluation rows for a single boundary.
 
         Returns the first row's ``prediction_id`` (the 300s eval row,
         which serves as the canonical prediction for downstream linking).
         All rows share the same prefix with a window+type suffix.
+
+        ``features_json`` / ``served_contract_json`` are written on the
+        canonical (first) row only — the vector is identical across a
+        set's window rows, so duplicating it would triple storage.
         """
         prefix = _new_id_prefix()
         canonical_id: Optional[str] = None
         with self._lock:
             for row in rows:
                 pid = f"{prefix}_{row.market_window_seconds}{row.resolution_type[0]}"
-                if canonical_id is None:
+                is_canonical = canonical_id is None
+                if is_canonical:
                     canonical_id = pid
                 self._conn.execute(
                     "INSERT INTO predictions ("
@@ -95,9 +102,10 @@ class SQLiteLedger:
                     " above_threshold, warmup, trade_eligible, platform,"
                     " p_market, p_model_minus_market,"
                     " utc_hour, day_of_week, is_weekend, relative_spread,"
-                    " regime_volatility, regime_liquidity, regime_trend"
+                    " regime_volatility, regime_liquidity, regime_trend,"
+                    " features_json, served_contract_json"
                     ") VALUES ("
-        " ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?"
+        " ?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?"
                     ")",
                     (
                         pid, envelope.model_name, envelope.model_artifact_hash,
@@ -115,6 +123,8 @@ class SQLiteLedger:
                         p_market, p_model_minus_market,
                         utc_hour, day_of_week, is_weekend, relative_spread,
                         regime_volatility, regime_liquidity, regime_trend,
+                        features_json if is_canonical else None,
+                        served_contract_json if is_canonical else None,
                     ),
                 )
             assert canonical_id is not None, "rows must include at least one row"

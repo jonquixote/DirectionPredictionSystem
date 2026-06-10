@@ -246,6 +246,16 @@ class BoundaryScorer:
                 pred_proba = float(model.predict(feature_vec)[0])
                 pred_direction = "up" if pred_proba > 0.5 else "down"
 
+                # Feature observability: persist the exact vector fed to the
+                # booster + the served column order. feature_names_hash proves
+                # the name list; this proves the values. Required for faithful
+                # replay (parquet stand-ins matched production only 4.2%).
+                _served_cols_for_log = t.feature_names[model_name]
+                _features_json = json.dumps(
+                    [float(features[col]) for col in _served_cols_for_log]
+                )
+                _served_contract_json = json.dumps(_served_cols_for_log)
+
                 # Try to get calibrated prediction from CalibratorRegistry.
                 # Use the 300s calibrator as canonical for the gate check; it is
                 # the standard native window.  KeyError means no calibrator file
@@ -306,6 +316,8 @@ class BoundaryScorer:
                     is_weekend=(day_of_week >= 5),
                     relative_spread=features.get("relative_spread"),
                     regime_features=features,
+                    features_json=_features_json,
+                    served_contract_json=_served_contract_json,
                 )
                 t._prediction_count += 1
                 _diag_predicted += 1

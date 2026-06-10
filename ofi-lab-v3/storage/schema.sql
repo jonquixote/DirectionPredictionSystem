@@ -76,6 +76,12 @@ CREATE TABLE IF NOT EXISTS predictions (
     final_size_usdc        REAL,
     order_type             TEXT,
 
+    -- Feature observability (canonical row of each prediction set only):
+    -- exact vector fed to the booster + served column order. Enables
+    -- faithful replay + continuous alignment auditing.
+    features_json          TEXT,
+    served_contract_json   TEXT,
+
     -- Audit
     created_at             TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );

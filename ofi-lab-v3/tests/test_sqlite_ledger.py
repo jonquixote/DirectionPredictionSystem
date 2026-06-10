@@ -294,3 +294,59 @@ def test_record_trade_resolution_updates_pnl(ledger):
     assert row["resolved"] == 1
     assert abs(row["net_pnl"] - 7.89) < 1e-9
     assert row["trade_result"] == "win"
+
+
+def test_features_json_written_on_canonical_row_only(ledger):
+    import json
+    led, conn = ledger
+    rows = plan_resolution_rows(_BASE, 900, [300, 900, 1800])
+    fj = json.dumps([1.25, -0.5, 3.0])
+    sj = json.dumps(["mlofi", "ofi", "mid_price"])
+    pid = led.log_prediction_set(
+        envelope=_envelope(),
+        symbol="BTCUSDT",
+        ts_model_ran_ms=_BASE - 1000,
+        ts_contract_open_ms=_BASE,
+        rows=rows,
+        pred_proba_raw=0.54,
+        pred_proba_calibrated=0.51,
+        pred_direction="up",
+        above_threshold=False,
+        warmup=False,
+        platform="paper",
+        features_json=fj,
+        served_contract_json=sj,
+    )
+    canonical = conn.execute(
+        "SELECT features_json, served_contract_json FROM predictions"
+        " WHERE prediction_id = ?", (pid,)).fetchone()
+    assert canonical["features_json"] == fj
+    assert canonical["served_contract_json"] == sj
+    n_with_payload = conn.execute(
+        "SELECT COUNT(*) FROM predictions WHERE features_json IS NOT NULL"
+    ).fetchone()[0]
+    assert n_with_payload == 1  # canonical row only, not all 3 window rows
+    # Round-trip: stored vector parses back to the exact floats served
+    assert json.loads(canonical["features_json"]) == [1.25, -0.5, 3.0]
+
+
+def test_features_json_defaults_null_for_legacy_callers(ledger):
+    led, conn = ledger
+    rows = plan_resolution_rows(_BASE, 900, [300, 900, 1800])
+    led.log_prediction_set(
+        envelope=_envelope(),
+        symbol="ETHUSDT",
+        ts_model_ran_ms=_BASE - 1000,
+        ts_contract_open_ms=_BASE,
+        rows=rows,
+        pred_proba_raw=0.54,
+        pred_proba_calibrated=0.51,
+        pred_direction="up",
+        above_threshold=False,
+        warmup=False,
+        platform="paper",
+    )
+    n = conn.execute(
+        "SELECT COUNT(*) FROM predictions WHERE features_json IS NOT NULL"
+    ).fetchone()[0]
+    assert n == 0
