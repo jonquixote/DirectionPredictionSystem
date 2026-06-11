@@ -156,6 +156,24 @@ No second attempt. No added features. No test re-touch.
 | PASS | PASS | BUILD copier (funds patience); model graduates as primary asset |
 | FAIL | FAIL | **KILL**: zero-touch shadow mode; write-up is the salvage value; owner reallocates to Branch B |
 
+## SERVER RUNWAY CONSTRAINT (registered 2026-06-11, binding)
+
+The VPS has **~20 days of runway** from 2026-06-11. Day 10 verdict + any conditional
+build + meaningful live shadow must all complete inside that window. Consequences:
+
+1. **No timeline slack past Day 10.** Conditional builds stay inside Days 4–8 as
+   registered; the shadow-accumulation window is week 3 and the server dies at its
+   end. If both gates fail, shutdown is clean and early enough to export everything.
+2. **Day-10 export manifest (must leave the server regardless of verdict):**
+   - `/data/probe_track_a.db` (markets + trades + wallet analysis)
+   - `probe/PREREGISTRATION.md` + the Day-10 verdict report
+   - Track B OFI feature builder code + smoke results + built feature parquets index
+   - The honest-harness code (replay/eval scripts, this branch)
+   - Per-prediction feature log (predictions.features_json span) — export as parquet
+   Migration to cold storage is part of Day 10, not an afterthought.
+3. **Daily status line, every day:**
+   `Day N of 10 | server day M of 20 | track A: <stage> | track B: <stage> | blockers: <none/x>`
+
 ## GUARDRAILS (binding, from the task)
 
 Evidence verbatim; controls always; test touched once; gates are findings; no inversion
