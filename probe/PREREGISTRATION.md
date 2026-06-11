@@ -43,6 +43,11 @@ are final. A failed gate is a finding, not a failure.
 - **30m markets do not exist** (probed `30m`, `1h`, `hourly` slugs — none found).
   Universe is **8 markets, not 12**. All "12 markets" language inherited from the task
   is amended to 8.
+- **The 30m absence raises the bar, registered as such:** the legacy fleet's
+  least-bad performance was always at the 1800s window — the one horizon with no
+  tradeable market. This probe therefore tests only the two NOISIEST horizons
+  (5m, 15m). A clean kill at 5m/15m does not rule out 30m+ edge; it rules out what
+  is actually tradeable today.
 
 ### 0.4 Data access — VERIFIED
 
@@ -52,6 +57,7 @@ are final. A failed gate is a finding, not a failure.
 | data-api `/trades?market=<conditionId>` | WORKS, 500/page, `offset` pagination, week-old+ markets served | 500/500 matching rows |
 | data-api `/trades?user=<wallet>`, `/positions?user=` (cashPnl) | WORKS | probed live wallet |
 | Maker/taker attribution | Feed is taker-perspective; maker identity NOT in free API. Chain fallback (CTF `OrderFilled` via free RPC / subgraph) documented, probed only if Gate A reaches classification needs | registered limitation |
+| Trade-history depth cap | data-api rejects `offset >= 5000` (HTTP 400, probed). Markets with >5,000 trades are clipped to most-recent-5,000; `markets.clipped` flags them and A1 reports the clipped fraction + volume share | registered limitation |
 | Rate limits | Unmeasured. Registered: ≤5 req/s, exponential backoff on 429 | conservative |
 | Bybit L2 store | 408 days × 4 symbols (2025-04-29..2026-06-10), 72 GB raw snapshot+delta | VPS `ls` |
 | Tick resolution for true-OFI | **Δt ≈ 100 ms** (Bybit 100ms stream; p50=100ms, p99=209ms, 832k msgs/day BTC). True-OFI computed at 100ms ticks | VPS parquet probe |
@@ -68,7 +74,10 @@ are final. A failed gate is a finding, not a failure.
 - Per-day volume within order-of-magnitude of public figures.
 - ≥95% of trades joinable to a resolved outcome.
 - Bybit-window-direction vs market `outcomePrices` agreement ≥ 98% on non-flat windows
-  (measures Chainlink/Bybit divergence; failure = STOP and characterize before ranking).
+  (measures Chainlink/Bybit divergence). **Below 98% = HARD STOP: report to owner
+  before any further analysis on either track.** Both tracks build features and fair
+  values on Bybit while Chainlink resolves the contract; material divergence means
+  aiming at the wrong target price and everything downstream inherits it.
 
 **A2 persistence (the experiment):**
 - Eligibility: ≥200 resolved W1 trades AND ≥50 W2 trades.
@@ -77,6 +86,14 @@ are final. A failed gate is a finding, not a failure.
 
 **A3 classification:** LATENCY = median entry latency < 3s after last ≥0.05% spot move
 AND taker-heavy. MAKER / SLOW-ALPHA / TAIL-CONVERGER per task definitions.
+
+**Maker-blindness scope limit (registered Day 0, binding on the verdict):**
+The free trades feed is taker-perspective; maker identity is invisible without the
+chain fallback. Track A therefore detects **persistent TAKER edge only**. If Gate A
+fails, the registered conclusion is "no persistent taker edge" — NOT "no one wins
+these markets." Makers harvesting rebates could win invisibly. This does not block
+the probe: the copy strategy requires visible taker entries anyway (a resting quote
+cannot be copied). The Day 10 verdict must use this exact scoping.
 
 **GATE A — proceed to build only if ALL:**
 1. A cohort's W2 net PnL beats the random control with non-overlapping 95% CIs.
@@ -100,8 +117,12 @@ Failure of any → Track A stops Day 3 with written finding.
 6. time-remaining-in-window (fraction).
 No additions after first results. No exceptions.
 
-**Target:** window outcome (close ≥ open → UP, i.e. flat=UP) per 5m/15m market window,
-Bybit L2 mid basis.
+**Target:** window outcome per 5m/15m market window, Bybit L2 mid basis, with
+**flat encoded as UP via `>=` (close >= open → label 1)** — matching the verbatim
+contract text "greater than or equal". The label must be the thing that resolves;
+a `>` here would reintroduce the exact label-vs-scored-event mismatch ruled out in
+the June forensics. This is a registered, binding implementation detail of
+`build_targets` for Track B.
 
 **Trade rule:** fire when |P_model − p_market| > θ where θ ≥ fee(p_market)/notional +
 half-spread; θ registered per-market at evaluation start, before test touch.
