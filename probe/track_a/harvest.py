@@ -39,10 +39,11 @@ DURATIONS = [5, 15]  # minutes; 30m markets do not exist (registered Day 0)
 BATCH = 20           # slugs per gamma request (probed)
 RPS = 5.0
 PAGE = 500
-# data-api rejects offset >= 5000 with HTTP 400 (probed 2026-06-11).
-# Markets with more than 5000 trades are CLIPPED to their most recent 5000;
-# markets.clipped=1 marks them so analysis can quantify the bias.
-MAX_PAGES = 10
+# data-api rejects requests where offset+limit > 5000 with HTTP 400
+# (offset=4500&limit=500 already 400s; probed 2026-06-11). Max usable
+# offset is 4000 -> most-recent 4500 trades per market. Markets with more
+# are CLIPPED; markets.clipped=1 marks them so analysis can quantify bias.
+MAX_PAGES = 9
 
 
 def open_db(path: str) -> sqlite3.Connection:
@@ -106,10 +107,14 @@ async def get_json(session, limiter, url, retries=6):
                     return await r.json()
                 if r.status in (429, 500, 502, 503, 504):
                     wait = 2 ** attempt
-                    log.warning("HTTP %d, backoff %ds: %s", r.status, wait, url[:120])
+                    log.warning("HTTP %d, backoff %ds: %s", r.status, wait, url[:160])
                     await asyncio.sleep(wait)
                     continue
-                log.error("HTTP %d (no retry): %s", r.status, url[:120])
+                if r.status == 400:
+                    # pagination-cap signal (offset+limit > 5000) — caller
+                    # treats as end-of-data with clip
+                    return "PAGINATION_CAP"
+                log.error("HTTP %d (no retry): %s", r.status, url[:160])
                 return None
         except (aiohttp.ClientError, asyncio.TimeoutError) as e:
             wait = 2 ** attempt
@@ -143,7 +148,7 @@ async def stage_discover(conn, session, limiter, start_ts, end_ts):
         q = "&".join(f"slug={sl}" for sl in slugs)
         data = await get_json(session, limiter, f"{GAMMA}/markets?closed=true&{q}")
         got = {}
-        if data:
+        if data and isinstance(data, list):
             for m in data:
                 sl = m.get("slug")
                 if sl not in slugs:
@@ -183,6 +188,9 @@ async def harvest_market(conn, session, limiter, slug, cid):
         data = await get_json(session, limiter, url)
         if data is None:
             return None  # transient failure — leave market not-done
+        if data == "PAGINATION_CAP":
+            clipped = 1
+            break
         rows = [(cid, t.get("proxyWallet"), t.get("side"), t.get("price"),
                  t.get("size"), t.get("timestamp"), t.get("outcome"),
                  t.get("outcomeIndex"), t.get("transactionHash"))
