@@ -251,9 +251,11 @@ class ResolutionChecker:
         Lifted from v2 paper_trader.py _resolve_trade lines ~1100-1141.
         Fee coef 0.072 matches Polymarket's published rate.
 
-        Flat resolves DOWN: the contract pays NO when price fails to
-        rise, so a DOWN call wins on flat. (Model-quality metrics treat
-        flat as no-contest — see compute_outcome.)
+        Flat resolves UP: verified 2026-06-10 from live Polymarket market
+        descriptions — "resolve to 'Up' if the price at the end ... is
+        greater than or equal to the price at the beginning". An UP call
+        wins on flat. (Model-quality metrics treat flat as no-contest —
+        see compute_outcome.)
         """
         if price_close > price_open:
             result = "up"
@@ -262,7 +264,7 @@ class ResolutionChecker:
         else:
             result = "flat"
         if result == "flat":
-            correct = (direction == "down")
+            correct = (direction == "up")
         else:
             correct = (result == direction)
         fee = 0.072 * calibrated_p * (1 - calibrated_p) * stake

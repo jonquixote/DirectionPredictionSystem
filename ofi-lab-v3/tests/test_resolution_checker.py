@@ -396,11 +396,12 @@ class TestComputePaperPnl:
         expected_fee = 0.072 * p * (1 - p) * stake
         assert fee == pytest.approx(expected_fee)
 
-    def test_compute_paper_pnl_flat_resolves_down(self):
-        """Trading lens: contract pays NO when price fails to rise, so a
-        DOWN call wins on flat and an UP call loses."""
+    def test_compute_paper_pnl_flat_resolves_up(self):
+        """Trading lens: Polymarket up/down markets resolve UP when close
+        >= open (verified from live market descriptions 2026-06-10), so an
+        UP call wins on flat and a DOWN call loses."""
         gross, fee, net, result, correct = ResolutionChecker.compute_paper_pnl(
-            direction="down", calibrated_p=0.6, stake=10.0,
+            direction="up", calibrated_p=0.6, stake=10.0,
             price_open=100.0, price_close=100.0,
         )
         assert result == "flat"
@@ -408,7 +409,7 @@ class TestComputePaperPnl:
         assert gross == pytest.approx(10.0 * 0.4 / 0.6)
 
         gross, fee, net, result, correct = ResolutionChecker.compute_paper_pnl(
-            direction="up", calibrated_p=0.6, stake=10.0,
+            direction="down", calibrated_p=0.6, stake=10.0,
             price_open=100.0, price_close=100.0,
         )
         assert result == "flat"

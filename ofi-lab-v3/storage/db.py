@@ -323,11 +323,23 @@ def _run_migrations(conn) -> None:
         "UPDATE predictions SET prediction_correct = NULL "
         "WHERE contract_result = 'flat' AND prediction_correct = 0"
     )
+    # 2026-06-10 — CORRECTION: live Polymarket market descriptions say flat
+    # resolves UP ("greater than or equal"), not DOWN as first assumed.
+    # Flat-DOWN trades are losses; flat-UP trades are wins. Both statements
+    # idempotent (state-matched WHERE clauses); the first also reverts the
+    # short-lived flat-DOWN-wins backfill that shipped 2026-06-10 morning.
+    conn.execute(
+        "UPDATE paper_trades SET prediction_correct = 0, trade_result = 'loss', "
+        "  gross_pnl = -simulated_stake_usdc, "
+        "  net_pnl   = -simulated_stake_usdc - fee_paid "
+        "WHERE contract_result = 'flat' AND pred_direction = 'down' "
+        "  AND trade_result = 'win' AND pnl_method = 'binary_polymarket'"
+    )
     conn.execute(
         "UPDATE paper_trades SET prediction_correct = 1, trade_result = 'win', "
         "  gross_pnl = simulated_stake_usdc * (1 - pred_proba_calibrated) / pred_proba_calibrated, "
         "  net_pnl   = simulated_stake_usdc * (1 - pred_proba_calibrated) / pred_proba_calibrated - fee_paid "
-        "WHERE contract_result = 'flat' AND pred_direction = 'down' "
+        "WHERE contract_result = 'flat' AND pred_direction = 'up' "
         "  AND trade_result = 'loss' AND pnl_method = 'binary_polymarket' "
         "  AND pred_proba_calibrated > 0"
     )
