@@ -210,23 +210,43 @@ async def harvest_market(conn, session, limiter, slug, cid):
     return total
 
 
-async def stage_trades(conn, session, limiter):
+async def stage_trades(conn, session, limiter, workers: int = 8):
+    """Concurrent market harvesting.
+
+    The rate limiter spaces REQUESTS at 1/RPS globally; with a sequential
+    loop each request also eats a full network RTT, capping throughput at
+    ~1/(interval+RTT). N workers overlap RTTs so the limiter, not latency,
+    is the binding constraint. SQLite writes happen on the event-loop
+    thread (no await between execute and commit) — safe single-connection.
+    """
     todo = conn.execute(
         "SELECT slug, condition_id FROM markets"
         " WHERE found=1 AND trades_done=0 ORDER BY boundary_ts").fetchall()
-    log.info("trades: %d markets to harvest", len(todo))
+    log.info("trades: %d markets to harvest (%d workers)", len(todo), workers)
+    q: asyncio.Queue = asyncio.Queue()
+    for item in todo:
+        q.put_nowait(item)
     done = 0
     t0 = time.time()
-    for slug, cid in todo:
-        n = await harvest_market(conn, session, limiter, slug, cid)
-        done += 1
-        if done % 200 == 0:
-            elapsed = time.time() - t0
-            rate = done / elapsed
-            eta_h = (len(todo) - done) / rate / 3600 if rate > 0 else -1
-            ntr = conn.execute("SELECT COUNT(*) FROM trades").fetchone()[0]
-            log.info("trades progress: %d/%d markets, %d trade rows, eta %.1fh",
-                     done, len(todo), ntr, eta_h)
+
+    async def worker():
+        nonlocal done
+        while True:
+            try:
+                slug, cid = q.get_nowait()
+            except asyncio.QueueEmpty:
+                return
+            await harvest_market(conn, session, limiter, slug, cid)
+            done += 1
+            if done % 200 == 0:
+                elapsed = time.time() - t0
+                rate = done / elapsed
+                eta_h = (len(todo) - done) / rate / 3600 if rate > 0 else -1
+                ntr = conn.execute("SELECT COUNT(*) FROM trades").fetchone()[0]
+                log.info("trades progress: %d/%d markets, %d rows, eta %.1fh",
+                         done, len(todo), ntr, eta_h)
+
+    await asyncio.gather(*[worker() for _ in range(workers)])
     log.info("trades DONE: %d markets", done)
 
 
