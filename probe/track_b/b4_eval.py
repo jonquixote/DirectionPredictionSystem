@@ -6,8 +6,17 @@ Registered design (committed before execution; see PREREGISTRATION.md §B):
   Decision points: dataset rows in the test span (window_start >= 2026-05-24),
   i.e. every 10s sample. Market price at the same instant from probe-DB trade
   prints: last print at/before t in that window's market, p_up = price if the
-  print's outcome token is 'Up' else 1 - price; require a print within 120s,
-  else no decision.
+  print's outcome token is 'Up' else 1 - price.
+
+  STALENESS RULE (owner-binding, registered before the run): the PRIMARY gate
+  population uses only fires whose reference print is <= 15s old at the
+  decision instant — older prints are prices nobody offers anymore; scoring
+  against them manufactures backtest-only latency edge. Diagnostics report
+  the print-age distribution of ALL candidate fires and EV sliced by age
+  bucket (<=15s / 15-60s / 60-120s); edge living only in stale buckets is
+  the latency mirage, made explicit. If the <=15s slice cannot reach
+  n >= 2000, that is a legitimate insufficient-n result — the staleness
+  window is NOT widened after the fact.
 
   Trade rule (theta registered): fire when |P_model - p_up| > theta(p_up),
     theta(p) = 0.07 * p * (1-p) + 0.01      (fee curve + half-spread proxy)
@@ -46,7 +55,8 @@ import lightgbm as lgb
 
 TEST_START_MS = int(datetime(2026, 5, 24, tzinfo=timezone.utc).timestamp() * 1000)
 SYMBOLS = {"BTCUSDT": "btc", "ETHUSDT": "eth", "SOLUSDT": "sol", "XRPUSDT": "xrp"}
-PRINT_TOL_MS = 120_000
+PRINT_TOL_MS = 120_000      # diagnostic ceiling
+FRESH_MS = 15_000           # PRIMARY gate slice: print age <= 15s (binding)
 HALF_SPREAD = 0.01
 
 
@@ -112,20 +122,22 @@ def main():
                               for r in rows]
                     prints[ws] = (ts_arr, pu_arr)
 
-            fired_windows = set()
-            for i in np.argsort(cts):  # chronological -> first fire per window
+            # collect ALL candidate fires (no clustering yet) with print age
+            for i in np.argsort(cts):
                 ws = int(wstart[i])
-                if ws in fired_windows or ws not in mk or ws not in prints:
+                if ws not in mk or ws not in prints:
                     continue
                 ts_arr, pu_arr = prints[ws]
                 j = bisect.bisect_right(ts_arr, int(cts[i])) - 1
-                if j < 0 or cts[i] - ts_arr[j] > PRINT_TOL_MS:
+                if j < 0:
+                    continue
+                age_ms = int(cts[i]) - ts_arr[j]
+                if age_ms > PRINT_TOL_MS:
                     continue
                 p_up = min(max(pu_arr[j], 0.01), 0.99)
                 P = proba[i]
                 if abs(P - p_up) <= theta(p_up):
                     continue
-                fired_windows.add(ws)
                 outcome_up = mk[ws]
                 if P > p_up:  # buy UP
                     entry = min(p_up + HALF_SPREAD, 0.99)
@@ -137,11 +149,24 @@ def main():
                 pnl = (1 - entry if win else -entry) - fee
                 all_trades.append(dict(dur=dur, sym=sym, ws=ws, t=int(cts[i]),
                                        P=float(P), p_up=float(p_up), win=bool(win),
-                                       pnl=float(pnl), t_rem=float(t_rem[i])))
+                                       pnl=float(pnl), t_rem=float(t_rem[i]),
+                                       age_ms=age_ms))
 
     print("=" * 72)
     print("B4 SINGLE-TOUCH EVALUATION — evidence verbatim")
     print("=" * 72)
+
+    def cluster(trades):
+        """One trade per (dur, sym, window): first fire chronologically."""
+        seen = set()
+        out = []
+        for t in sorted(trades, key=lambda t: t["t"]):
+            k = (t["dur"], t["sym"], t["ws"])
+            if k in seen:
+                continue
+            seen.add(k)
+            out.append(t)
+        return out
 
     def report(label, trades):
         n = len(trades)
@@ -158,27 +183,49 @@ def main():
               f"CI95=[{lo:+.4f},{hi:+.4f}]  acc={100*acc:.2f}% "
               f"wilsonLB={100*wl:.2f}%  total=${pnl.sum():+,.0f}/share-unit")
 
-    for dur in (5, 15):
-        report(f"  {dur}m pooled", [t for t in all_trades if t["dur"] == dur])
-        for sym in SYMBOLS:
-            report(f"    {dur}m {sym}", [t for t in all_trades
-                                         if t["dur"] == dur and t["sym"] == sym])
-    report("  ALL pooled", all_trades)
-    report("  window-open slice (t_rem>=0.97)",
-           [t for t in all_trades if t["t_rem"] >= 0.97])
+    # print-age distribution of ALL candidate fires (pre-clustering)
+    ages = np.array([t["age_ms"] for t in all_trades])
+    print(f"\ncandidate fires (pre-clustering): {len(all_trades)}")
+    if len(ages):
+        print(f"print-age distribution: p50={np.percentile(ages,50)/1000:.1f}s "
+              f"p90={np.percentile(ages,90)/1000:.1f}s "
+              f"<=15s: {100*(ages<=15000).mean():.1f}% "
+              f"15-60s: {100*((ages>15000)&(ages<=60000)).mean():.1f}% "
+              f"60-120s: {100*(ages>60000).mean():.1f}%")
 
-    n = len(all_trades)
+    # EV by age bucket (clustered within bucket) — latency-mirage diagnostic
+    print("\nEV by print-age bucket (clustered per bucket):")
+    for lab, lo, hi in [("<=15s", 0, 15_000), ("15-60s", 15_001, 60_000),
+                        ("60-120s", 60_001, 120_000)]:
+        report(f"  {lab}", cluster([t for t in all_trades
+                                    if lo <= t["age_ms"] <= hi]))
+
+    # PRIMARY GATE POPULATION: fresh fires only, clustered
+    fresh = cluster([t for t in all_trades if t["age_ms"] <= FRESH_MS])
+    print("\nPRIMARY (fresh <=15s, clustered):")
+    for dur in (5, 15):
+        report(f"  {dur}m pooled", [t for t in fresh if t["dur"] == dur])
+        for sym in SYMBOLS:
+            report(f"    {dur}m {sym}", [t for t in fresh
+                                         if t["dur"] == dur and t["sym"] == sym])
+    report("  ALL fresh pooled", fresh)
+    report("  window-open slice (t_rem>=0.97)",
+           [t for t in fresh if t["t_rem"] >= 0.97])
+
+    n = len(fresh)
     if n:
-        pnl = np.array([t["pnl"] for t in all_trades])
-        wins = sum(t["win"] for t in all_trades)
+        pnl = np.array([t["pnl"] for t in fresh])
+        wins = sum(t["win"] for t in fresh)
         boots = np.array([pnl[rng.integers(0, n, n)].mean() for _ in range(10_000)])
         ev_lb = float(np.percentile(boots, 2.5))
         acc_lb = wilson_lb(wins, n)
         g = (pnl.mean() > 0 and ev_lb > 0 and acc_lb >= 0.52 and n >= 2000)
-        print(f"\nGATE B (offline component): EV>0 & EV_LB>0: "
+        print(f"\nGATE B (offline, PRIMARY fresh slice): EV>0 & EV_LB>0: "
               f"{pnl.mean() > 0 and ev_lb > 0} | accLB>=52%: {acc_lb >= 0.52} "
               f"({100*acc_lb:.2f}%) | n>=2000: {n >= 2000} ({n})")
         print("OFFLINE VERDICT:", "PASS — proceed to 48h shadow" if g else "FAIL")
+    else:
+        print("\nGATE B: zero fresh fires — FAIL (insufficient n)")
     out = Path(args.ofi_dir) / "b4_trades.json"
     out.write_text(json.dumps(all_trades))
     print(f"trades dumped: {out}")
