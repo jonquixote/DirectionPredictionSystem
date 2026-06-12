@@ -42,6 +42,8 @@ def main():
     ap.add_argument("--probe-db", required=True)
     ap.add_argument("--w2-days", type=int, default=12)
     ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--mode", choices=["exclude-wallets", "exclude-markets"],
+                    default="exclude-wallets")
     args = ap.parse_args()
 
     db = sqlite3.connect(args.probe_db)
@@ -61,8 +63,11 @@ def main():
           f"(W2 volume share {100*vol_w2/vol_all:.1f}%)")
 
     # per-wallet, per-period aggregates (SQL does the heavy lifting)
+    # mode-dependent market filter: 'all' keeps every market; 'noclip'
+    # excludes clipped markets entirely (sensitivity ii)
     q = """
     SELECT t.wallet,
+      SUM(CASE WHEN t.ts < :split AND m.clipped=1 THEN 1 ELSE 0 END) n1_clipped,
       SUM(CASE WHEN t.ts <  :split THEN 1 ELSE 0 END) n1,
       SUM(CASE WHEN t.ts >= :split THEN 1 ELSE 0 END) n2,
       SUM(CASE WHEN t.ts <  :split THEN
@@ -85,12 +90,26 @@ def main():
          (t.side='SELL' AND (t.outcome='Up')!=(m.outcome_up=1.0)))
         THEN 1 ELSE 0 END) wins2
     FROM trades t JOIN markets m ON t.condition_id = m.condition_id
-    WHERE m.outcome_up IS NOT NULL AND m.outcome_up IN (0.0, 1.0)
+    WHERE m.outcome_up IS NOT NULL AND m.outcome_up IN (0.0, 1.0) {mfilter}
     GROUP BY t.wallet
     HAVING n1 >= 200 AND n2 >= 50
     """
-    rows = db.execute(q, {"split": split}).fetchall()
+    mode = getattr(args, "mode", "exclude-wallets")
+    mfilter = "AND m.clipped = 0" if mode == "exclude-markets" else ""
+    rows = db.execute(q.format(mfilter=mfilter), {"split": split}).fetchall()
+    print(f"\n=== MODE: {mode} ===")
     print(f"eligible wallets (>=200 W1, >=50 W2 resolved): {len(rows)}")
+
+    if mode == "exclude-wallets":
+        # binding clip rule: >15% of W1 trades in clipped markets -> excluded
+        before = len(rows)
+        excluded = [r for r in rows if r["n1_clipped"] / r["n1"] > 0.15]
+        rows = [r for r in rows if r["n1_clipped"] / r["n1"] <= 0.15]
+        print(f"clip-exposure rule (>15% W1 trades in clipped markets): "
+              f"excluded {len(excluded)}/{before} wallets")
+        for r in sorted(excluded, key=lambda r: -r["n1_clipped"]/r["n1"])[:10]:
+            print(f"  excluded: {r['wallet']}  clip_share={100*r['n1_clipped']/r['n1']:.1f}% "
+                  f"n1={r['n1']}")
     if len(rows) < 40:
         print("TOO FEW ELIGIBLE WALLETS — report and stop")
         return

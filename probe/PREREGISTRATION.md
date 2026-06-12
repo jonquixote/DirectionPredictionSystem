@@ -79,6 +79,32 @@ are final. A failed gate is a finding, not a failure.
   values on Bybit while Chainlink resolves the contract; material divergence means
   aiming at the wrong target price and everything downstream inherits it.
 
+**AMENDMENT 2026-06-12 (stop fired, characterized, owner-approved):**
+The 98% blanket threshold was misspecified: disagreement concentrates at near-flat
+windows (18.04% at |move| 0-2bps decaying monotonically to 0.27% at ≥20bps,
+directionally symmetric 664/629) — the signature of two clean feeds differing by a
+few bps, not of wrong window mapping. Gate 3 RESTATED as what it was for:
+  (a) outcome join = 100% (measured), AND
+  (b) Bybit-vs-market agreement ≥99% on windows with |move| ≥ 20bps
+      (measured: 99.73%). PASSED.
+Consequences, binding:
+  1. Track B single-touch test scores against market `outcomePrices` (the thing
+     that pays), not Bybit closes. Training labels remain Bybit; their ~3.7%
+     flip-noise concentrates at near-flat windows where P≈0.5 and the fee curve
+     peaks — i.e., where trades shouldn't fire — and attenuates measured edge
+     AGAINST us. Registered as a conservative bias.
+  2. A2 clip rule (binding): wallets with >15% of W1 trade count inside clipped
+     markets are EXCLUDED from cohort eligibility (unknowably wrong W1 PnL).
+     Excluded list reported. Sensitivity run both ways: (i) exclude exposed
+     wallets, (ii) exclude clipped markets from PnL for all wallets. Both reported.
+  3. Finding in its own right: 23.9% of btc-5m markets exceed 5,000 trades
+     (>17 trades/sec sustained) — btc-5m is the densest bot war. A3 priors:
+     persistence survivors there are presumptively LATENCY; slow-alpha, if it
+     exists, more plausibly lives in thinner markets.
+This amendment was proposed before any downstream result existed and makes the
+analysis harder to game, not easier. That is the only pattern by which a
+pre-registered gate may ever be amended (Day-9 reference standard).
+
 **A2 persistence (the experiment):**
 - Eligibility: ≥200 resolved W1 trades AND ≥50 W2 trades.
 - Cohorts: top decile by W1 net PnL, top quartile, random control of equal size.
