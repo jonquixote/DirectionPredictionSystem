@@ -1,29 +1,31 @@
 #!/usr/bin/env python3
 """Fair-Value Deviation Probe — Stage 1 (offline, Polymarket prints vs Bybit Φ).
 
-P_market: real Polymarket trade print -> contract-implied P(up) = price if token=='Up'
-          else 1-price. Independent of Bybit spot.
-P_fair  : Φ( dist_from_open_return / (sigma_1s * sqrt(remaining_seconds)) ), Bybit spot.
+MEMORY-SAFE rewrite: streams per (symbol,duration), holds only fixed-size accumulators
+(never the full 50M-print arrays — the prior version OOM'd the VPS building ~18GB of
+Python float lists). All vol estimators vectorized with numpy.
 
-Controls (each verbatim):
- 1. sigma robustness: EWMA(60s halflife) / trailing-1d / same-window-oracle. Supra-cost
-    must hold under ALL three.
- 2. empirical fair value: P_emp = realized P(up) binned by (dist-bucket, time-rem-bucket)
-    over the whole store; |P_market - P_emp| must also be supra-cost.
- 3. OOS concentration: dates split 70/30; concentrated bucket on early must hold on late.
- 4. capturable (proxy, no book): deviation persists >=1 later print in-window.
- 5. dual fee: supra-cost under Polymarket 0.07 AND Kalshi 0.0175 (both reported).
+P_market: Polymarket trade print -> P(up)=price if token=='Up' else 1-price (independent
+          of Bybit spot).
+P_fair  : Φ( dist_return / (sigma_1s * sqrt(remaining_sec)) ), Bybit spot.
 
-Structure threshold: |dev|>fee+0.5c in >=20% instants (both fees) AND >=60% concentrated in
-one predictable bucket AND directional bias >=0.5*std AND survives Controls 1,2,3,4.
+Controls (verbatim):
+ 1. sigma robustness: EWMA(60s) / trailing-1d / same-window-oracle — supra-cost under all.
+ 2. empirical fair value: realized P(up) by (dist-bucket, elapsed-decile); dev vs empirical.
+ 3. OOS concentration: dates 70/30; concentrated bucket must hold on held-out 30%.
+ 4. capturable proxy: supra-cost dev with >=1 later in-window print.
+ 5. dual fee: supra-cost under Polymarket 0.07 AND Kalshi 0.0175.
 
-Usage: python3 stage1_deviation.py --probe-db /data/probe_track_a.db --ofi-dir /data/probe_ofi
+Two-pass per cell: pass A accumulates the empirical P(up) grid; pass B accumulates
+deviation histograms vs Gaussian (3 sigma) and vs empirical. Counters are small fixed
+arrays keyed by (dist_bucket[-10..10], elapsed_decile[0..9], early/late).
 """
 from __future__ import annotations
 
 import argparse
 import bisect
 import math
+from collections import defaultdict
 from pathlib import Path
 
 import numpy as np
@@ -32,41 +34,33 @@ import sqlite3
 
 SYM = {"btc": "BTCUSDT", "eth": "ETHUSDT", "sol": "SOLUSDT", "xrp": "XRPUSDT"}
 HALF_SPREAD = 0.005
-NORM = 0.5 * (1 + np.vectorize(math.erf)(np.array([0.0]))[0])  # sanity placeholder
+DIST_LO, DIST_HI = -10, 10  # dist buckets in units of 10bps, clipped
 
 
-def phi(z):
-    # vectorized standard normal CDF
-    return 0.5 * (1.0 + np.vectorize(math.erf)(z / math.sqrt(2.0)))
-
-
-def fee(p, rate):
-    return rate * p * (1.0 - p)
+def phi_scalar(z):
+    return 0.5 * (1.0 + math.erf(z / math.sqrt(2.0)))
 
 
 def load_spot(ofi_dir: Path, sym: str):
     files = sorted((ofi_dir / sym).glob("*_ofi.parquet"))
     df = pl.concat([pl.read_parquet(f, columns=["cts", "mid_price"]) for f in files]).sort("cts")
-    cts = (df["cts"].to_numpy() // 1000).astype(np.int64)  # seconds
+    cts = (df["cts"].to_numpy() // 1000).astype(np.int64)
     mid = df["mid_price"].to_numpy().astype(np.float64)
-    # 1s log returns + EWMA vol (halflife 60s) + trailing-1d realized vol
     ret = np.zeros(len(mid))
     ret[1:] = np.log(mid[1:] / mid[:-1])
+    # EWMA vol, halflife 60s — IIR filter in C (scipy.lfilter), no Python loop
+    from scipy.signal import lfilter
     a = 1.0 - math.exp(math.log(0.5) / 60.0)
-    ewm_var = np.zeros(len(ret))
-    v = 0.0
-    for i in range(1, len(ret)):
-        v = (1 - a) * v + a * ret[i] * ret[i]
-        ewm_var[i] = v
+    r2 = ret * ret
+    ewm_var = lfilter([a], [1.0, -(1.0 - a)], r2)
     sigma_ewm = np.sqrt(np.maximum(ewm_var, 1e-18))
-    # trailing-1d: rolling std over 86400 samples, cheap approx via cumulative
+    # trailing-1d realized vol: vectorized rolling mean of r2 over 86400 via cumsum
     win = 86400
-    csum = np.cumsum(ret * ret)
-    sig1d = np.zeros(len(ret))
-    for i in range(len(ret)):
-        lo = max(0, i - win)
-        n = i - lo + 1
-        sig1d[i] = math.sqrt(max((csum[i] - (csum[lo - 1] if lo > 0 else 0.0)) / n, 1e-18))
+    c = np.concatenate([[0.0], np.cumsum(r2)])
+    idx = np.arange(len(r2))
+    lo = np.maximum(0, idx - win + 1)
+    cnt = idx - lo + 1
+    sig1d = np.sqrt(np.maximum((c[idx + 1] - c[lo]) / cnt, 1e-18))
     return cts, mid, ret, sigma_ewm, sig1d
 
 
@@ -81,155 +75,188 @@ def main():
     db.row_factory = sqlite3.Row
     durs = [int(x) for x in args.durations.split(",")]
 
-    devs_g = {s: [] for s in range(3)}  # per-sigma gaussian dev arrays (pooled)
-    rec = dict(p_market=[], p_g_ewm=[], p_g_1d=[], p_g_or=[], dist=[], trem=[],
-               elapsed_dec=[], dist_bucket=[], date_ord=[], win_id=[], persist=[],
-               up_outcome=[])
+    # global accumulators (small, fixed size)
+    n_tot = 0
+    # empirical grid: (dist_bucket, elapsed_dec) -> [sum_up, count]
+    emp = defaultdict(lambda: [0.0, 0])
+    # we need empirical BEFORE computing dev-vs-empirical -> two passes over cells.
+    # Pass 1: fill emp grid (cheap: just dist/elapsed/outcome per print, streamed).
+    # Pass 2: dev histograms. Re-query per cell (DB is on-disk, fine).
 
+    date_ords = []  # for the 70/30 split point only (collect min/max per cell)
+
+    def iter_cell(pfx, sym, dur, spot):
+        cts, mid, ret, sig_ewm, sig1d = spot
+        win_s = dur * 60
+        rows = db.execute(
+            "SELECT t.ts, t.price, t.outcome, m.boundary_ts, m.outcome_up "
+            "FROM trades t JOIN markets m ON t.condition_id=m.condition_id "
+            "WHERE m.symbol=? AND m.duration_min=? AND m.outcome_up IN (0.0,1.0) "
+            "AND t.ts>=m.boundary_ts AND t.ts < m.boundary_ts + m.duration_min*60 "
+            "ORDER BY m.boundary_ts, t.ts", (pfx, dur)).fetchall()
+        # group by window on the fly (rows ordered by boundary_ts)
+        cur_b = None; buf = []
+        for r in rows:
+            if r["boundary_ts"] != cur_b:
+                if buf:
+                    yield cur_b, buf, win_s, spot
+                cur_b = r["boundary_ts"]; buf = []
+            buf.append(r)
+        if buf:
+            yield cur_b, buf, win_s, spot
+
+    spots = {}
+    def get_spot(sym):
+        if sym not in spots:
+            spots[sym] = load_spot(od, sym)
+        return spots[sym]
+
+    # ---- PASS 1: empirical grid + date range ----
+    dmin = 10**12; dmax = 0
     for pfx, sym in SYM.items():
-        cts, mid, ret, sig_ewm, sig1d = load_spot(od, sym)
+        spot = get_spot(sym)
+        cts, mid = spot[0], spot[1]
         for dur in durs:
             win_s = dur * 60
-            # trades for this symbol/duration with resolved outcome
-            rows = db.execute(
-                "SELECT t.ts, t.price, t.outcome, m.boundary_ts, m.outcome_up "
-                "FROM trades t JOIN markets m ON t.condition_id=m.condition_id "
-                "WHERE m.symbol=? AND m.duration_min=? AND m.outcome_up IN (0.0,1.0) "
-                "AND t.ts>=m.boundary_ts AND t.ts < m.boundary_ts + m.duration_min*60",
-                (pfx, dur)).fetchall()
-            if not rows:
-                continue
-            # group prints by window to compute persistence
-            by_win = {}
-            for r in rows:
-                by_win.setdefault(r["boundary_ts"], []).append(r)
-            for b, prints in by_win.items():
-                # spot open = mid at/after b
+            for b, buf, _, _ in iter_cell(pfx, sym, dur, spot):
                 oi = bisect.bisect_left(cts, b)
                 if oi >= len(cts) or cts[oi] - b > 5:
                     continue
                 open_px = mid[oi]
-                # same-window oracle sigma: realized 1s vol within [b, b+win]
-                ei = bisect.bisect_right(cts, b + win_s)
-                seg = ret[oi + 1:ei]
-                sig_or = math.sqrt(max(np.mean(seg * seg), 1e-18)) if len(seg) > 1 else 1e-9
-                prints.sort(key=lambda r: r["ts"])
-                pm_seq = []
-                for r in prints:
+                dord = b // 86400
+                dmin = min(dmin, dord); dmax = max(dmax, dord)
+                for r in buf:
                     ti = bisect.bisect_left(cts, r["ts"])
                     if ti >= len(cts):
                         continue
-                    now_px = mid[min(ti, len(cts) - 1)]
-                    dist = (now_px - open_px) / open_px
+                    dist = (mid[min(ti, len(cts)-1)] - open_px) / open_px
+                    dbk = int(np.clip(dist * 1e4 // 10, DIST_LO, DIST_HI))
+                    edec = min(int((r["ts"] - b) / win_s * 10), 9)
+                    g = emp[(dbk, edec)]
+                    g[0] += r["outcome_up"]; g[1] += 1
+    split = dmin + 0.70 * (dmax - dmin)
+
+    def P_emp(dbk, edec):
+        g = emp.get((dbk, edec))
+        return (g[0] / g[1]) if g and g[1] >= 30 else 0.5
+
+    # ---- PASS 2: deviation accumulators ----
+    # supra-cost counters under each fee + each sigma + empirical, by (edec, early/late)
+    cnt = 0
+    supra_poly = supra_kal = 0          # gaussian-EWMA dev, dual fee
+    supra_sigor = supra_sig1d = 0       # kalshi fee, other sigmas
+    supra_emp = 0                       # kalshi fee, empirical dev
+    sumabs_g = sumabs_emp = 0.0
+    # concentration: supra(emp,kalshi) by elapsed decile, split early/late
+    dec_excess = np.zeros(10); dec_excess_e = np.zeros(10); dec_excess_l = np.zeros(10)
+    dec_bias_sum = np.zeros(10); dec_bias_sq = np.zeros(10); dec_bias_n = np.zeros(10)
+    cap_supra = 0; cap_hit = 0
+
+    for pfx, sym in SYM.items():
+        spot = get_spot(sym)
+        cts, mid, ret, sig_ewm, sig1d = spot
+        for dur in durs:
+            win_s = dur * 60
+            for b, buf, _, _ in iter_cell(pfx, sym, dur, spot):
+                oi = bisect.bisect_left(cts, b)
+                if oi >= len(cts) or cts[oi] - b > 5:
+                    continue
+                open_px = mid[oi]
+                ei = bisect.bisect_right(cts, b + win_s)
+                seg = ret[oi+1:ei]
+                sig_or = math.sqrt(max(np.mean(seg*seg), 1e-18)) if len(seg) > 1 else 1e-9
+                dord = b // 86400; late = dord > split
+                nb = len(buf)
+                for k, r in enumerate(buf):
+                    ti = bisect.bisect_left(cts, r["ts"])
+                    if ti >= len(cts):
+                        continue
+                    j = min(ti, len(cts)-1)
+                    dist = (mid[j] - open_px) / open_px
                     rem = max(b + win_s - r["ts"], 1)
-                    z_ewm = dist / (sig_ewm[min(ti, len(sig_ewm)-1)] * math.sqrt(rem))
-                    z_1d = dist / (sig1d[min(ti, len(sig1d)-1)] * math.sqrt(rem))
-                    z_or = dist / (sig_or * math.sqrt(rem))
                     pm = r["price"] if r["outcome"] == "Up" else 1.0 - r["price"]
-                    rec["p_market"].append(pm)
-                    rec["p_g_ewm"].append(float(phi(np.array([z_ewm]))[0]))
-                    rec["p_g_1d"].append(float(phi(np.array([z_1d]))[0]))
-                    rec["p_g_or"].append(float(phi(np.array([z_or]))[0]))
-                    rec["dist"].append(dist)
-                    rec["trem"].append(rem / win_s)
-                    rec["elapsed_dec"].append(min(int((r["ts"]-b)/win_s*10), 9))
-                    rec["dist_bucket"].append(int(np.clip(dist*1e4//10, -10, 10)))
-                    rec["date_ord"].append(b // 86400)
-                    rec["win_id"].append(b)
-                    rec["up_outcome"].append(r["outcome_up"])
-                    pm_seq.append(pm)
-                # persistence proxy: count windows where a supra-cost dev had >=1 later print
-                # (filled in vectorized below; here mark seq length per print)
-                for k in range(len(pm_seq)):
-                    rec["persist"].append(1 if k < len(pm_seq)-1 else 0)
+                    sden = math.sqrt(rem)
+                    pg = phi_scalar(dist / (sig_ewm[j] * sden))
+                    pg1 = phi_scalar(dist / (sig1d[j] * sden))
+                    pgor = phi_scalar(dist / (sig_or * sden))
+                    dbk = int(np.clip(dist*1e4//10, DIST_LO, DIST_HI))
+                    edec = min(int((r["ts"]-b)/win_s*10), 9)
+                    pe = P_emp(dbk, edec)
+                    dev_g = pm - pg; dev_e = pm - pe
+                    thr_poly = 0.07*pm*(1-pm) + HALF_SPREAD
+                    thr_kal = 0.0175*pm*(1-pm) + HALF_SPREAD
+                    cnt += 1
+                    sumabs_g += abs(dev_g); sumabs_emp += abs(dev_e)
+                    if abs(dev_g) > thr_poly: supra_poly += 1
+                    if abs(dev_g) > thr_kal: supra_kal += 1
+                    if abs(pm-pgor) > thr_kal: supra_sigor += 1
+                    if abs(pm-pg1) > thr_kal: supra_sig1d += 1
+                    if abs(dev_e) > thr_kal:
+                        supra_emp += 1
+                        dec_excess[edec] += 1
+                        (dec_excess_l if late else dec_excess_e)[edec] += 1
+                        dec_bias_sum[edec] += dev_e; dec_bias_sq[edec] += dev_e*dev_e
+                        dec_bias_n[edec] += 1
+                        cap_supra += 1
+                        if k < nb - 1: cap_hit += 1
 
-    A = {k: np.array(v) for k, v in rec.items()}
-    n = len(A["p_market"])
     print("=" * 80)
-    print(f"FAIR-VALUE STAGE 1 — Polymarket prints vs Bybit Φ — n={n:,} prints — verbatim")
+    print(f"FAIR-VALUE STAGE 1 — Polymarket prints vs Bybit Φ — n={cnt:,} prints — verbatim")
     print("=" * 80)
-    if n == 0:
+    if cnt == 0:
         print("no data"); return
+    pct = lambda x: 100.0 * x / cnt
 
-    # Control 5: dual fee threshold. dev vs Gaussian-EWMA baseline first.
-    pm = A["p_market"]
-    def supra_frac(dev, rate):
-        thr = fee(pm, rate) + HALF_SPREAD
-        return float(np.mean(np.abs(dev) > thr))
+    print("\n[Control 5] dual-fee supra-cost (Gaussian-EWMA dev):")
+    print(f"  Polymarket(0.07): {pct(supra_poly):.2f}%   Kalshi(0.0175): {pct(supra_kal):.2f}%  (need >=20% both)")
 
-    dev_ewm = pm - A["p_g_ewm"]
-    print("\n[Control 5] dual-fee supra-cost fraction (Gaussian-EWMA dev):")
-    f_poly = supra_frac(dev_ewm, 0.07)
-    f_kal = supra_frac(dev_ewm, 0.0175)
-    print(f"  Polymarket(0.07):  {100*f_poly:.2f}%   Kalshi(0.0175): {100*f_kal:.2f}%  (need >=20% both)")
+    print("\n[Control 1] sigma robustness — supra-cost (Kalshi fee):")
+    print(f"  EWMA:        {pct(supra_kal):.2f}%")
+    print(f"  trailing-1d: {pct(supra_sig1d):.2f}%")
+    print(f"  oracle:      {pct(supra_sigor):.2f}%   mean|dev_gauss|={sumabs_g/cnt:.4f}")
 
-    # Control 1: sigma robustness
-    print("\n[Control 1] sigma robustness — supra-cost (Kalshi fee) under each estimator:")
-    for nm, key in [("EWMA", "p_g_ewm"), ("trailing-1d", "p_g_1d"), ("oracle", "p_g_or")]:
-        d = pm - A[key]
-        print(f"  sigma={nm:12s}: supra-cost={100*supra_frac(d,0.0175):.2f}%  "
-              f"mean|dev|={np.mean(np.abs(d)):.4f}")
+    print("\n[Control 2] empirical fair value — dev vs realized-P(up) grid:")
+    print(f"  supra-cost(Kalshi) vs empirical: {pct(supra_emp):.2f}%  mean|dev_emp|={sumabs_emp/cnt:.4f}")
+    print(f"  (vs Gaussian mean|dev|={sumabs_g/cnt:.4f}; if empirical dev << gaussian, the")
+    print(f"   gaussian 'deviation' was tail/model error not mispricing)")
 
-    # Control 2: empirical fair value (binned realized P(up))
-    # bins: dist_bucket x elapsed_dec -> mean up_outcome
-    print("\n[Control 2] empirical fair value (realized P(up) binned), dev vs empirical:")
-    key = (A["dist_bucket"].astype(int) + 10) * 10 + A["elapsed_dec"].astype(int)
-    P_emp = np.zeros(n)
-    for k in np.unique(key):
-        m = key == k
-        P_emp[m] = A["up_outcome"][m].mean()
-    dev_emp = pm - P_emp
-    print(f"  supra-cost(Kalshi) vs empirical: {100*supra_frac(dev_emp,0.0175):.2f}%  "
-          f"mean|dev_emp|={np.mean(np.abs(dev_emp)):.4f}")
-    print(f"  (vs Gaussian-EWMA mean|dev|={np.mean(np.abs(dev_ewm)):.4f} — if empirical dev")
-    print(f"   much smaller, the Gaussian 'deviation' was tail/model error, not mispricing)")
+    print("\n[concentration] supra-cost-vs-empirical by elapsed decile (signed bias):")
+    tot = dec_excess.sum()
+    for d in range(10):
+        no = dec_bias_n[d]
+        if no > 1:
+            mu = dec_bias_sum[d]/no
+            sd = math.sqrt(max(dec_bias_sq[d]/no - mu*mu, 1e-18))
+            bias = mu/sd if sd > 0 else 0
+        else:
+            bias = 0
+        share = 100*dec_excess[d]/tot if tot else 0
+        print(f"  decile {d}: {share:5.1f}% of excess  signed-bias={bias:+.2f}")
+    top = int(np.argmax(dec_excess)) if tot else -1
+    conc = dec_excess[top]/tot if tot else 0
+    print(f"  most-concentrated decile={top} holds {100*conc:.1f}% (need >=60%)")
 
-    # concentration: supra-cost instants (Kalshi, empirical dev) by elapsed decile
-    thr = fee(pm, 0.0175) + HALF_SPREAD
-    supra = np.abs(dev_emp) > thr
-    print(f"\n[concentration] supra-cost-vs-empirical instants by elapsed decile:")
-    tot = supra.sum()
-    if tot > 0:
-        for d in range(10):
-            m = supra & (A["elapsed_dec"] == d)
-            sd = dev_emp[supra & (A["elapsed_dec"] == d)]
-            bias = (np.mean(sd)/np.std(sd)) if len(sd) > 1 and np.std(sd) > 0 else 0
-            print(f"  decile {d}: {100*m.sum()/tot:5.1f}% of excess  signed-bias={bias:+.2f}")
-    top_dec = max(range(10), key=lambda d: (supra & (A["elapsed_dec"] == d)).sum()) if tot else -1
-    conc = (supra & (A["elapsed_dec"] == top_dec)).sum() / tot if tot else 0
-    print(f"  most-concentrated decile={top_dec} holds {100*conc:.1f}% (need >=60%)")
+    print("\n[Control 3] OOS — concentrated decile share on early(70%) vs late(30%):")
+    te = dec_excess_e.sum(); tl = dec_excess_l.sum()
+    print(f"  early: {100*dec_excess_e[top]/te if te else 0:.1f}%   late: {100*dec_excess_l[top]/tl if tl else 0:.1f}%")
 
-    # Control 3: OOS split 70/30 on dates
-    print("\n[Control 3] OOS — does the concentrated bucket hold on held-out later 30%?")
-    dord = A["date_ord"]; cut = np.percentile(dord, 70)
-    early = dord <= cut; late = dord > cut
-    for lab, msk in [("early(70%)", early), ("late(30%)", late)]:
-        s = supra & msk & (A["elapsed_dec"] == top_dec)
-        base = supra & msk
-        frac = s.sum()/base.sum() if base.sum() else 0
-        print(f"  {lab}: bucket holds {100*frac:.1f}% of its excess")
+    print("\n[Control 4] capturable proxy — supra-cost devs with a later in-window print:")
+    print(f"  {100*cap_hit/cap_supra if cap_supra else 0:.1f}% [PROXY, no book]")
 
-    # Control 4: capturable proxy
-    print("\n[Control 4] capturable proxy — supra-cost devs with >=1 later in-window print:")
-    cap = (supra & (A["persist"] == 1)).sum() / supra.sum() if supra.sum() else 0
-    print(f"  {100*cap:.1f}% of supra-cost instants have a later print (fade fill plausible) [PROXY]")
-
-    # verdict
-    print("\n" + "=" * 80)
     passes = {
-        "dual-fee >=20% (both)": f_poly >= 0.20 and f_kal >= 0.20,
+        "dual-fee >=20% both": pct(supra_poly) >= 20 and pct(supra_kal) >= 20,
         "concentration >=60%": conc >= 0.60,
-        "sigma survives all (oracle supra >=20%)": supra_frac(pm-A["p_g_or"],0.0175) >= 0.20,
-        "beats empirical (supra vs emp >=20%)": supra_frac(dev_emp,0.0175) >= 0.20,
+        "sigma oracle supra >=20%": pct(supra_sigor) >= 20,
+        "beats empirical >=20%": pct(supra_emp) >= 20,
     }
+    print("\n" + "=" * 80)
     for k, v in passes.items():
         print(f"  {'PASS' if v else 'FAIL'}  {k}")
     verdict = all(passes.values())
     print("STAGE 1 VERDICT:",
           "STRUCTURE EXISTS — Stage 2 eligible" if verdict else "NO STRUCTURE — KILL")
     if not verdict:
-        killer = next(k for k, v in passes.items() if not v)
-        print(f"KILLED BY: {killer}")
+        print("KILLED BY:", next(k for k, v in passes.items() if not v))
 
 
 if __name__ == "__main__":
