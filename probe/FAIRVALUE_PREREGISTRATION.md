@@ -2,7 +2,24 @@
 
 **Branch:** `probe/fairvalue`. **Drafted:** 2026-06-13. **Status:** AWAITING SIGN-OFF —
 no Stage-1 run until committed AND owner-approved.
-**Cost:** offline. 408-day L2 spot store + any logged Kalshi book history. Zero capital.
+**Cost:** offline. 408-day L2 spot store + Polymarket real trade prints. Zero capital.
+
+## GATE 0 — RESOLVED (2026-06-13, before any Stage-1 result)
+- **Kalshi order-book history does NOT exist** (`/data/kalshi_orders.jsonl` = 465 of our own
+  orders only; no book snapshots; no DB tables). Cannot test on Kalshi directly.
+- **Polymarket real contract prices DO exist and are independent of Bybit spot:**
+  `probe_track_a.db` = 53.4M timestamped trade prints (price + Up/Down token = real
+  contract-implied P, set by independent traders). NOT spot-derived → no spot-vs-spot
+  circularity. P_market(Polymarket print) vs P_fair(Bybit arithmetic) = two independent
+  inputs.
+- **Intra-window coverage CONFIRMED (the gate on whether this is the live test):** prints
+  span the whole window life — 15m: 606 prints/window, all deciles 825k-1.36M; 5m:
+  848/window. Stage 1 is fed the **trade prints** (intra-window), NOT the window-open-only
+  `predictions.p_market` (which could test only the known-efficient open). This IS the live
+  test of mid-window deviation.
+- **Decision:** run on Polymarket prints, proxy-flagged for venue transfer (Polymarket fees/
+  feed/mix ≠ Kalshi). Start Kalshi book logging in parallel as the venue-direct follow-up —
+  not a blocker.
 
 **The untested seat:** all three sealed probes modeled *price* (OBI state, OFI flow,
 oscillation). This tests whether the *contract price* deviates from **model-free arithmetic
@@ -44,16 +61,23 @@ For every instant with a contract price:
   bucket (post-spot-move, near-open, dead-zone); and the SIGN structure (is `dev` symmetric
   = noise, or biased = structural mispricing).
 
-**STRUCTURE-EXISTS threshold (registered before running):**
-- `|dev| > fee + half_spread` (half_spread = 0.5¢ proxy, the §0-measured tight end) in
-  **≥ 20%** of instants, AND
-- that excess concentrates: **≥ 60%** of the excess-deviation instants fall in a SINGLE
-  identifiable, ex-ante-predictable bucket (one elapsed-decile band or one distance band),
-  AND
-- the deviation is **directionally biased** within that bucket (mean signed dev ≥ half its
-  own std — i.e. a real lean, not symmetric chop).
+**STRUCTURE-EXISTS threshold (registered before running) — all conjuncts:**
+- `|dev| > fee + half_spread` (half_spread = 0.5¢ proxy) in **≥ 20%** of instants, evaluated
+  under BOTH fee schedules separately (Control 5): Polymarket 0.07·p(1−p) AND Kalshi
+  0.0175·p(1−p). A deviation supports the Kalshi thesis only if it clears Kalshi cost.
+- excess concentrates: **≥ 60%** of excess-deviation instants in a SINGLE ex-ante-predictable
+  bucket (one elapsed-decile or one distance band).
+- directionally biased within that bucket (mean signed dev ≥ 0.5 · its own std).
+- **Control 1 (σ):** survives under all 3 σ estimators incl. same-window oracle.
+- **Control 2 (empirical):** `|P_market − P_empirical|` (not just Gaussian Φ) supra-cost,
+  where P_empirical = realized P(up) binned by (dist-from-open, time-remaining) over 408 days.
+- **Control 3 (OOS):** the concentrated bucket found on the early span holds on the held-out
+  later span (time split registered before running: train = first 70% of dates, test = last 30%).
+- **Control 4 (capturable):** at deviation instants, some is capturable not queue-blocked —
+  proxy (no book history): deviation persists ≥1 subsequent print / converges within-window
+  (a fill on the fade side becomes available), reported as proxy.
 
-All three required. If deviations are random/symmetric/sub-cost, or excess is smeared with no
+All required. Each control reports its own verbatim breakdown; lead with whichever kills it. If deviations are random/symmetric/sub-cost, or excess is smeared with no
 predictable concentration → **Stage-1 KILL: market efficiently priced vs the arithmetic,
 venue-question closed.** A biased, concentrated, supra-cost deviation is the only thing that
 survives to Stage 2.
