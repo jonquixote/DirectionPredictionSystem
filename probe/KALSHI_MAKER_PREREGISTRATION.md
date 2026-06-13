@@ -21,11 +21,13 @@ All assumed numbers below are Polymarket-proxy or doc-derived until this step re
   quotes ONLY verified-live markets.
 - **Fee (confirm from Kalshi account/API, not press):** maker ≈ 0.0175·p(1−p) ($0.0175/contract
   at mid), taker 0.07·p(1−p). Confirm maker rebate/fee booking on a real fill.
-- **Two-sided capability (build-gap check):** current rails place ONE maker order on the
-  model's side and fall back to taker after 5 retries (`MAKER_WAIT_SECS=3.0`). Market-MAKING
-  needs RESTING TWO-SIDED quotes (bid+ask) with active cancel-on-move. Determine: can the
-  rails rest two-sided and cancel within ~1s of an adverse spot move? If not, the minimal
-  build is scoped here and counted against the time budget — or it's a feasibility KILL (§4).
+- **Two-sided placement — SOLVED (owner clarification).** Kalshi orders ARE resting limit
+  orders: set a price, fills only when a taker hits it, and a buy and a sell can rest
+  simultaneously. The venue natively supports resting bid+ask. Placement is NOT the gap.
+  The binding feasibility question narrows to the CANCEL side — see §4.
+- **Window dead-zone:** markets may be untradeable / price-setting-only for the first ~40s
+  of each window. Fold into the quoting-window model: effective quoting life per 15-min
+  window ≈ (900 − 40)s, and the §3 windows/day fill math uses the reduced life.
 - **Spread reality:** sample live Kalshi order books on the verified markets — actual
   bid/ask spread distribution at mid vs tails. The proxy assumed 1-2¢ (100-200 bps); MEASURE
   it. Spread is the entire revenue line; an assumed spread is not a result.
@@ -72,17 +74,26 @@ meant to free. SCALE-UP must clear a bar high enough that such an edge does NOT 
 **SCALE-UP requires BOTH:**
 1. realized net-EV-per-contract bootstrap 95% **lower bound ≥ $0.010** (clears break-even
    with room — roughly double the maker fee at mid — not the marginal $0.001-0.005 band), AND
-2. **achievable sustainable volume at that EV ≥ enough for net ≥ $100/day** with bounded
+2. **achievable sustainable volume at that EV ≥ enough for net ≥ $300/day** with bounded
    attention (≤ the existing zero-touch automation; no new babysitting role).
+
+   **Bar justification (anchored, not arbitrary):** $300/day ≈ the opportunity cost of
+   pulling the owner's active attention off Branch B. A part-day of focused senior eng/quant
+   time is worth ~$300-500; a strategy that demands ongoing attention must clear at least the
+   low end of that or it is net-negative on the only scarce resource (time, not capital).
+   Plus it must cover its own running cost (server + data). Below $300/day net at bounded
+   attention, the correct action is PARK zero-touch — the edge does not earn the attention it
+   consumes. The bar's whole job is to make thin-but-positive fail honestly; tying it to a
+   defensible comparison is what stops it being lowered the moment a marginal-positive appears.
 
 **The volume math, stated honestly (this is likely where it dies):** BTC 15-min = 96
 windows/day. Both sides every window at 10 contracts ≈ 1,920 fills/day. At $0.010/contract
-net that is **~$19/day** — an order of magnitude below the $100/day bar. To clear $100/day
-needs either net EV/contract ≫ $0.01, or many more verified markets/durations stacked, or
-much larger size (which raises adverse selection and moves the book against us). The §0
-universe-verification feeds directly here: total addressable windows/day across all verified
-markets × realistic fill rate × net EV must reach $100/day. If the arithmetic can't reach it
-even at the optimistic EV, that is a **pre-quoting SCALE-UP failure** worth recording before
+net that is **~$19/day** — over an order of magnitude below the $300/day bar. To clear
+$300/day needs net EV/contract ≫ $0.01, OR many verified markets/durations stacked, OR much
+larger size (which raises adverse selection and moves the book against us). The §0
+universe-verification feeds directly here: addressable windows/day across all verified
+markets × realistic fill rate × net EV must reach $300/day. If the arithmetic can't reach it
+even at optimistic EV, that is a **pre-quoting SCALE-UP failure** worth recording before
 spending quoting days.
 
 **Outcomes:**
@@ -94,17 +105,18 @@ spending quoting days.
 
 ---
 
-## 4. LATENCY-DEFENSE FEASIBILITY (pre-quoting; can be a KILL on its own)
+## 4. LATENCY-DEFENSE FEASIBILITY — CANCEL-ON-MOVE is the binding gate
 
-Taxing takers did not remove latency players. A resting maker quote is the thing they pick
-off. Determine, before quoting:
-- Required quote-pull speed: how fast must we cancel a resting quote after a ≥Xbps spot move
-  to avoid being the stale price a latency taker hits? (Estimate from the 100ms Bybit move
-  cadence + Kalshi book-update latency.)
-- Can the rails achieve it? Current path is place-and-wait-3s with taker fallback — that is
-  NOT active cancel-on-move. If the rails structurally cannot cancel within the required
-  window (target: ≤1s from spot move), and the minimal build to add it doesn't fit §5,
-  that is a **feasibility KILL** — recorded before any capital is exposed.
+Placement is solved (§0: Kalshi natively rests two-sided limit orders). The open question is
+the CANCEL side: taxing takers did not remove latency players, and a resting quote is the
+thing they pick off when spot moves and our price goes stale. Determine, before quoting:
+- Required cancel-and-reprice speed: how fast must we cancel after a ≥Xbps spot move to avoid
+  being the stale price a latency taker hits? (Estimate from 100ms Bybit move cadence +
+  measured Kalshi cancel-ack latency.)
+- Can the rails achieve it? Existing path is place-and-wait-3s — NO active cancel-on-move.
+  Minimal build = a spot-move watcher that cancels/reprices resting quotes. If the rails +
+  minimal build cannot cancel within target **≤1s from spot move** (and the build doesn't fit
+  §5), that is a **feasibility KILL** — recorded before any capital is exposed.
 
 ---
 
@@ -117,8 +129,11 @@ Server runway: ~17 days from 2026-06-13 → hard stop ~2026-06-30, with export r
 - Quoting window: **7 days** small-size live, demo/small-real per owner.
 - Decision date: **2026-06-25** (verdict + export, ≥5 days server margin).
 
-If §0 or §4 KILLs, the probe ends Day 0-1 with the verification as its finding (e.g.
-"Kalshi spread measured at N bps, below break-even — KILL" is a complete, valuable result).
+**Mandatory verdict + export on ANY outcome, including a Day-0 KILL.** If this dies at §0
+(only BTC-15m wired; no ETH/SOL/XRP breadth) or §4 (rails can't cancel sub-1s), that is a
+RECORDED result — "Kalshi maker infeasible on free rails / insufficient breadth, venue
+closed" — written to a verdict doc and exported, not a quiet stop. Closing a venue with
+evidence is a deliverable. A Day-0 KILL still produces `probe/KALSHI_MAKER_VERDICT.md`.
 
 ---
 
@@ -130,6 +145,7 @@ Fair value and adverse selection MEASURED on Kalshi, not proxied. Independence =
 fill. No extending the window to reach n. PARK is a legitimate, pre-registered outcome and
 the report states it without flinching.
 
-**Blanks filled:** KILL n=500, LB≤$0. SCALE-UP LB≥$0.010/contract AND net≥$100/day at
-sustainable volume/bounded attention. Latency target ≤1s cancel-on-move. Decision 2026-06-25.
-Tighten before sign-off if any bar is too soft.
+**Blanks filled:** KILL n=500, LB≤$0. SCALE-UP LB≥$0.010/contract AND net≥$300/day
+(anchored to attention opportunity cost) at sustainable volume/bounded attention. Latency
+target ≤1s cancel-on-move (binding feasibility gate; placement solved). Decision 2026-06-25.
+Verdict+export mandatory on any outcome incl. Day-0 KILL.
