@@ -4,13 +4,14 @@
 **Scope:** one long session covering (Phase 1) feature-contract alignment forensics, then
 (Phase 2) a pre-registered 10-day signal-hunt probe and its offshoot mini-probes.
 
-**STATUS BANNER (2026-06-14):** FIVE mechanisms tested, FIVE kills. Price-state (OBI),
-price-flow (OFI), copy-the-winners, Kalshi maker seat, fair-value deviation — all KILLed on
-sound, now-trusted instruments. SIXTH and final gate — inversion Stage 2, round-trip on the
-one residual early-window flicker — RUNNING. If it dies, the probe sweep is complete and the
-verdict is the five/six-mechanism convergence: in 5-30min crypto binaries the price is
-efficient against everything a solo operator computes from public data, and the fee structure
-confiscates whatever visible skill persists.
+**STATUS BANNER (2026-06-14): SWEEP COMPLETE — SIX mechanisms tested, SIX kills.** Price-state
+(OBI), price-flow (OFI), copy-the-winners, Kalshi maker seat, fair-value deviation, intra-window
+inversion — all KILLed on sound, now-trusted instruments. Master verdict:
+`probe/PROBE_SWEEP_VERDICT.md`. In 5-30min crypto binaries the price is efficient against
+everything a solo operator computes from public data, and the 0.07·p(1−p) fee confiscates
+whatever visible skill persists. **System → zero-touch shadow; owner reallocates to Branch B;
+salvage = methodology + datasets.** Remaining: pull the two compressed probe DBs to cold storage
+before server end (~2026-06-30).
 
 ---
 
@@ -171,34 +172,37 @@ a gate trigger.)
    bias ≈0), uniform across the window (~10%/decile), and partly our own model error
    (mean|dev_emp| 0.114 > gaussian 0.084). Killed by the concentration control (11% vs ≥60%
    needed). Best demonstration in the arc of why the controls were worth the care.
-5. **(running) Inversion round-trip** (`probe/inversion`, Stage 2) — see §4.
+5. **Intra-window inversion** (`probe/inversion`, `INVERSION_VERDICT.md`) — Stage 1 PASS
+   (oscillation real, 85% round-trips complete) → Stage 2 KILL: incomplete legs = adverse
+   selection; EV −$0.064/window, bootstrap LB −$0.065, n=63k, on the most-favorable early
+   slice + best δ. The oscillation pays pennies on reversion, costs dollars on continuation.
 
 **The consistent lesson:** the fee + microstructure of these markets are engineered to leave
 no room for an outside, non-latency, human-timescale strategy at meaningful size. The house
-priced out exactly the seats an outsider can reach. Five structurally different ways in, five
-hits on the same wall — the convergence IS the finding.
+priced out exactly the seats an outsider can reach. SIX structurally different ways in, six
+hits on the same wall — the convergence IS the finding. Master: `probe/PROBE_SWEEP_VERDICT.md`.
 
 ---
 
-## 4. THE LAST GATE — inversion Stage 2 (RUNNING)
+## 4. THE LAST GATE — inversion Stage 2 (SEALED KILL)
 
-### Inversion (`probe/inversion`, `INVERSION_PREREGISTRATION.md`)
+### Inversion (`probe/inversion`, `INVERSION_VERDICT.md`)
 Hypothesis: price oscillates around window-open, flips dampen late.
 - **Stage 1 PASSED** (`stage1_flips.py`): flip histogram 4/4 symbols + pooled (5.18
-  flips/window in first-66%, dampening 0.37 ≤ 0.5). Physics real. Caveat: flip metric counts
-  sub-cost jitter near open — harvestability is entirely Stage 2.
-- **Stage 2 RUNNING** (`stage2_roundtrip.py`): round-trip backtest on real Polymarket prints,
+  flips/window in first-66%, dampening 0.37 ≤ 0.5). Physics real.
+- **Stage 2 KILL** (`stage2_roundtrip.py`): round-trip backtest on real Polymarket prints,
   through-level fill realism, maker fee + 30/69bps adverse haircut, completed-vs-incomplete-leg
-  cost, per-window-attempted EV. **Pointed at the early-window slice (deciles 0-1)** — the one
-  flicker fair-value Stage 1 left standing (faint +0.15 signed bias in decile 0, exactly where
-  round-trips operate). δ-grid {1,2,3}¢. Gate: net EV/window bootstrap 95% LB > 0 on n≥2000 at
-  haircut 0.003. Run on the most-favorable ground so a kill is earned, not by neglect.
+  cost. Pointed at the early-window slice (deciles 0-1, the fair-value flicker). Result:
+  EV −$0.064/window, bootstrap LB −$0.065, n=63,104, ALL δ×haircut cells negative, on the
+  most-favorable ground. 78-85% of round-trips complete (oscillation real) but the 15-22%
+  incomplete legs carry to resolution as adverse-selected directional losses that swamp the
+  pennies of captured spread. Kill earned, not by neglect.
 
-### Fair-value deviation — SEALED KILL (was running, now done; see §3.4 and `FAIRVALUE_VERDICT.md`)
+### Fair-value deviation — SEALED KILL (see §3.4 and `FAIRVALUE_VERDICT.md`)
 GATE 0 resolved (Kalshi book absent → ran on 53.4M independent Polymarket prints,
 intra-window coverage confirmed 606/window). Five controls all reported verbatim;
 concentration control killed it. The seat is closed; its one residual flicker (early-decile
-bias) was handed to inversion Stage 2 as its lead.
+bias) was handed to inversion Stage 2 — which also died.
 
 ---
 
@@ -263,28 +267,24 @@ These emerged across the session and became binding:
 - **Kalshi maker:** sealed KILL (`KALSHI_MAKER_VERDICT.md`).
 - **Fair-value deviation:** sealed KILL (`FAIRVALUE_VERDICT.md`), Stage-1, n=50.8M prints,
   concentration control. (Cost: 2× OOM + 1 VPS reset; lesson #11.)
-- **Inversion:** Stage 1 passed; **Stage 2 RUNNING** on the early-window slice (the last gate).
+- **Inversion:** sealed KILL (`INVERSION_VERDICT.md`), Stage 2, EV −$0.064/window on n=63k.
+- **Master:** `probe/PROBE_SWEEP_VERDICT.md` — six mechanisms, six kills. SWEEP COMPLETE.
 - **VPS:** reset-recovered, healthy, all 3 services active, snapshot rollback exists.
 
-### IMMEDIATE NEXT ACTION
-1. Read inversion Stage 2 verbatim when it completes (monitor armed). Pointed at early-window
-   slice, δ-grid, n≥2000, bootstrap LB > 0 at 30bps haircut.
-2. If Stage 2 KILLs (predicted): write `INVERSION_VERDICT.md`, then the **master probe
-   verdict** — five/six-mechanism convergence — and execute the Day-10 export manifest
-   (probe DBs already compressed on VPS; pull to cold storage).
-3. If Stage 2 SURVIVES on the early slice (the crack of light): do NOT build/trade — report,
-   and design a follow-up that re-tests it out-of-time with its own anchored scale-up bar.
-4. Kalshi book logging recommended as a standing background task (venue-direct follow-up for
-   any future maker/fair-value re-test) — not started.
-5. No Stage-2 conclusion is a build/capital trigger without owner ruling.
+### IMMEDIATE NEXT ACTION (sweep done — only cleanup remains)
+1. **Pull the two compressed probe DBs to cold storage** before server end (~2026-06-30):
+   `/data/probe_exports/probe_track_a.db.gz` (8.4G), `probe_ofi.tar.gz` (5.2G). Non-urgent
+   but the one open task. (feature_log.parquet already local; code/docs in git.)
+2. Decide on snapshot `vps-n2-pre-reset-20260613` — retain or delete.
+3. (Optional, only if ever revisiting Kalshi) stand up Kalshi book logging to convert the
+   maker/fair-value Polymarket-proxy bounds into venue-measured numbers.
+4. System stays zero-touch shadow; owner's active time → Branch B.
 
-### Decision-table endgame
-Five mechanisms KILLed; inversion Stage 2 is the sixth and last. If it dies too → the system
-has tested price-state, price-flow, oscillation, copy, maker, and fair-value-deviation, and
-found no capturable edge → full zero-touch shadow, owner reallocates active time to Branch B,
-the methodology + datasets are the salvage. The convergence is a real, defensible,
-evidence-backed answer to the question the project was built to ask. Most-likely outcome by
-the registered honest priors: PARK/KILL.
+### Decision-table endgame — REACHED
+Six mechanisms KILLed: price-state, price-flow, copy, maker, fair-value-deviation, inversion.
+No capturable edge for a solo operator from public data; fees confiscate persistent skill.
+**Outcome: full zero-touch shadow; owner reallocates to Branch B; methodology + datasets are
+the salvage.** A real, defensible, evidence-backed answer to the question the project asked.
 
 ---
 
