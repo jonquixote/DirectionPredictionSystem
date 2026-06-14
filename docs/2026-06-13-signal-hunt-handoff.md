@@ -1,8 +1,16 @@
 # DirectionPredictionSystem — Signal Hunt & Alignment Forensics Handoff
 
-**Date:** 2026-06-13. **Author:** working session (Claude + owner).
+**Date:** 2026-06-13, last updated 2026-06-14. **Author:** working session (Claude + owner).
 **Scope:** one long session covering (Phase 1) feature-contract alignment forensics, then
 (Phase 2) a pre-registered 10-day signal-hunt probe and its offshoot mini-probes.
+
+**STATUS BANNER (2026-06-14):** FIVE mechanisms tested, FIVE kills. Price-state (OBI),
+price-flow (OFI), copy-the-winners, Kalshi maker seat, fair-value deviation — all KILLed on
+sound, now-trusted instruments. SIXTH and final gate — inversion Stage 2, round-trip on the
+one residual early-window flicker — RUNNING. If it dies, the probe sweep is complete and the
+verdict is the five/six-mechanism convergence: in 5-30min crypto binaries the price is
+efficient against everything a solo operator computes from public data, and the fee structure
+confiscates whatever visible skill persists.
 
 ---
 
@@ -147,50 +155,50 @@ a gate trigger.)
 
 ---
 
-## 3. THE THREE SEALED VERDICTS (one finding, three mechanisms)
+## 3. THE SEALED VERDICTS (one finding, five mechanisms; sixth running)
 
-1. **Taker-copy** — gross skill real, fee confiscates it. Net-negative.
-2. **True-OFI model** — no edge vs market price; fresh-slice CI crosses zero.
+1. **Taker-copy** (`probe/VERDICT.md`) — gross skill real (Spearman rho 0.31, p≈10⁻⁷⁹),
+   0.07·p(1−p) fee confiscates 100%+ of it. Net-negative. Gate A prong-1 FAIL.
+2. **True-OFI model** (`probe/VERDICT.md`) — no edge vs market price; fresh-slice EV CI
+   crosses zero (50.84%, Wilson LB 50.24%). Gate B FAIL.
 3. **Kalshi maker seat** (`probe/kalshi-maker`, `KALSHI_MAKER_VERDICT.md`) — KILLed at §0 on
    the **volume wall**: only 4 markets (BTC/ETH/SOL/XRP 15-min up/down; no 5m, no up/down
    hourly), 384 windows/day, deep maker queues (53-852 contracts). $300/day anchored
    scale-up bar structurally unreachable before cancel-on-move feasibility even tested.
+4. **Fair-value deviation** (`probe/fairvalue`, `FAIRVALUE_VERDICT.md`) — Stage-1 KILL on
+   n=50.8M prints. 92% of prints deviate from arithmetic fair value by more than cost — a
+   **screaming false positive** strangled by four controls: deviation is symmetric (signed
+   bias ≈0), uniform across the window (~10%/decile), and partly our own model error
+   (mean|dev_emp| 0.114 > gaussian 0.084). Killed by the concentration control (11% vs ≥60%
+   needed). Best demonstration in the arc of why the controls were worth the care.
+5. **(running) Inversion round-trip** (`probe/inversion`, Stage 2) — see §4.
 
 **The consistent lesson:** the fee + microstructure of these markets are engineered to leave
 no room for an outside, non-latency, human-timescale strategy at meaningful size. The house
-priced out exactly the seats an outsider can reach.
+priced out exactly the seats an outsider can reach. Five structurally different ways in, five
+hits on the same wall — the convergence IS the finding.
 
 ---
 
-## 4. THE TWO PENDING PROBES (both offline, gated, awaiting/in-progress)
+## 4. THE LAST GATE — inversion Stage 2 (RUNNING)
 
-### Inversion (`probe/inversion`, `INVERSION_PREREGISTRATION.md`) — Stage 1 PASSED
-Hypothesis: price oscillates around window-open, flips dampen late. **Stage-1 flip histogram:
-4/4 symbols + pooled PASS** (5.18 flips/window in first-66%, dampening 0.37 ≤ 0.5). Physics
-real. **Caveat:** flip metric counts sub-cost jitter near open; harvestability is entirely
-Stage 2 (δ-grid 1-3¢ + through-level fill). **Stage 2 HELD** pending fair-value result.
+### Inversion (`probe/inversion`, `INVERSION_PREREGISTRATION.md`)
+Hypothesis: price oscillates around window-open, flips dampen late.
+- **Stage 1 PASSED** (`stage1_flips.py`): flip histogram 4/4 symbols + pooled (5.18
+  flips/window in first-66%, dampening 0.37 ≤ 0.5). Physics real. Caveat: flip metric counts
+  sub-cost jitter near open — harvestability is entirely Stage 2.
+- **Stage 2 RUNNING** (`stage2_roundtrip.py`): round-trip backtest on real Polymarket prints,
+  through-level fill realism, maker fee + 30/69bps adverse haircut, completed-vs-incomplete-leg
+  cost, per-window-attempted EV. **Pointed at the early-window slice (deciles 0-1)** — the one
+  flicker fair-value Stage 1 left standing (faint +0.15 signed bias in decile 0, exactly where
+  round-trips operate). δ-grid {1,2,3}¢. Gate: net EV/window bootstrap 95% LB > 0 on n≥2000 at
+  haircut 0.003. Run on the most-favorable ground so a kill is earned, not by neglect.
 
-### Fair-value deviation (`probe/fairvalue`, `FAIRVALUE_PREREGISTRATION.md`) — running Stage 1
-The untested seat: does the *contract price* deviate from **model-free arithmetic fair value**
-`P_fair = Φ(dist_from_open / (σ√time_remaining))` by more than cost, predictably?
-- **GATE 0 resolved:** Kalshi book history does NOT exist (only 465 of our own orders). But
-  Polymarket gives **real independent contract prices** (53.4M trade prints + 1.1M logged
-  p_market) — independent of Bybit spot, so NO spot-vs-spot circularity. Pivot approved: run
-  on Polymarket prints, proxy-flagged for venue transfer; start Kalshi book logging in
-  parallel as the venue-direct follow-up (not a blocker).
-- **Series + coverage confirmed (the gate on whether this is the real test):** the 53.4M
-  trade prints have genuine intra-window coverage — 15m: 606 prints/window, all deciles
-  825k-1.36M; 5m: 848/window. **Feed Stage 1 the prints, NOT window-open p_market** (which
-  could only test the open, already known efficient). This IS the live test.
-- **Five controls registered before running** (each reports its own verbatim breakdown):
-  (1) σ-robustness ≥3 estimators incl. same-window oracle; (2) empirical fair value alongside
-  Gaussian Φ, must beat empirical; (3) OOS split on the concentration claim (no survivorship);
-  (4) capturable-vs-visible (queue depth / through-level fill at deviation instants — the
-  maker probe's grave); (5) dual-fee threshold (supra-cost under BOTH Polymarket 0.07 and
-  Kalshi 0.0175 schedules, reported separately).
-- **Amended Stage-1 verdict:** STRUCTURE EXISTS only if supra-cost (both fees) AND survives
-  all σ specs AND beats empirical fair value AND concentration holds OOS AND some is
-  capturable. Else KILL (with which control killed it, verbatim).
+### Fair-value deviation — SEALED KILL (was running, now done; see §3.4 and `FAIRVALUE_VERDICT.md`)
+GATE 0 resolved (Kalshi book absent → ran on 53.4M independent Polymarket prints,
+intra-window coverage confirmed 606/window). Five controls all reported verbatim;
+concentration control killed it. The seat is closed; its one residual flicker (early-decile
+bias) was handed to inversion Stage 2 as its lead.
 
 ---
 
@@ -224,6 +232,14 @@ These emerged across the session and became binding:
 10. **Watch the staleness trap.** A 120s-old print is a price nobody offers — scoring against
     it manufactures backtest-only latency edge. Primary populations use fresh data; stale
     buckets are reported as the latency-mirage diagnostic.
+11. **Size memory before launching over the big store; guard with `ulimit -v`.** The
+    fair-value Stage 1 OOM'd the 15GB VPS TWICE (v1: ~50M prints × 12 fields in Python lists
+    ≈18GB; v2: cached all 4 symbols' 1s arrays + fetchall'd 12M-row cells). Both wedged sshd
+    so hard the OOM-killer couldn't recover it — required a `gcloud compute reset` (snapshot
+    taken first: `vps-n2-pre-reset-20260613`; all data + services recovered clean). The fix
+    (v3): per-symbol processing freed between symbols, chunked cursor `fetchmany`→numpy (never
+    fetchall), vectorized `scipy.ndtr` + `np.searchsorted`, **launched under `ulimit -v` so a
+    runaway dies with MemoryError instead of wedging the box.** Ran in minutes at ~3GB peak.
 
 ### Operational pattern
 - Heavy compute runs on the VPS (`ssh -i ~/.ssh/id_vps_n2 johnny@34.67.75.48`), launched
@@ -236,38 +252,39 @@ These emerged across the session and became binding:
 
 ---
 
-## 6. CURRENT STATE (as of 2026-06-13 ~08:15 UTC)
+## 6. CURRENT STATE (as of 2026-06-14 ~06:00 UTC)
 
 - **Phase 1:** complete, deployed, sealed. Fleet → zero-touch shadow; predictions +
   feature_json logging continue as instrumentation. Gate-failed-models / uninformative-harness
   finding documented; live-shadow-gate is the recommended fix (not yet built).
-- **Phase 2 probe:** sealed (`VERDICT.md`). Big artifacts compressed on VPS for export:
-  `probe_track_a.db.gz` 8.4G, `probe_ofi.tar.gz` 5.2G, `feature_log.parquet` 4.3M (pulled
-  local). Export non-urgent (server ~17 days runway from 2026-06-13).
-- **Kalshi maker:** sealed KILL.
-- **Inversion:** Stage 1 passed, Stage 2 held behind fair-value.
-- **Fair-value:** GATE 0 + series/coverage cleared (prints have intra-window structure);
-  amendments to commit (GATE 0 finding, series-and-coverage declaration, dual-fee, five
-  controls, verdict logic) → THEN run Stage 1.
+- **Phase 2 probe (taker-copy + OFI):** sealed (`VERDICT.md`). Big artifacts compressed on VPS
+  for export: `probe_track_a.db.gz` 8.4G, `probe_ofi.tar.gz` 5.2G, `feature_log.parquet` 4.3M
+  (pulled local). Export non-urgent (server ~17 days runway from 2026-06-13).
+- **Kalshi maker:** sealed KILL (`KALSHI_MAKER_VERDICT.md`).
+- **Fair-value deviation:** sealed KILL (`FAIRVALUE_VERDICT.md`), Stage-1, n=50.8M prints,
+  concentration control. (Cost: 2× OOM + 1 VPS reset; lesson #11.)
+- **Inversion:** Stage 1 passed; **Stage 2 RUNNING** on the early-window slice (the last gate).
+- **VPS:** reset-recovered, healthy, all 3 services active, snapshot rollback exists.
 
 ### IMMEDIATE NEXT ACTION
-1. Commit fair-value registration amendments (GATE 0 result, Polymarket-prints data source +
-   confirmed intra-window coverage, dual-fee threshold, five controls, amended verdict logic).
-2. Build + run fair-value Stage 1 on the 53.4M Polymarket prints (real independent contract
-   price vs Bybit Φ fair value), all five controls, each verbatim. Report to owner.
-3. Owner reads → inversion Stage 2 runs informed by it (if fair-value clean sub-cost, run
-   inversion Stage 2 as predicted-dead confirmation; if a capturable bucket exists, point
-   Stage 2 at it).
-4. Start Kalshi book logging now (venue-direct follow-up).
-5. No Stage-2 conclusion is a build/capital trigger without owner ruling; offline backtests
-   run to their KILL/survive line regardless.
+1. Read inversion Stage 2 verbatim when it completes (monitor armed). Pointed at early-window
+   slice, δ-grid, n≥2000, bootstrap LB > 0 at 30bps haircut.
+2. If Stage 2 KILLs (predicted): write `INVERSION_VERDICT.md`, then the **master probe
+   verdict** — five/six-mechanism convergence — and execute the Day-10 export manifest
+   (probe DBs already compressed on VPS; pull to cold storage).
+3. If Stage 2 SURVIVES on the early slice (the crack of light): do NOT build/trade — report,
+   and design a follow-up that re-tests it out-of-time with its own anchored scale-up bar.
+4. Kalshi book logging recommended as a standing background task (venue-direct follow-up for
+   any future maker/fair-value re-test) — not started.
+5. No Stage-2 conclusion is a build/capital trigger without owner ruling.
 
 ### Decision-table endgame
-If fair-value + inversion both fail their gates → the system has tested price-state, price-flow,
-oscillation, copy, maker, and fair-value-deviation, and found no capturable edge → full
-zero-touch shadow, owner reallocates active time to Branch B, the methodology + datasets are
-the salvage. If either survives KILL and clears the anchored scale-up bar → a candidate worth
-a separate deployment design. Most-likely outcome by the registered honest priors: PARK.
+Five mechanisms KILLed; inversion Stage 2 is the sixth and last. If it dies too → the system
+has tested price-state, price-flow, oscillation, copy, maker, and fair-value-deviation, and
+found no capturable edge → full zero-touch shadow, owner reallocates active time to Branch B,
+the methodology + datasets are the salvage. The convergence is a real, defensible,
+evidence-backed answer to the question the project was built to ask. Most-likely outcome by
+the registered honest priors: PARK/KILL.
 
 ---
 
@@ -281,11 +298,15 @@ a separate deployment design. Most-likely outcome by the registered honest prior
   `/data/probe_track_a.db` (53.4M Polymarket trades + 64,504 markets);
   `/data/probe_ofi/` (408-day Cont-2014 OFI features + datasets);
   `/data/probe_exports/` (compressed for cold storage).
-- **Branches:** `probe/10day-signal-hunt` (sealed), `probe/kalshi-maker` (sealed),
-  `probe/inversion` (Stage 1 done), `probe/fairvalue` (Stage 1 pending).
+- **Branches:** `probe/10day-signal-hunt` (sealed), `probe/kalshi-maker` (sealed KILL),
+  `probe/fairvalue` (sealed KILL), `probe/inversion` (Stage 1 done, Stage 2 running — current
+  HEAD). Verdicts: `probe/VERDICT.md`, `KALSHI_MAKER_VERDICT.md`, `FAIRVALUE_VERDICT.md`;
+  registrations: `PREREGISTRATION.md`, `KALSHI_MAKER_PREREGISTRATION.md`,
+  `INVERSION_PREREGISTRATION.md`, `FAIRVALUE_PREREGISTRATION.md`.
 - **Probe scripts:** `probe/track_a/{harvest,a1_sanity,a2_persistence}.py`,
   `probe/track_b/{build_ofi_features,build_dataset,train,b4_eval}.py`,
-  `probe/inversion/stage1_flips.py`.
+  `probe/inversion/{stage1_flips,stage2_roundtrip}.py`,
+  `probe/fairvalue/stage1_deviation.py` (bounded-memory v3).
 
 ## 8. KEY NUMBERS (reference)
 - Fleet: ~49.6% directional win rate; high-conf band 48.4% (anti-predictive).
@@ -295,3 +316,6 @@ a separate deployment design. Most-likely outcome by the registered honest prior
 - Maker break-even: spread capture must exceed ~74-113bps; measured Kalshi spread 0.5-2.0¢.
 - Anchored scale-up bar: net $300/day at bounded attention.
 - Intra-window print coverage: 15m 606/window (all deciles 825k-1.36M), 5m 848/window.
+- Fair-value Stage 1: n=50.8M prints, 92% supra-cost deviation but symmetric/uniform/own-model-
+  error → KILL by concentration (11% vs ≥60%). Kalshi universe: 4 markets ×15-min, spread
+  0.5-2.0¢, queues 53-852 contracts.
