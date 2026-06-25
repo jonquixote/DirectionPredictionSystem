@@ -2,8 +2,15 @@
 
 **Sealed:** 2026-06-24. **Branch:** `probe/kalshi-fade`.
 **Contract:** `KALSHI_FADE_PREREGISTRATION.md`.
-**Outcome:** §0 **PASS on edge, FAIL on scale → PARK.** No quoting, no Kalshi connection,
-no quoting days spent.
+**Outcome:** §0 **PASS on edge.** Original scale-FAIL→PARK **RETRACTED** — see below.
+
+> **2026-06-24 CORRECTION (supersedes the PARK below):** the SCALE-FAIL rested on two
+> errors — an arbitrary $25/fill (Polymarket depth carried to Kalshi unmeasured; real
+> Kalshi mid-band depth $344–$3,172/market) and a units bug ($28/day should have been
+> $154/day). Corrected per-trade EV is **+16.3% per $ staked**; at measured Kalshi depth
+> ($100–500/fire) capacity is **$600–$3,000/day**, Kelly-compoundable — it CLEARS the
+> $300/day bar. New status: **BUILD CANDIDATE**, gated only on live Kalshi-price
+> validation (offline-unverifiable). Full analysis: `probe/CAPACITY_AND_KELLY.md`.
 
 ## §0 result (verbatim, OOS, bootstrap CI)
 ```
