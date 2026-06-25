@@ -83,3 +83,34 @@ single load-bearing assumption and it **cannot be checked offline:**
 Kalshi depth with Kelly compounding it's plausibly a few-hundred-to-few-thousand $/day
 operation, *contingent on one thing we can only learn live: whether the edge that's real on
 Polymarket is also real on Kalshi.* That single question is the whole game now.
+
+---
+
+## ROBUSTNESS ADDENDUM (2026-06-25 — `probe/freshmodel/robust.py`, `w24_regime.py`)
+Four decision-relevant checks on existing data before committing to live collection:
+
+- **Parameter robustness — GREEN.** Threshold sweep: every up-price X ∈ {0.55,0.58,0.60}
+  × spot-flat T ∈ {3,5,10}bps cell is significantly +EV; monotonic in richness (X=0.55
+  +0.083 → X=0.60 +0.150); insensitive to the spot-flat cutoff. NOT a knife-edge — the
+  signature of real structure, not a fitted artifact. Deployment params: X≥0.55, T≤5bps,
+  entry band 30-49¢ (the liquid core alone is +0.059).
+- **Fire independence — GREEN.** 79% of fire-boundaries are a single symbol (18% two, 3%
+  three) → the 37.9 fires/day are largely independent; capacity/Kelly independence holds.
+- **Kalshi execution spread — GREEN (first live read).** From the logger's first hours:
+  down-side executable spread at the fade prices is **1¢ median, 96% under the ~3¢ that the
+  +6.5¢/share edge tolerates.** Execution is feasible at Kalshi spreads. (Depth at the
+  immediate touch ~$63/2¢-band overnight → capacity ~$390/day even at this thin read;
+  likely deeper in active hours.)
+- **Temporal persistence — YELLOW (the one open risk).** Weekly structural gap (realized
+  down-rate − implied down-price) was stable **+11 to +21pp for four weeks (W20-W23), then
+  collapsed to +1.6pp in W24.** Ruled out: setup-thinning (same contracts), volatility
+  (W23 was higher-vol and stayed strong), trend (drift ~48% throughout). W24 is the last
+  PARTIAL week (n=345, ~3σ-low) — **either early decay or an unlucky partial week, and the
+  offline data ends exactly at the ambiguous point.** Unresolvable offline; this is the
+  precise question the live logger answers going forward.
+
+**Revised confidence:** the edge is real, parameter-robust, executable at measured Kalshi
+spreads, and on independent fires. The single unresolved risk is whether the +12pp gap
+persists past W23 — the live forward collection is designed to settle exactly that, and
+nothing offline can. Size any eventual live deployment for the possibility that W24 was the
+start of decay (start small, gate on forward n, kill on sustained gap < breakeven).
