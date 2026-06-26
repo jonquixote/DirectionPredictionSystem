@@ -1,0 +1,155 @@
+================ PROBE SUITE START Fri Jun 26 04:18:44 UTC 2026 ================
+
+##################### xdur.py #####################
+Fri Jun 26 04:18:44 UTC 2026
+========================================================================================================
+CROSS-DURATION fade (intra-window first-fire scan: up>=0.55, |dev|<5bps, entry 30-49c -> buy DOWN)
+========================================================================================================
+  dur   windows  fires down_win% meanEntry  gap(pp)  EV/share              boot95_EV
+  5m      30672   5333     50.2%    40.40c   +9.80   +0.0812 [+0.0683,+0.0951]
+  15m     10528   1987     51.1%    40.17c  +10.91   +0.0924 [+0.0696,+0.1141]
+  30m      5440   1078     52.0%    40.01c  +12.03   +0.1037 [+0.0724,+0.1318]
+
+========================================================================================================
+GROSS calibration by duration (per-window first-row snapshot) — realized up-rate vs mean up-PRICE
+========================================================================================================
+
+  5m (n_windows=18526):
+    up-px bucket        n mean_upPx realized_up%  gap(real-px)pp
+    [0.50,0.55)       5952     0.520        48.5%          -3.47
+    [0.55,0.60)       1906     0.570        48.3%          -8.76
+    [0.60,0.70)       1332     0.640        46.8%         -17.11
+    [0.70,1.01)        524     0.819        38.2%         -43.77
+
+  15m (n_windows=6473):
+    up-px bucket        n mean_upPx realized_up%  gap(real-px)pp
+    [0.50,0.55)       1943     0.520        46.1%          -5.87
+    [0.55,0.60)        706     0.571        49.6%          -7.50
+    [0.60,0.70)        510     0.641        47.5%         -16.69
+    [0.70,1.01)        204     0.810        44.6%         -36.36
+
+  30m (n_windows=3416):
+    up-px bucket        n mean_upPx realized_up%  gap(real-px)pp
+    [0.50,0.55)        962     0.520        47.6%          -4.39
+    [0.55,0.60)        358     0.570        45.8%         -11.19
+    [0.60,0.70)        297     0.639        48.8%         -15.12
+    [0.70,1.01)        127     0.805        43.3%         -37.15
+
+read: fade table now uses the intra-window scan (catches windows that go rich LATER,
+  not just open-rich) -> method-consistent with probe/xvenue_fade.py.
+--- xdur rc=0 elapsed=21s ---
+
+##################### xdur_weekly.py #####################
+Fri Jun 26 04:19:05 UTC 2026
+==============================================================================================
+WEEKLY structural gap by duration (gap = down-rate - entry, pp). >0 = fade edge live.
+==============================================================================================
+  week         5m_n   5m_gap   15m_n  15m_gap   30m_n  30m_gap
+  2026-W20      152   +21.3     111   +20.3     106   +22.1
+  2026-W21     1097   +12.0     379   +12.9     190   +10.3
+  2026-W22      912   +14.5     325   +10.8     143   +10.0 <-OOS
+  2026-W23      525   +11.6     191   +11.1     107   +14.7 <-OOS
+  2026-W24      251    +3.3      94    -2.8      48   +14.4 <-W24
+
+read: if W24 gap stayed +10..+20 at 5m/30m while 15m dipped -> 15m W24 was an unlucky
+  partial week, NOT decay. if all three collapsed together -> genuine efficiency onset.
+--- xdur_weekly rc=0 elapsed=12s ---
+
+##################### s0_w900.py #####################
+Fri Jun 26 04:19:17 UTC 2026
+====================================================================================
+§0 GATE — fade-rich liquid-band (up 0.55-0.70, spot<5bps, buy DOWN), OOS, bootstrap CI
+====================================================================================
+  window        n  downwin%  EV/share  boot95
+  w900       485     48.2%  +0.0563  [+0.0115,+0.1009] PASS(LB>0,n>=300) <- KALSHI WINDOW
+  w300      1316     52.1%  +0.0933  [+0.0661,+0.1205] PASS(LB>0,n>=300)
+
+  w900 X-threshold sweep (up>=X & up<=0.70):
+    up>=0.55: n=  485 downwin%= 48.2 EV=+0.0563 [+0.0115,+0.1009] +
+    up>=0.58: n=  240 downwin%= 49.2 EV=+0.0947 [+0.0314,+0.1583] +
+    up>=0.60: n=  152 downwin%= 50.0 EV=+0.1214 [+0.0424,+0.2009] +
+    up>=0.62: n=  101 downwin%= 49.5 EV=+0.1311 [+0.0337,+0.2278] +
+    up>=0.65: n=   49 downwin%= 40.8 EV=+0.0638 [-0.0770,+0.2052] 
+
+====================================================================================
+§0.4 FIRE-RATE / CAPACITY (w900, rule up>=0.55 & spot<5bps)
+====================================================================================
+  days=29  total w900 windows seen=6471 (223/day)  rule-fires=1100 (37.9/day)
+  fire rate: 17.0% of w900 windows
+  @ $100 stake/fill: ~$618/day net (EV +16.3%/stake x 37.9 fires/day)
+  @ $300 stake/fill: ~$1855/day net (EV +16.3%/stake x 37.9 fires/day)
+  NB: w900 only; 5m (w300) adds ~2.7x the fires (see xdur). Liquidity caps the per-fill size.
+--- s0_w900 rc=0 elapsed=17s ---
+
+##################### rederive.py #####################
+Fri Jun 26 04:19:34 UTC 2026
+==============================================================================
+FIRST-LOOK Kalshi-price fade re-derivation (logger data, <24h — DIRECTIONAL)
+==============================================================================
+  up>=0.55: closed_windows=369 fires=222 down_win%=40.1 entry~39.5c EV/share=-0.0100 95%[-0.0748,+0.0548]
+  up>=0.58: closed_windows=369 fires=193 down_win%=39.4 entry~37.0c EV/share=+0.0075 95%[-0.0622,+0.0772]
+  up>=0.60: closed_windows=369 fires=171 down_win%=36.8 entry~34.8c EV/share=+0.0044 95%[-0.0691,+0.0778]
+
+  per-symbol (up>=0.55):
+    BNBUSDT: fires=6 down_win%=33 EV/share=-0.0427
+    BTCUSDT: fires=52 down_win%=38 EV/share=-0.0233
+    DOGEUSDT: fires=5 down_win%=40 EV/share=+0.0097
+    ETHUSDT: fires=50 down_win%=40 EV/share=-0.0031
+    HYPEUSDT: fires=5 down_win%=60 EV/share=+0.1713
+    SOLUSDT: fires=48 down_win%=38 EV/share=-0.0354
+    XRPUSDT: fires=56 down_win%=43 EV/share=+0.0035
+
+  NOTE: <24h overnight data. n is small; CIs wide. Directional read only —
+  whether the SIGN/magnitude is consistent with the +5-8c Polymarket edge.
+--- rederive rc=0 elapsed=2s ---
+
+##################### xvenue_fade.py #####################
+Fri Jun 26 04:19:36 UTC 2026
+==============================================================================================
+UNIFIED cross-venue fade (intra-window first-fire scan, |dev|<5.0bps, spot-outcome, taker)
+Kalshi data starts 2026-06-25 05:00Z; PM-recent matched to it
+==============================================================================================
+
+ up>=0.55  (PM=w900 for Kalshi head-to-head)
+  Polymarket w900 (all)      n= 2149 down-win%= 51.4 entry= 38.9c gap=+12.46pp EV=+0.1082 [+0.0872,+0.1298]
+    PM (all, CONTRACT res)   n= 2149 down-win%= 51.7 entry= 38.9c gap=+12.83pp EV=+0.1120 [+0.0907,+0.1334]
+  Polymarket w900 (recent)   n=0 (insufficient)
+  Kalshi 15m (spot res)      n=  222 down-win%= 41.0 entry= 39.5c gap= +1.53pp EV=-0.0010 [-0.0651,+0.0630]
+
+ up>=0.58  (PM=w900 for Kalshi head-to-head)
+  Polymarket w900 (all)      n= 1325 down-win%= 51.6 entry= 35.9c gap=+15.69pp EV=+0.1410 [+0.1134,+0.1685]
+    PM (all, CONTRACT res)   n= 1325 down-win%= 51.8 entry= 35.9c gap=+15.91pp EV=+0.1433 [+0.1155,+0.1704]
+  Polymarket w900 (recent)   n=0 (insufficient)
+  Kalshi 15m (spot res)      n=  193 down-win%= 39.9 entry= 37.0c gap= +2.86pp EV=+0.0127 [-0.0571,+0.0858]
+
+ up>=0.60  (PM=w900 for Kalshi head-to-head)
+  Polymarket w900 (all)      n=  953 down-win%= 52.3 entry= 33.9c gap=+18.34pp EV=+0.1680 [+0.1356,+0.1993]
+    PM (all, CONTRACT res)   n=  953 down-win%= 52.5 entry= 33.9c gap=+18.55pp EV=+0.1701 [+0.1374,+0.2023]
+  Polymarket w900 (recent)   n=0 (insufficient)
+  Kalshi 15m (spot res)      n=  171 down-win%= 36.8 entry= 34.8c gap= +1.99pp EV=+0.0044 [-0.0689,+0.0794]
+
+read: same rule, same intra-window scan, same spot-outcome basis on both venues.
+  PM(all) spot vs CONTRACT line = sanity that spot-derived ~ real settlement.
+  If PM gap >> Kalshi gap on the DATE-MATCHED slice -> edge is venue-specific (no transfer).
+--- xvenue_fade rc=0 elapsed=21s ---
+
+##################### depth_report.py #####################
+Fri Jun 26 04:19:57 UTC 2026
+============================================================================================
+Polymarket fade-entry depth (fire = up_mid>=0.55 & |dev_bps|<5 & phase<=0.8)
+============================================================================================
+
+ fire-moments n=4
+ down 30-49c band $ at fire:  median=314  p25=271  p75=336  max=339  mean=293
+   fire-moments with depth>0: 4/4 (100%)
+ best_down_ask at fire:  median=38.5c  min=20.0c
+
+ by coin x dur (fire-moments | median band $ | max band $):
+   bnb   5m : n=   4  median=$   314  max=$    339
+
+ per-window fade-zone reach + best fillable $ (max band depth at any fire moment):
+   windows reaching fade zone: 1/203 (0%)
+   per-window best fillable $ (max band at a fire moment): median=$339 p75=$339 max=$339
+
+ (db: 7121 obs, freshest 6s ago — depth picture sharpens as more windows go rich)
+--- depth_report rc=0 elapsed=0s ---

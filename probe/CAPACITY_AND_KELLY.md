@@ -162,6 +162,45 @@ Polymarket-direct execution is viable at the fade entry — which, if yes, **sid
 Kalshi transfer gate entirely for the richest (5m) slice** — and (b) captures doge/bnb/hype
 Polymarket price paths forward (their history is in the disk-blocked 33GB trade harvest).
 
+---
+
+## RIGOROUS TRANSFER TEST + DEPTH (2026-06-26 — `probe/xvenue_fade.py`, `polymarket_depth/depth_report.py`; suite results `probe/results/probe_suite_20260626.txt`)
+
+Prior critique: the transfer verdict compared two DIFFERENT methods (PM = early-window
+snapshot; Kalshi = intra-window scan). Fixed — `xvenue_fade.py` applies the **identical
+intra-window first-fire scan and the same SPOT-derived outcome** to both venues:
+
+| X | PM w900 gap | PM EV/sh | Kalshi 15m gap | Kalshi EV/sh |
+|---|------------:|---------:|---------------:|-------------:|
+| 0.55 | **+12.5pp** | +0.108 [.087,.130] | **+1.5pp** | −0.001 [−.065,+.063] |
+| 0.58 | +15.7pp | +0.141 | +2.9pp | +0.013 |
+| 0.60 | +18.3pp | +0.168 | +2.0pp | +0.004 |
+
+Spot-vs-contract sanity passes (PM +12.46 spot ≈ +12.83 contract → the spot-outcome basis
+is valid). **Under identical methodology the long-bias gap is +12–18pp on Polymarket and
++1.5–2.9pp (≈0 EV) on Kalshi → the edge is VENUE-SPECIFIC; it does NOT transfer to Kalshi.**
+Kalshi prices are calibrated. This is the strongest evidence yet that the Kalshi build path
+(deep books, the intended venue) is **not viable** — the whole reason for the build candidate.
+
+**CAVEAT (load-bearing): the comparison is NOT date-matched.** PM-recent (sliced to the
+Kalshi collection window) = **n=0** because the OFI spot store ends ~W24, before Kalshi
+logging began. So this is PM-*historical* (mostly pre-W24) vs Kalshi-*recent* (last ~24h).
+The recent W24+ softening could be confounding venue effect with regime. **The clean,
+date-matched transfer test is to re-run the same scan on `pm_depth.db` (PM forward, logs its
+own Coinbase spot, no OFI dependence) vs `kalshi_fade.db` over identical dates** — both
+loggers are accruing; decisive in a few days. Until then: Kalshi-transfer leans strongly
+NEGATIVE but the date-match confound is not yet excluded.
+
+**Depth (`depth_report.py`, first hours):** only 4 fire-moments so far (1/203 windows went
+rich in the short sample), but at those moments **median $314 fillable in the down 30-49c
+band (max $339, best ask 38.5c)** — corroborates the earlier depth correction: Polymarket
+fade-entry depth is **NOT thin**. Small n; sharpens as more windows go rich.
+
+**Net strategic update:** the Kalshi path (the build candidate's core) now looks **dead**
+(no transfer, pending only the date-match confound); the Polymarket-direct path is newly
+**alive** (real $300+ fade-entry depth) — but needs the forward date-matched transfer test
+and a proper depth distribution to confirm. The two forward loggers settle both.
+
 **W24 persistence, by horizon (attacks the YELLOW directly):** the W24 gap-collapse worry was
 a 15m-only read. Across horizons: 5m **+3.3** (n=251), 15m **−2.8** (n=94), 30m **+14.4**
 (n=48). **30m held fully intact** through W24 — if this were market-wide efficiency onset,

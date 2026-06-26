@@ -89,5 +89,9 @@ for uppx,out,move,ts,w,sym,bts in recs:
 nd=len(days); tot_fires=sum(fires_by_day.values()); tot_w=sum(total_w900.values())
 print(f"  days={nd}  total w900 windows seen={tot_w} ({tot_w/nd:.0f}/day)  rule-fires={tot_fires} ({tot_fires/nd:.1f}/day)")
 print(f"  fire rate: {100*tot_fires/tot_w:.1f}% of w900 windows")
-print(f"  capacity @ $25/fill: ~${25*tot_fires/nd:.0f}/day notional;  @ EV 3c/contract & ~$25 size: ~${0.03*25*tot_fires/nd:.2f}/day net")
-print(f"  -> $300/day needs ~{300/ (0.03*25) :.0f} fills/day at 3c EV & $25 -> compare to {tot_fires/nd:.1f}/day actual")
+# CORRECTED economics (see CAPACITY_AND_KELLY.md; the old $25/3c/$28 framing had a
+# units bug). EV is ~+16.3% per $ STAKED (stake ~40c entry -> +6.5c/contract).
+fpd=tot_fires/nd
+for stake in (100,300):
+    print(f"  @ ${stake} stake/fill: ~${stake*0.163*fpd:.0f}/day net (EV +16.3%/stake x {fpd:.1f} fires/day)")
+print(f"  NB: w900 only; 5m (w300) adds ~2.7x the fires (see xdur). Liquidity caps the per-fill size.")
