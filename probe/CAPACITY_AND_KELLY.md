@@ -114,3 +114,49 @@ spreads, and on independent fires. The single unresolved risk is whether the +12
 persists past W23 — the live forward collection is designed to settle exactly that, and
 nothing offline can. Size any eventual live deployment for the possibility that W24 was the
 start of decay (start small, gate on forward n, kill on sustained gap < breakeven).
+
+---
+
+## CROSS-DURATION ADDENDUM (2026-06-25 — `probe/freshmodel/xdur.py`, `xdur_weekly.py`)
+Polymarket runs up/down (vs window-open) markets at **5m and 15m live**; gamma serves no
+30m/60m up/down now (the only longer instruments are `*-above-on-*` STRIKE markets — a
+different structure, same unusable family as Kalshi's KXBTCD ladder). But **v3.db holds
+30m (1800s) history** (Polymarket served 30m during 05-13..06-26, since discontinued), so
+the fade rule can be characterized across **three horizons** on existing data.
+
+**The edge replicates independently at all three horizons** (rule up≥0.55, |spotDev|<5bps,
+entry 30-49c → buy DOWN; BTC/ETH/SOL — XRP dropped from prod since the freshmodel era):
+
+| dur | fires | down-win% | gap | EV/share | boot95 |
+|-----|------:|----------:|----:|---------:|--------|
+| 5m  | 2937  | 52.8% | +12.4pp | **+0.1075** | [+0.089,+0.125] |
+| 15m | 1100  | 51.5% | +11.4pp | **+0.0969** | [+0.066,+0.126] |
+| 30m |  594  | 53.5% | +13.5pp | **+0.1179** | [+0.075,+0.156] |
+
+All three CIs exclude zero. The **gross calibration shows the same monotone richness
+dose-response at every horizon** (up-px [0.55,0.60)→[0.70+): 5m −8.7→−42pp; 15m −7.7→−38;
+30m −11.5→−31). Three independent horizons reproducing the identical monotone curve is hard
+to dismiss as overfit — strong triangulation that the long-bias is structural, not
+duration-specific.
+
+**Operational consequence:** 5m is the **richest fire source** (2.7× the 15m fire count at
+equal/better EV) and is live on Polymarket. BUT a fresh live depth recheck (2026-06-25,
+89 live down-books, btc/eth/sol/xrp/doge/bnb/hype 5m+15m) shows **~$0 resting in the
+30-49c fade band** — books are a thin ~50c market-maker quote, no deep ladder at the fade
+entry. (Single at-the-money snapshot; no market was rich at that instant, so weak — but
+consistent with the original Polymarket thin-depth PARK.) So 5m being Polymarket-only does
+**not** sidestep the Kalshi transfer gate: Polymarket resting depth at the fade entry is
+too thin to execute at size, exactly as before. Kalshi (deep books) stays the intended
+venue; the 15m Kalshi-transfer question remains the whole game. Properly settling
+Polymarket-direct viability needs time-series polling of 5m books to catch RICH moments
+(when down trades ~40c) and measure depth there — not at-the-money snapshots.
+
+**W24 persistence, by horizon (attacks the YELLOW directly):** the W24 gap-collapse worry was
+a 15m-only read. Across horizons: 5m **+3.3** (n=251), 15m **−2.8** (n=94), 30m **+14.4**
+(n=48). **30m held fully intact** through W24 — if this were market-wide efficiency onset,
+the longer/more-liquid horizon is where correction would show first, yet it's the one that
+held. W21–W23 are a stable +11–14pp core at all three horizons (W20 was an early-window
+hot-start outlier at +21). **Net: catastrophic decay is now unlikely; the 5m/15m W24
+co-softening (small partial-week n) keeps a residual flag that only forward data settles.**
+YELLOW → softened, not cleared. Production logs 5m/15m forward continuously; re-run
+`xdur_weekly.py` as W25+ fill in.
