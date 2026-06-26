@@ -21,8 +21,13 @@ KALSHI="https://api.elections.kalshi.com/trade-api/v2"
 # edge filter only needs dev-from-WINDOW-OPEN (intra-15min), where cross-venue
 # basis is ~constant -> Coinbase spot is a sound proxy for the spot-flat filter.
 COINBASE="https://api.exchange.coinbase.com/products/{}/ticker"
-SERIES={"BTCUSDT":"KXBTC15M","ETHUSDT":"KXETH15M","SOLUSDT":"KXSOL15M","XRPUSDT":"KXXRP15M"}
-CBPROD={"BTCUSDT":"BTC-USD","ETHUSDT":"ETH-USD","SOLUSDT":"SOL-USD","XRPUSDT":"XRP-USD"}
+# 4 original (we predict these) + 3 expansion coins (Kalshi has 15m markets; we
+# don't predict them yet but collect data — DOGE/HYPE are more retail/degen, a
+# natural test of whether the long-bias miscalibration survives where BTC/ETH may not).
+SERIES={"BTCUSDT":"KXBTC15M","ETHUSDT":"KXETH15M","SOLUSDT":"KXSOL15M","XRPUSDT":"KXXRP15M",
+        "DOGEUSDT":"KXDOGE15M","BNBUSDT":"KXBNB15M","HYPEUSDT":"KXHYPE15M"}
+CBPROD={"BTCUSDT":"BTC-USD","ETHUSDT":"ETH-USD","SOLUSDT":"SOL-USD","XRPUSDT":"XRP-USD",
+        "DOGEUSDT":"DOGE-USD","BNBUSDT":"BNB-USD","HYPEUSDT":"HYPE-USD"}
 
 def get(url, timeout=8):
     try:
