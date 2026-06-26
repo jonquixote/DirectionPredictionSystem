@@ -49,6 +49,7 @@ def opendb(path):
       ts INTEGER, coin TEXT, dur TEXT, slug TEXT, boundary_ts INTEGER, close_ts INTEGER,
       best_down_ask REAL, down_mid REAL, up_mid REAL,
       down_band_depth REAL, down_book_total REAL,
+      gamma_last REAL, gamma_up REAL,
       spot REAL, spot_open REAL, dev_bps REAL, phase REAL, book_json TEXT);
     CREATE INDEX IF NOT EXISTS idx_obs ON obs(coin, dur, boundary_ts, ts);
     CREATE TABLE IF NOT EXISTS windows(
@@ -57,6 +58,10 @@ def opendb(path):
       spot_open REAL, spot_close REAL,
       PRIMARY KEY(coin, dur, boundary_ts));
     """)
+    # idempotent migration: add gamma columns to a pre-existing obs table
+    for col in ("gamma_last","gamma_up"):
+        try: c.execute(f"ALTER TABLE obs ADD COLUMN {col} REAL")
+        except sqlite3.OperationalError: pass
     return c
 
 def parse_tokens(m):
@@ -70,7 +75,8 @@ def parse_tokens(m):
     for i,o in enumerate(outc):
         if str(o).strip().lower()=="down": di=i
     if di is None: di=1 if len(tid)>1 else 0   # convention fallback: [Up,Down]
-    return tid[di]
+    up_idx=(1-di) if len(tid)==2 else None     # for Gamma outcomePrices[up]
+    return tid[di], up_idx
 
 def band_depth(levels, lo, hi):
     return sum(float(L["price"])*float(L["size"]) for L in levels
@@ -105,8 +111,23 @@ def main():
                     live[(coin,dur)]=(s, close-secs, close, m)
         spot_cache={}
         for (coin,dur),(slug,bts,cts,m) in live.items():
-            dtok=parse_tokens(m)
-            if not dtok: continue
+            pt=parse_tokens(m)
+            if not pt: continue
+            dtok,up_idx=pt
+            # Gamma prices — the NON-executable side. v3's get_p_market falls back to
+            # outcomePrices[up] (cached, stale, can spike to ~0.99 while book sits at .50)
+            # whenever CLOB /midpoint fails. Logging both lets us quantify, forward, how
+            # far p_market diverges from the executable book-mid (the artifact magnitude).
+            glast=m.get("lastTradePrice")
+            try: glast=float(glast)
+            except Exception: glast=None
+            gup=None; op=m.get("outcomePrices")
+            if isinstance(op,str):
+                try: op=json.loads(op)
+                except Exception: op=None
+            if op and up_idx is not None and up_idx<len(op):
+                try: gup=float(op[up_idx])
+                except Exception: gup=None
             bk=get(f"{CLOB}/book?token_id={dtok}")
             asks=bk.get("asks") if isinstance(bk,dict) else None
             bids=bk.get("bids") if isinstance(bk,dict) else None
@@ -136,9 +157,9 @@ def main():
             # Full raw ladder kept ONLY when down is rich-ish (mid<=0.49), i.e. exactly
             # the windows going into the fade zone. At-the-money books -> book_json NULL.
             bj=json.dumps({"asks":asks,"bids":bids}) if (down_mid is not None and down_mid<=0.49) else None
-            db.execute("INSERT INTO obs(ts,coin,dur,slug,boundary_ts,close_ts,best_down_ask,down_mid,up_mid,down_band_depth,down_book_total,spot,spot_open,dev_bps,phase,book_json) "
-                       "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                       (now,coin,dur,slug,bts,cts,best_ask,down_mid,up_mid,band,tot,spot,sopen,dev_bps,phase,bj))
+            db.execute("INSERT INTO obs(ts,coin,dur,slug,boundary_ts,close_ts,best_down_ask,down_mid,up_mid,down_band_depth,down_book_total,gamma_last,gamma_up,spot,spot_open,dev_bps,phase,book_json) "
+                       "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                       (now,coin,dur,slug,bts,cts,best_ask,down_mid,up_mid,band,tot,glast,gup,spot,sopen,dev_bps,phase,bj))
             db.execute("UPDATE windows SET spot_close=? WHERE coin=? AND dur=? AND boundary_ts=?",(spot,coin,dur,bts))
         db.commit(); polls+=1
         if polls%20==0:

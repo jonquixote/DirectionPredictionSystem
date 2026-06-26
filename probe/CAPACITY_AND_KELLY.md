@@ -1,5 +1,11 @@
 # Capacity, Sizing & Kelly — Answering the PARK Challenge
 
+> **⛔ SUPERSEDED (2026-06-26) — see `PMARKET_ARTIFACT_FINDING.md`.** The edge this
+> document sizes was measured on v3.db `p_market`, which at rich values is the
+> NON-executable stale Gamma fallback (book-mid stays ~0.50 while `p_market` spikes to
+> 0.99). On executable book-mid both Polymarket and Kalshi are calibrated. The economics
+> below are moot unless the forward executable (book-mid) data revives a real edge.
+
 **Date:** 2026-06-24. **Context:** the owner challenged the Kalshi-fade PARK verdict
 ("what do you mean no venue pays it at a size worth my attention? what about compounding
 and Kelly?"). The challenge was correct. The PARK rested on **two errors**, corrected here.
