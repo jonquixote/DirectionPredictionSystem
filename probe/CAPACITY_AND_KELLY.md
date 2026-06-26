@@ -140,16 +140,27 @@ to dismiss as overfit — strong triangulation that the long-bias is structural,
 duration-specific.
 
 **Operational consequence:** 5m is the **richest fire source** (2.7× the 15m fire count at
-equal/better EV) and is live on Polymarket. BUT a fresh live depth recheck (2026-06-25,
-89 live down-books, btc/eth/sol/xrp/doge/bnb/hype 5m+15m) shows **~$0 resting in the
-30-49c fade band** — books are a thin ~50c market-maker quote, no deep ladder at the fade
-entry. (Single at-the-money snapshot; no market was rich at that instant, so weak — but
-consistent with the original Polymarket thin-depth PARK.) So 5m being Polymarket-only does
-**not** sidestep the Kalshi transfer gate: Polymarket resting depth at the fade entry is
-too thin to execute at size, exactly as before. Kalshi (deep books) stays the intended
-venue; the 15m Kalshi-transfer question remains the whole game. Properly settling
-Polymarket-direct viability needs time-series polling of 5m books to catch RICH moments
-(when down trades ~40c) and measure depth there — not at-the-money snapshots.
+equal/better EV) and is live on Polymarket.
+
+**Polymarket live-depth — CORRECTED.** A first depth probe (2026-06-25) appeared to show
+~$0 resting in the 30-49c fade band and was written up as "thin ~50c MM quote." **That was
+an instrumentation error, twice over:** (1) gamma's `order=startDate` listing returns the
+NEXT-DAY pre-listed markets (boundaries +23h), not the live window — those untraded books
+sit at a 50c seed; and (2) even on the live window, an at-the-money early-phase snapshot
+shows nothing in 30-49c because down hasn't gone cheap yet. Targeting the **active** window
+(slug = next dur-boundary close) shows the opposite: **real, liquid books** — down 0.49/0.50
+**1c spread, 40-50 levels/side, $15k-61k total resting** (BTC 5m $61k, XRP $27k, even HYPE
+$6k). So the prior "Polymarket too thin" claim is **not supported** by this data. Whether
+there is fillable size specifically at the fade entry (down ~40c, mid-window rich moments)
+is still unmeasured — a single snapshot can't see it — and is exactly what the new forward
+logger settles.
+
+`probe/polymarket_depth/logger.py` (deployed on VPS, daemon `pm_depth_daemon.sh` →
+`/data/pm_depth.db`, 12s poll, 7 coins × 5m+15m): records best down-ask, 30-49c band depth,
+and the full raw ladder at rich moments (down mid≤0.49). This both (a) measures whether
+Polymarket-direct execution is viable at the fade entry — which, if yes, **sidesteps the
+Kalshi transfer gate entirely for the richest (5m) slice** — and (b) captures doge/bnb/hype
+Polymarket price paths forward (their history is in the disk-blocked 33GB trade harvest).
 
 **W24 persistence, by horizon (attacks the YELLOW directly):** the W24 gap-collapse worry was
 a 15m-only read. Across horizons: 5m **+3.3** (n=251), 15m **−2.8** (n=94), 30m **+14.4**
