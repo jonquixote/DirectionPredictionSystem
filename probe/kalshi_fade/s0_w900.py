@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
 """Kalshi-fade §0 — does the fade-rich edge survive on w900 (15m) ONLY?
 
+⚠ SUPERSEDED (2026-06-27): reads v3.db p_market = NON-executable stale-cache Gamma artifact
+(see PMARKET_ARTIFACT_FINDING.md). The §0 PASS is the artifact; executable book-mid has no
+edge (probe/synthesis.py). Kept for the record.
+
+
 Kalshi has only 15-min crypto up/down. The offline edge was pooled 5m+15m.
 Gate (frozen): w900-only fade-rich liquid-band per-share EV bootstrap 95% LB > 0
 on n >= 300 (up>=0.55 & up<=0.70 & Bybit spot dev<5bps, buy DOWN @real price, OOS).

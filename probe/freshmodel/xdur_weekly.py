@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Temporal x horizon: does the W24 structural-gap collapse (the one YELLOW risk,
+"""⚠ SUPERSEDED (2026-06-27): uses v3.db p_market = NON-executable stale-cache Gamma
+artifact (see PMARKET_ARTIFACT_FINDING.md). The weekly gaps reflect the artifact, not a
+tradeable edge. Kept for the record.
+
+Temporal x horizon: does the W24 structural-gap collapse (the one YELLOW risk,
 seen on 15m) also appear at 5m and 30m? If only 15m collapsed in W24 -> unlucky
 partial week (variance). If all three collapse -> genuine decay. Uses the 5m/30m
 durations as independent temporal witnesses against the 15m persistence worry.

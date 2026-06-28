@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
 """CROSS-DURATION characterization of the long-bias fade edge.
 
+⚠ SUPERSEDED (2026-06-27): reads v3.db p_market = the NON-executable stale-cache Gamma
+artifact (see PMARKET_ARTIFACT_FINDING.md). The +EV here is the artifact; executable
+book-mid has no edge (probe/synthesis.py). Kept for the record / triangulation history.
+
+
 Polymarket up/down (vs window-open) markets exist at 5m/15m/30m in the v3.db
 history (300/900/1800s; gamma serves only 5m/15m live now — 30m discontinued).
 Question the owner posed: "knowing one duration helps the other" — does the

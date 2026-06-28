@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
 """UNIFIED cross-venue fade analyzer — the rigorous transfer test.
 
+⚠ SUPERSEDED (2026-06-27): the PM side reads v3.db p_market, which is the NON-executable
+stale-cache Gamma artifact (see PMARKET_ARTIFACT_FINDING.md / probe/synthesis.py). Its
+"+12pp PM gap" is the artifact; on executable book-mid there is no edge. Kept for the record.
+
+
 The transfer verdict (does the Polymarket-measured long-bias fade survive on Kalshi)
 was previously a method mismatch: PM scripts dedup to ONE early-window snapshot per
 window, while the Kalshi rederive does an intra-window first-fire SCAN. This applies
