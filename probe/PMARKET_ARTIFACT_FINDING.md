@@ -53,6 +53,30 @@ artifact of PM using `p_market` (v3.db) while Kalshi used a real book — not a 
   executable fade EV) and now also `gamma_up`/`gamma_last` (→ quantifies the artifact:
   how often the Gamma price diverges rich from the book). Decisive in a few days.
 
+## FORWARD EXECUTABLE CONFIRMATION — synthesis (2026-06-27, `probe/synthesis.py`, `results/synthesis_20260627.txt`)
+~48h of forward executable data (book-mid + own Coinbase spot, both loggers) closes the
+dialectic. The edge does **not** exist on executable prices on **either** venue:
+
+- **A) PM book rarely goes rich.** Book-mid reached ≥0.55 in **21/5,355 windows (0.39%)** vs
+  v3 `p_market`'s ~22% → the artifact inflated the fire-rate **~57×**. The "37.9 fires/day"
+  was almost entirely fake-rich p_market.
+- **B) PM executable fade is NEGATIVE.** Firing on book up≥0.55 & spot-flat, entry =
+  `best_down_ask` (the real lift), spot outcome: down-win **25%** (n=8, EV −0.19);
+  up≥0.58 → down-win **0%** (n=4, EV −0.40). Small n, but the sign is consistent and the
+  mechanism is clear: when the book *genuinely* goes rich-up, **up tends to WIN** — the book
+  is informative, so fading it loses. The opposite of the artifact's claim.
+- **C) Live Gamma tracks the book** (|gamma_up − book| median 0.0000, p95 0.02, >0.05 only
+  0.21%; gamma_up≥0.55 just 0.01%). So the v3 defect is specifically the **cached-stale**
+  fallback in `discover_contract`, not live Gamma.
+- **D) Kalshi is calibrated, not noisy.** n=**1,005** fires (good n), **tight 1c-median yes
+  spread** (so the earlier "wide-book noise" guess was wrong — the book is tight and
+  genuinely reaches 0.55), down-win **41%** at entry 41c → EV **−0.015 [−0.045,+0.016]**.
+  Efficient; ~0 edge.
+
+**Sealed synthesis:** there is no tradeable fade edge on executable prices on Polymarket
+(negative — book is informative) or Kalshi (calibrated ~0). The historical +12pp was 100%
+the v3 `p_market` stale-cache artifact. KILL confirmed on forward, executable, two-venue data.
+
 ## Disposition
 - **Supersedes the BUILD CANDIDATE in `CAPACITY_AND_KELLY.md` / `KALSHI_FADE_VERDICT.md`.**
   The edge as measured does not survive contact with executable prices.
