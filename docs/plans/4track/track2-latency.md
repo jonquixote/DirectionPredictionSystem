@@ -34,6 +34,27 @@ public limits. PM `POST /books` verified live (7 books, ~280ms, server `timestam
 Quantization caveat: poll cadence floors resolvable lag at ~1.25s; "<1s" is not
 distinguishable from instant — by design the verdict boundary sits at ≥2 polls.
 
+## Health-check verification (2026-07-03, clean restart 09:10Z, deadline 2026-07-05 11:10Z)
+GREEN on all three venues. Cadence 1.23s (median=min=max=1.25). Latencies: Coinbase 67ms
+(p95 99), Kalshi 67ms (p95 79), PM 160ms (p95 186) — all healthy, no 429/timeout/error
+lines. Rate budget: Coinbase 5.6 req/s (limit 10/s), Kalshi 5.6 req/s (basic read tier
+~10/s → ~56% of ceiling; if scaled, drop to 1.5s cadence), PM 0.8 req/s POST (generous).
+- **PM code path audited: NO stale price fallback.** Only `pm_token` (static up-token IDs
+  per 15m boundary) is cached; prices come from a live `POST /books` every poll, and a
+  coin absent from the response logs `None` (fail-loud). Added `pm_srv_ms` = per-book server
+  timestamp: it VARIES per poll/coin (btc +2s vs doge +35s skew) → confirms live endpoint,
+  no CDN cache. `ts_ms` (local poll start) remains the common lag clock (avoids per-venue
+  skew); `pm_srv_ms` is a freshness/staleness diagnostic.
+- **Kalshi boundary nulls (expected, benign):** ~5–10% of Kalshi rows are null, concentrated
+  in the first 0–30s of a window (77% null) decaying to 0% by 60s — fresh 15m markets have
+  no book until MMs quote. Uniform across all 7 coins. Null-safe in the analyzer; itself a
+  finding about early-window Kalshi tradeability. `analyze_latency.py` should report the
+  early-window book-absence rate separately.
+- **Operational fix:** the logger now runs under `track2_daemon.sh` (distinct process name).
+  Restart via `tmux kill-session -t track2` — NEVER `pkill -f latency_logger.py --db`, which
+  also matches the wrapper's command line and kills the restart loop (caused a 4-min outage
+  during this check; dataset was wiped and the 48h clock restarted clean at 09:10Z).
+
 ## Timeline
 Day 0 start → day 2 analysis + verdict (~1h of work).
 

@@ -55,8 +55,13 @@ def opendb(path):
         k_yes_bid REAL, k_yes_ask REAL,
         pm_up_bid REAL, pm_up_ask REAL,
         lat_cb_ms INTEGER, lat_k_ms INTEGER, lat_pm_ms INTEGER,
-        boundary_ts INTEGER)""")
+        boundary_ts INTEGER, pm_srv_ms INTEGER)""")
     c.execute("CREATE INDEX IF NOT EXISTS idx_ticks ON ticks(coin, ts_ms)")
+    # idempotent migration for a pre-existing ticks table
+    try:
+        c.execute("ALTER TABLE ticks ADD COLUMN pm_srv_ms INTEGER")
+    except sqlite3.OperationalError:
+        pass
     return c
 
 class Caches:
@@ -161,7 +166,12 @@ def main():
                 try:
                     bb = max((float(x["price"]) for x in b.get("bids") or []), default=None)
                     ba = min((float(x["price"]) for x in b.get("asks") or []), default=None)
-                    pm_map[coin] = (bb, ba)
+                    # server timestamp per book — freshness proof (POST returns live books,
+                    # not a cached/CDN response). Kept as a DIAGNOSTIC; ts_ms (local poll)
+                    # stays the common lag clock across venues to avoid per-venue clock skew.
+                    srv = b.get("timestamp")
+                    srv = int(srv) if srv not in (None, "") else None
+                    pm_map[coin] = (bb, ba, srv)
                 except Exception:
                     pass
 
@@ -171,9 +181,9 @@ def main():
             kyb = kya = lk = None
             if c in k_f:
                 _, kyb, kya, lk = k_f[c].result()
-            pmb, pma = pm_map.get(c, (None, None))
-            rows.append((ts_ms, c, cbb, cba, kyb, kya, pmb, pma, lcb, lk, lat_pm, boundary))
-        db.executemany("INSERT INTO ticks VALUES (?,?,?,?,?,?,?,?,?,?,?,?)", rows)
+            pmb, pma, psrv = pm_map.get(c, (None, None, None))
+            rows.append((ts_ms, c, cbb, cba, kyb, kya, pmb, pma, lcb, lk, lat_pm, boundary, psrv))
+        db.executemany("INSERT INTO ticks VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", rows)
         db.commit()
         polls += 1
         if polls % 240 == 0:
