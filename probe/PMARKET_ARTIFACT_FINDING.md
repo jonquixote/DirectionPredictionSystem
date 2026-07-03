@@ -87,3 +87,16 @@ the v3 `p_market` stale-cache artifact. KILL confirmed on forward, executable, t
 - **Lesson:** every prior fade result built on v3.db `p_market` (deep4-8, freshmodel,
   xdur, s0, xvenue PM side) inherits this confound at the rich tail. Re-derive any
   survivor on executable book-mid before trusting it.
+
+## 8-DAY RERUN (2026-07-03 — `results/probe_suite_20260703.txt`)
+Full-week executable data confirms the KILL and adds one nuance:
+- PM fire-rate inflation confirmed at scale: book-mid ≥0.55 in **0.38%** of 19,404 windows
+  (vs p_market ~22% → ~59×). Live gamma tracks book (p95 |diff| 0.02). PM executable fade
+  still ≤0 at every threshold (largest-n cell X=0.53: n=121, EV −0.030).
+- PM fade-entry depth at the rare rich moments is real: median **$620** in-band (n=56 fires).
+- **Kalshi nuance:** at n=3,259 fires the point EV turned slightly positive and dose-responsive
+  (X=0.55/0.58/0.60 → +0.5c/+1.4c/+1.8c net of taker fees; 6/7 coins positive). BUT
+  cluster-robust bootstrap (fires grouped by boundary_ts; coins co-move) doubles the CI:
+  X=0.60 EV +0.0179, clustered-95 **[−0.0154,+0.0528] — not significant** (609 clusters).
+  A residual ~1-2c long-bias on Kalshi is *possible*; ~4 more weeks of passive logging
+  would resolve it. It is in any case an order of magnitude below the artifact's +12pp.
