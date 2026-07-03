@@ -1,0 +1,39 @@
+{
+  "name": "track1-kalshi-residual-longbias-fade",
+  "frozen_utc": "2026-07-03T08:30:00Z",
+  "context": "8d forward data showed dose-responsive point EV (+0.5/+1.4/+1.8c at X=0.55/0.58/0.60) on Kalshi 15m up/down, not significant at 609 clusters (X=0.60 clustered-95 [-0.0154,+0.0528]). This freezes the confirmatory test.",
+  "rule": {
+    "venue": "kalshi",
+    "market": "KX{COIN}15M, 7 coins (BTC/ETH/SOL/XRP/DOGE/BNB/HYPE)",
+    "fire": "first obs per window with up_mid >= X AND |dev_bps| < T AND phase <= PH",
+    "X_up_mid_min": 0.60,
+    "T_dev_bps_max": 5.0,
+    "PH_phase_max": 0.8,
+    "up_mid": "(yes_bid + (1 - no_bid)) / 2 from orderbook_fp yes_dollars/no_dollars",
+    "entry": "down ask = 1 - yes_bid (executable lift)",
+    "entry_band": [0.02, 0.98],
+    "fee": "taker: 0.07 * e * (1 - e)",
+    "first_fire_per_window": true
+  },
+  "outcome": {
+    "source": "Kalshi settlement: windows.kalshi_result (backfilled from GET /markets, result field)",
+    "down_wins_iff": "kalshi_result == 'no'",
+    "unsettled_windows": "EXCLUDED (no spot-proxy fallback in the registered test)",
+    "spot_proxy_report": "mismatch rate vs settlement reported as diagnostics only"
+  },
+  "inference": {
+    "cluster_key": "boundary_ts (fires at the same 15m boundary across coins co-move; iid bootstrap is invalid)",
+    "test": "cluster bootstrap, 5000 resamples, seed 7, percentile 95% CI on mean net EV/share",
+    "pass_criterion": "CI lower bound > 0"
+  },
+  "sample": {
+    "min_clusters": 2500,
+    "estimated_reach_date": "2026-07-28",
+    "no_early_stopping": "decide_track1.py refuses to render a verdict below min_clusters (peeks print diagnostics only, never a verdict)"
+  },
+  "decision": {
+    "pass": "ESCALATE: Kalshi residual real -> prioritize latency-taker/Track-2 branch and size per CAPACITY framework re-derived on executable prices",
+    "fail": "CLOSE the Kalshi-residual thread; program continues on Tracks 2-4 only"
+  },
+  "amendments": "None permitted. Any change requires a new preregistration file with a new name; this file stays in git history as the record."
+}
