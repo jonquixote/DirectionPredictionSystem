@@ -1,0 +1,72 @@
+===== PRIMARY (event>=5bps, reprice>=1c) =====
+========================================================================================
+Track 2 repricing lag (event >= 5.0bps, reprice >= 1c directional)
+========================================================================================
+kalshi: events=3199 repriced_within_60s=1925 (60%) | lag median=5.00s p75=13.75s p95=42.51s
+   bnb: n=43 median=5.00s p75=11.88s
+   btc: n=52 median=10.00s p75=30.00s
+   doge: n=306 median=5.00s p75=15.00s
+   eth: n=170 median=5.00s p75=17.19s
+   hype: n=671 median=5.00s p75=15.00s
+   sol: n=180 median=5.00s p75=15.00s
+   xrp: n=503 median=3.75s p75=11.25s
+   VERDICT[kalshi]: median 5.00s > 2.5s -> LATENCY-TAKER VIABLE (spec the taker next)
+pm: events=3199 repriced_within_60s=113 (4%) | lag median=26.25s p75=43.76s p95=57.51s
+   bnb: n=3 median=23.75s p75=36.88s
+   btc: n=6 median=14.38s p75=25.94s
+   doge: n=17 median=22.50s p75=30.00s
+   eth: n=22 median=30.63s p75=43.44s
+   hype: n=18 median=14.38s p75=35.94s
+   sol: n=7 median=26.25s p75=33.13s
+   xrp: n=40 median=35.00s p75=50.32s
+   VERDICT[pm]: median 26.25s > 2.5s -> LATENCY-TAKER VIABLE (spec the taker next)
+
+sensitivity (2c tick): rerun with --tick 0.02
+
+===== SENSITIVITY (reprice>=2c) =====
+========================================================================================
+Track 2 repricing lag (event >= 5.0bps, reprice >= 2c directional)
+========================================================================================
+kalshi: events=3199 repriced_within_60s=1593 (50%) | lag median=6.25s p75=17.50s p95=45.00s
+   bnb: n=33 median=6.25s p75=16.25s
+   btc: n=36 median=15.00s p75=34.07s
+   doge: n=245 median=6.25s p75=20.00s
+   eth: n=141 median=7.50s p75=22.50s
+   hype: n=557 median=7.50s p75=20.00s
+   sol: n=147 median=6.25s p75=17.50s
+   xrp: n=434 median=5.00s p75=13.75s
+   VERDICT[kalshi]: median 6.25s > 2.5s -> LATENCY-TAKER VIABLE (spec the taker next)
+pm: events=3199 repriced_within_60s=34 (1%) | lag median=23.75s p75=39.07s p95=55.01s
+   bnb: n=2 median=31.25s p75=40.63s
+   btc: n=2 median=29.38s p75=42.19s
+   doge: n=14 median=22.51s p75=34.38s
+   eth: n=1 median=55.01s p75=55.01s
+   hype: n=11 median=13.75s p75=30.00s
+   sol: n=1 median=36.25s p75=36.25s
+   xrp: n=3 median=27.50s p75=39.38s
+   VERDICT[pm]: median 23.75s > 2.5s -> LATENCY-TAKER VIABLE (spec the taker next)
+
+sensitivity (2c tick): rerun with --tick 0.02
+
+===== EVENT>=10bps, reprice>=1c =====
+========================================================================================
+Track 2 repricing lag (event >= 10.0bps, reprice >= 1c directional)
+========================================================================================
+kalshi: events=362 repriced_within_60s=171 (47%) | lag median=5.00s p75=11.25s p95=44.38s
+   bnb: n=4 median=8.13s p75=23.44s
+   btc: n=1 median=10.00s p75=10.00s
+   doge: n=21 median=10.00s p75=30.00s
+   eth: n=16 median=5.62s p75=29.07s
+   hype: n=80 median=4.38s p75=11.25s
+   sol: n=19 median=8.75s p75=19.38s
+   xrp: n=30 median=2.50s p75=6.25s
+   VERDICT[kalshi]: median 5.00s > 2.5s -> LATENCY-TAKER VIABLE (spec the taker next)
+pm: events=362 repriced_within_60s=12 (3%) | lag median=21.25s p75=38.44s p95=49.82s
+   doge: n=1 median=1.25s p75=1.25s
+   eth: n=5 median=35.00s p75=37.50s
+   hype: n=3 median=16.25s p75=37.50s
+   xrp: n=3 median=15.00s p75=28.13s
+   VERDICT[pm]: median 21.25s > 2.5s -> LATENCY-TAKER VIABLE (spec the taker next)
+
+sensitivity (2c tick): rerun with --tick 0.02
+ANALYSIS DONE

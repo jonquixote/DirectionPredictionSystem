@@ -1,0 +1,64 @@
+##### LAG WITH CONTROLS (5bps, 1c) #####
+==========================================================================================
+Track 2 lag WITH CONTROLS (event>=5.0bps, reprice>=1c, horizon 60s)
+events=3197
+==========================================================================================
+
+KALSHI:
+  SAME dir : n=1925 med=5.00s p75=13.75s  fire%=60
+  OPP  dir : n=1902 med=5.00s p75=13.75s  fire%=59
+  PLACEBO  : n=1947 med=6.25s p75=16.25s  fire%=61
+  directional hit-rate (first mover WITH spot): 50% (with=1230 against=1236) [50% = coin flip = no edge]
+  VERDICT[kalshi]: SAME ~= controls -> lag is mid VOLATILITY, not exploitable repricing
+
+PM:
+  SAME dir : n=113 med=26.25s p75=43.76s  fire%=4
+  OPP  dir : n=348 med=17.50s p75=31.25s  fire%=11
+  PLACEBO  : n=229 med=23.75s p75=40.00s  fire%=7
+  directional hit-rate (first mover WITH spot): 24% (with=107 against=342) [50% = coin flip = no edge]
+  VERDICT[pm]: SAME ~= controls -> lag is mid VOLATILITY, not exploitable repricing
+
+##### LAG WITH CONTROLS (10bps, 1c) #####
+==========================================================================================
+Track 2 lag WITH CONTROLS (event>=10.0bps, reprice>=1c, horizon 60s)
+events=362
+==========================================================================================
+
+KALSHI:
+  SAME dir : n=171 med=5.00s p75=11.25s  fire%=47
+  OPP  dir : n=218 med=3.75s p75=10.94s  fire%=60
+  PLACEBO  : n=215 med=6.25s p75=16.25s  fire%=59
+  directional hit-rate (first mover WITH spot): 39% (with=104 against=162) [50% = coin flip = no edge]
+  VERDICT[kalshi]: SAME ~= controls -> lag is mid VOLATILITY, not exploitable repricing
+
+PM:
+  SAME dir : n=12 med=21.25s p75=38.44s  fire%=3
+  OPP  dir : n=39 med=12.50s p75=23.75s  fire%=11
+  PLACEBO  : n=25 med=28.75s p75=41.25s  fire%=7
+  directional hit-rate (first mover WITH spot): 25% (with=12 against=36) [50% = coin flip = no edge]
+  VERDICT[pm]: SAME ~= controls -> lag is mid VOLATILITY, not exploitable repricing
+
+##### CROSS-VENUE DIVERGENCE #####
+====================================================================================
+Cross-venue divergence: PM up-mid vs Kalshi yes-mid (n=921804 paired ticks)
+====================================================================================
+|gap|: median=0.280 p95=0.505 max=0.593
+  |gap|>=2c: 96.44% of paired ticks
+  |gap|>=5c: 90.34% of paired ticks
+  |gap|>=10c: 80.05% of paired ticks
+per coin |gap| median / %>=2c:
+   bnb: median=0.265 p>=2c=96.2%
+   btc: median=0.280 p>=2c=96.9%
+   doge: median=0.290 p>=2c=96.6%
+   eth: median=0.265 p>=2c=96.6%
+   hype: median=0.295 p>=2c=96.1%
+   sol: median=0.275 p>=2c=96.3%
+   xrp: median=0.290 p>=2c=96.3%
+
+reversion after |gap|>=2c (toward/away by window close):
+   pm: toward=440 away=967 -> 31% revert (no reversion / drift)
+   k: toward=1 away=1406 -> 0% revert (no reversion / drift)
+
+NOTE: mids, not executable bid/ask. Any tradeable signal must clear BOTH touches
+  (cross the spread on each venue) + survive fees — EV-gate before any claim.
+V2 DONE

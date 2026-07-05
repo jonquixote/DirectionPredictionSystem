@@ -8,15 +8,17 @@ against executable prices before any claim counts.**
 ## Tracks & gating
 
 ```
-Track 1 (Kalshi residual, passive, ~4wk) ──PASS──> escalates Track 2's taker branch to a build
-        └─FAIL──> thread closed; program continues on 2-4
-
-Track 2 (latency probe, 48h + analysis) ──median lag >2.5s──> latency-taker spec (new doc)
-        └─median <=1 poll──────────────> Track 3 becomes PRIMARY build
-
-Track 3 (maker sim, offline) — depends on BOOK ARCHIVES (see conflict note below)
-Track 4 (signal discovery) — independent; consumes Track 2's data + rules below
+Track 1 (Kalshi residual)  RESULT: settlement labels INVERT it to -3.8c [-6.9,-0.6];
+        near-certainly dead (registered test still runs free to 2026-07-28).
+Track 2 (latency probe)    VERDICT 2026-07-05: NO causal repricing lag (controls show
+        SAME==OPP==PLACEBO, Kalshi hit-rate 50%). Latency-taker KILLED.
+        Structural: Kalshi discovers price; PM 15m book is FROZEN at 0.50.
+        -> Track 3 PRIMARY, re-scoped KALSHI-ONLY (PM has no flow to make on).
+Track 3 (maker sim, offline, KALSHI books) — PRIMARY build; depends on BOOK ARCHIVES
+Track 4 (signal discovery) — cross-venue arb DEPRIORITIZED (PM frozen/non-executable);
+        lead with vol/magnitude into Kalshi strike markets
 ```
+Both Track 1 & 2 returned negative. See `TRACK2_VERDICT.md`.
 
 ## Resolved dependency conflict (important)
 The instructed disk prune ("drop book_json older than 7 days") would have **destroyed
