@@ -14,11 +14,14 @@ Track 2 (latency probe)    VERDICT 2026-07-05: NO causal repricing lag (controls
         SAME==OPP==PLACEBO, Kalshi hit-rate 50%). Latency-taker KILLED.
         Structural: Kalshi discovers price; PM 15m book is FROZEN at 0.50.
         -> Track 3 PRIMARY, re-scoped KALSHI-ONLY (PM has no flow to make on).
-Track 3 (maker sim, offline, KALSHI books) — PRIMARY build; depends on BOOK ARCHIVES
-Track 4 (signal discovery) — cross-venue arb DEPRIORITIZED (PM frozen/non-executable);
-        lead with vol/magnitude into Kalshi strike markets
+Track 3 (maker sim)        VERDICT 2026-07-11: NO-GO — every sweep cell loses ~$1k/day
+        at min size on 10,301 windows/17 days; 66% adverse-selection (post-fill).
+        Kill criteria #1 and #2 fire. See TRACK3_VERDICT.md.
+Track 4 (signal discovery) — ONLY OPEN TRACK. Cross-venue arb DEPRIORITIZED (PM
+        frozen/non-executable); lead with vol/magnitude into Kalshi strike markets.
+        Needs a NEW collector (strike books not logged); start = user scope decision.
 ```
-Both Track 1 & 2 returned negative. See `TRACK2_VERDICT.md`.
+Tracks 1, 2, 3 all returned negative. See `TRACK2_VERDICT.md`, `TRACK3_VERDICT.md`.
 
 ## Resolved dependency conflict (important)
 The instructed disk prune ("drop book_json older than 7 days") would have **destroyed
