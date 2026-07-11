@@ -1,0 +1,46 @@
+{
+  "name": "track4-vol-magnitude-into-kalshi-strikes",
+  "frozen_utc": "2026-07-11T08:10:00Z",
+  "status": "FROZEN — amendments prohibited; supersede only via a new prereg with a new name",
+  "gates_passed_before_freeze": {
+    "step0_liquidity": "PASS 2026-07-11 — KXBTCD ATM: 1c spread, ~2.4k contracts within 2c/side, 292,699 contracts/24h; KXETHD ATM: 1c spread, 8,567 ct/24h (artifact /data/logs/track4_step0_*.txt)",
+    "step1_mi_screen": "PASS 2026-07-11 — rv_15m vs next-15m |move|: spearman 0.296 (sd 0.044), sign 17/17 days, excess MI 0.098 bits; all rv/range features clear threshold at 15m and 60m (artifact /data/logs/track4_step1_*.txt)"
+  },
+  "hypothesis": "Trailing realized volatility predicts |move| magnitude (vol clustering). Kalshi BTC/ETH threshold (above/below) markets misprice tail strikes when current vol regime deviates from unconditional, because quoted prices underreact to short-horizon rv changes.",
+  "instruments": {
+    "series": ["KXBTC", "KXBTCD", "KXETH", "KXETHD"],
+    "selection": "markets closing within 26h, strike within +/-3% of spot",
+    "executable_price": "buy-yes at yes_ask; buy-no at (1 - yes_bid); provenance = strike_logger orderbook snapshot at fire time; NO fallback — book one-sided or stale (>90s) => no fire, logged with reason"
+  },
+  "target": "P(settle yes) = P(spot_at_close >= strike) for threshold markets, label derived deterministically from Coinbase spot at close vs strike (venue settlement backfill as verification)",
+  "features_frozen": [
+    "log_rv_1m", "log_rv_5m", "log_rv_15m", "log_range_15m",
+    "signed_distance_bps = ln(strike/spot)*1e4",
+    "tte_minutes",
+    "z = signed_distance_bps / (rv_15m * sqrt(tte_minutes))"
+  ],
+  "model_class": "L2-regularized logistic regression on the frozen features, isotonic-calibrated; trained on historical Coinbase spot (labels derived from spot paths, no market prices needed for training); NO architecture search, NO feature additions post-freeze",
+  "ev_gate": {
+    "formula": "EV = p_model - executable_entry - fee, fee = 0.07*e*(1-e) (taker)",
+    "fire_threshold": "EV >= 0.02 per contract",
+    "no_silent_fallbacks": true
+  },
+  "evaluation": {
+    "design": "forward-only: model may be trained/calibrated on any data BEFORE the collector start timestamp; EV evaluated exclusively on executable prices collected forward by strike_logger",
+    "cluster": "close_ts (all strikes and underlyings sharing an expiry co-move)",
+    "bootstrap": "cluster bootstrap, 5000 resamples, seed 7",
+    "week1_checkpoint_utc": "2026-07-18T08:00:00Z",
+    "pass_rule": "mean EV per fired contract > 0 with cluster-robust 95% CI-low > 0 at >= 200 effective clusters; else DEAD — no 'one more week'",
+    "min_fires": "if < 50 fires by checkpoint, report fire-rate reality and extend collection (not the rule) by at most 7 days, once"
+  },
+  "kill_criteria": [
+    "week-1 CI-low <= 0 => hypothesis dead, document, next hypothesis (Track 4 rule: 3 consecutive dead => program review)",
+    "median executable spread on fired markets > 3c during week 1 => liquidity regression, dead",
+    "collector uptime < 80% in week 1 => data invalid, restart clock once, else dead"
+  ],
+  "disk_budget": {
+    "collector_db": "<= 3.0 GB hot (/data/kalshi_strikes.db), 30s cadence, ~<=40 books/poll",
+    "archives": "<= 0.5 GB/month gzip (/data/archives/kalshi_strikes_*.jsonl.gz)",
+    "action_on_breach": "raise cadence to 60s; never silently drop fields"
+  }
+}
