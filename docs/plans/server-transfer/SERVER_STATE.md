@@ -163,3 +163,44 @@ python. Bybit is geoblocked from this region — spot comes from Coinbase.
   continuity + collector ≥80% uptime per prereg, else clock restarts).
 - **2026-07-28 04:30Z** — Track 1 registered decision cron (one-shot).
 - Weekly retrain Thursdays 02:00Z touches `models/` + `v3.db`.
+
+---
+
+## 7. Transfer Progress (NEW = Akamai/Linode 172.233.148.62) — updated 2026-07-15
+
+NEW is **Akamai/Linode** (not GCP); OLD IP 34.67.75.48 is **ephemeral**.
+Cutover = Hostinger DNS A-record flip of `bet.octavo.press` (TTL already 60s).
+
+### Status checklist
+- [x] **P0 provisioning** — johnny user, nginx/certbot/venv/rsync/ufw, Etc/UTC, /data dirs (incl. /data/observe), ufw 22/80/443.
+- [x] **P1 bulk copy** — parquet 76G, probe_exports 14G, features*/models 1.6G, logs, archives+watermarks, code, /data operational files; v3 systemd units + nginx site + letsencrypt + frontend; venv built from OLD freeze (versions match, libgomp1 added).
+- [x] **P2.1 collectors started on NEW** — T₀=1784077797 (01:09:57Z); verified writing.
+- [x] **P2.2 OLD snapshots** — kalshi_fade.snap.db (1.8G), kalshi_strikes.snap.db (489M) @ ~01:40Z pulled to NEW; watermarks present (books=1783999790, strikes=1784000981).
+- [x] **P2.3 merge OLD→NEW (DONE + VERIFIED)**
+  - Script: `/data/logs/merge_final.py` (indexed/idempotent `INSERT OR IGNORE`, settlement backfill for windows + strike_markets).
+  - Final counts (NEW live / OLD snap): obs 1,162,775 / 1,162,355 (+420 live overlap, **0 missing**); windows 12,955 / 12,941 (+14, **0 missing**); strikes 355,001 / 354,380 (+621, **0 missing**); strike_markets 3,035 / 3,033 (+2, **0 missing**).
+  - EXCEPT completeness: **all 4 tables 0 missing rows** → no loss.
+  - Settlement backfill: windows with `kalshi_result` NOT NULL = 12,318 (== OLD) ✓; strike_markets settled 0 in both (consistent).
+  - **decide_track1 acceptance: clusters=1498 (≥1246 ✓), fires=6446 (≥2 ✓), settled_windows=12318 ✓.**
+
+### Remaining
+- [x] **P3a (staged 2026-07-15)** — NEW archive/prune/backfill crons ENABLED:
+  `archive_prune_books` 03:30, `backfill_settlements` 03:40, `archive_prune_strikes` 03:50
+  (all → /data/logs/*.log). v3-daily-features, snapshot_observe, weekly-retrain, and the
+  07-28 04:30Z one-shot `decide_track1` remain COMMENTED on NEW. OLD left fully live.
+- [ ] **P3b** — disable the matching crons on OLD (coordinate at P4 cutover; keep OLD live until DNS flip + verify).
+- [ ] **P4** — v3 cutover + Hostinger DNS flip (do AFTER P3b; pick a 15-min boundary away from 02:00/03:30–03:50/04:30/08:00Z cron windows):
+  1. Pre-verify DNS state: `hostinger dns records list octavo.press` — confirm `bet` A → `34.67.75.48` and TTL already 60s (lower it first if not).
+  2. Stop OLD v3 (`systemctl stop v3-ws-feed v3-paper-trader v3-dashboard`); snapshot+rsync OLD `v3.db` → NEW `/data/v3.db`; start NEW v3.
+  3. **One-shot move (CRITICAL, C3):** comment OLD `30 4 28 7 * decide_track1` AND uncomment NEW's — whichever box is DNS-live at 07-28 04:30Z owns the decision; never both.
+  4. Flip DNS: `hostinger dns records update octavo.press --zone '[{"name":"bet","type":"A","ttl":60,"records":[{"content":"172.233.148.62"}]}]' --overwrite=true` (note: `--overwrite=true` replaces only RRs matching name+type, so www/MX/TXT are safe).
+  5. Reload nginx on NEW; confirm `https://bet.octavo.press` + `/api/` auth. Uncomment NEW v3 crons (daily-features, snapshot_observe, weekly-retrain); comment those on OLD.
+  6. Keep rollback note: flip `bet` A back to `34.67.75.48` if NEW verification fails.
+  - Pre-cutover hardening already DONE (2026-07-15): NEW `v3-*.service` **disabled** (C1, no auto-start double-trader on reboot); `api_server.py:1351` bound to `127.0.0.1` + `ufw deny 8080` (C2, 8080 loopback-only).
+- [ ] **P5** — retire OLD (after DNS propagated + verified); confirm 07-28 04:30Z Track-1 one-shot fires once on NEW.
+
+### Open cutover risks to confirm before P3/P4
+- OLD is still the live producer (collectors + crons + v3). Do NOT disable OLD
+  crons or flip DNS until NEW verified end-to-end post-merge.
+- 07-18 08:00Z Track-4 checkpoint must not be straddled by the cutover.
+- 8080 on NEW must remain loopback-only (ufw NOT opened) per §1 note.
