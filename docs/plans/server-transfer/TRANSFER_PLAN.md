@@ -1,10 +1,15 @@
 # Server Transfer Plan — UPDATED 2026-07-14 (audit-corrected)
 
 > ## ✅ EXECUTED 2026-07-15 (03:48–04:45Z) — see completion log at bottom.
-> One item outstanding: **Linode Cloud Firewall blocks inbound 80/443** (SSH-only
-> default). Fix in Linode Cloud Manager: instance → Firewall → allow inbound TCP
-> 80 + 443. Until then https://bet.octavo.press is unreachable (DNS already
-> points at NEW; all collection + trading unaffected — outbound is open).
+> ## ✅ FINALIZED 2026-07-15 04:55Z — GCP deletion green-lit.
+> Linode firewall opened (public 200 @137ms, API 401-auth, 301 redirect, certbot
+> dry-run renewal SUCCESS). Deletion-safety sweep synced the **1,866 /data files
+> the P0 glob-copy missed** (incl. all calibration maps — trader had booted in
+> identity mode; restarted 04:53, "loaded 7 bins + 1,147 outcomes", 8080 now
+> loopback). Final diffs: /home = 0; /data = 0 except live-append
+> calibration_*_outcomes.jsonl where NEW is ahead (correct). 6/6 services active
+> AND enabled. Only things not replicated from OLD: system journals + the stale
+> pre-merge copies of the hot DBs (both worthless).
 
 Replaces the prior `TRANSFER_PLAN.md`. OLD = `34.67.75.48` (GCP `us-central1-a`, ephemeral IP, `Etc/UTC`). NEW = `172.233.148.62` (Akamai/Linode, **not GCP**, Ubuntu 24.04, 6 vCPU / 15 GB / 319 GB). Cutover = **Hostinger DNS A-record flip** (IP move is impossible across providers, and OLD's IP is ephemeral).
 
