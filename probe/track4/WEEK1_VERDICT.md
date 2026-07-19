@@ -52,3 +52,46 @@ the collector AND the evaluator; range (B-type) markets need range labels.
 Artifacts: /data/logs/week1_run.log (invalid first run), week1_run2.log
 (corrected), track4_week1_fires.json, track4_settlements.json,
 /data/models/track4_week1.joblib.
+
+---
+
+# Validation appendix (2026-07-19, adversarial pass)
+
+Ran validate_week1.py (full output /data/logs/track4_validate.log on prod).
+
+**Verdict robustness — no estimator flips it:**
+| estimator | 95% CI |
+|---|---|
+| cluster bootstrap (registered) | [−3.55c, +0.06c] |
+| iid bootstrap | [−2.58c, +0.34c] |
+| fire-weighted cluster | [−3.16c, +1.03c] |
+| 5σ-trimmed cluster | identical (no outliers drive it) |
+
+**Latency robustness:** re-pricing every fire at the NEXT poll's book (~30s later)
+gives −1.20c vs −1.14c — fires were not stale-quote illusions; the loss is real
+and not execution-window sensitive.
+
+**Calibration (the mechanism of death):** model p is directionally informative
+but compressed vs reality (p .86 → realized .95; p .06 → realized .03), while
+the market mid is better calibrated overall (Brier .1074 vs model .1119).
+Fires are the rows where the model disagrees with the market; conditional on
+disagreement the market wins often enough that spread+fee eats the residual.
+No-side fires lose more (−1.6c, n=1,059) than yes-side (−0.6c, n=827).
+
+**Post-hoc pattern (NOT evidence, sampling-biased by construction):** claimed-EV
+buckets are monotone: 2–4c → −2.1c, 4–6c → −1.6c, 6–8c → −1.4c, 8–10c → −0.8c,
+≥10c → **+3.0c (n=239)**. A successor prereg could test EV≥10c as the fire gate
+on fresh forward data. This subgroup was selected after seeing outcomes — it
+would need to survive its own forward week.
+
+**Range (B-type) extension — properly labeled, unregistered:** evaluated the
+excluded range markets with correct range probabilities
+(p = P(≥floor) − P(≥cap), same frozen model): 1,648 fires, mean **−1.9c**,
+CI [−4.0c, −0.7c]. Pooled T+B: n=3,534, mean −1.5c, CI [−3.6c, −0.5c] —
+strictly negative. The doubled sample confirms death; no resurrection story.
+
+**Process notes:** (1) The week couldn't have been skipped — it was the forward
+data. But model+evaluator should have been built at freeze time (07-11); that
+would have caught the B-ticker contamination and the unreachable ≥200-cluster
+bar before collection started. (2) Candle-fetch integrity: interior gaps ~50/yr
+(exchange maintenance), skipped windows were future timestamps only.
