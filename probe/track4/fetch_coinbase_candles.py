@@ -16,22 +16,37 @@ def iso(ts: int) -> str:
 
 def fetch(product: str, t0: int, t1: int, out: str):
     rows = {}
+    try:  # resume: reuse candles already on disk, restart from the last fetched minute
+        with open(out) as f:
+            for row in csv.DictReader(f):
+                rows[int(row["ts"])] = (row["open"], row["high"], row["low"],
+                                        row["close"], row["volume"])
+        if rows:
+            t0 = max(t0, max(rows) - 600)
+            print(f"[{product}] resume: {len(rows)} candles on disk, restart {iso(t0)}", flush=True)
+    except FileNotFoundError:
+        pass
     cur = t0
     n_req = 0
+    skipped = 0
     while cur < t1:
         end = min(cur + 300 * 60, t1)
         url = API.format(p=product, s=iso(cur), e=iso(end))
-        batch = []
-        for attempt in range(6):
+        batch = None
+        for attempt in range(10):
             try:
                 req = urllib.request.Request(url, headers={"User-Agent": "track4-candles/1.0"})
                 with urllib.request.urlopen(req, timeout=20) as r:
                     batch = json.loads(r.read())
                 break
-            except Exception:  # noqa: BLE001 — retry any transient failure
-                if attempt == 5:
-                    raise
-                time.sleep(2 ** attempt)
+            except Exception as e:  # noqa: BLE001 — Coinbase throws transient 400/429/5xx
+                print(f"[{product}] attempt {attempt}: {e} at {iso(cur)}", flush=True)
+                time.sleep(min(2 ** attempt, 30))
+        if batch is None:  # window unfetchable after retries — skip, gaps are tolerable
+            skipped += 1
+            print(f"[{product}] SKIP window {iso(cur)}", flush=True)
+            cur = end
+            continue
         for t, lo, hi, op, cl, vol in batch:
             rows[int(t)] = (op, hi, lo, cl, vol)
         n_req += 1
@@ -45,7 +60,7 @@ def fetch(product: str, t0: int, t1: int, out: str):
         for t in sorted(rows):
             op, hi, lo, cl, vol = rows[t]
             w.writerow([t, op, hi, lo, cl, vol])
-    print(f"[{product}] DONE {len(rows)} candles -> {out}", flush=True)
+    print(f"[{product}] DONE {len(rows)} candles, {skipped} skipped windows -> {out}", flush=True)
 
 
 if __name__ == "__main__":

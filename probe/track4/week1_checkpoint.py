@@ -10,14 +10,19 @@ Frozen rules applied here:
 - fee = 0.07 * e * (1 - e), taker, e = executable entry.
 - fire: EV = p_side - e - fee >= 0.02; first crossing per ticker only (one
   position per market, held to close).
-- label: Coinbase spot at close vs strike (candle at/just before close_ts);
-  venue settlement is verification only.
+- instruments: THRESHOLD (above/below) markets only — ticker suffix -T<strike>.
+  The collector also logged B-type (range) markets; those are outside the prereg
+  instrument set and are excluded (a range cannot be labeled by spot>=strike).
+- payout: venue settlement result fetched from the Kalshi API (cached in
+  /data/logs/track4_settlements.json). Coinbase spot-at-close vs strike is
+  computed alongside as the prereg's deterministic label and reported as a
+  verification agreement rate.
 - stats: realized P&L per contract, clustered by close_ts; cluster bootstrap
   5000 resamples, seed 7; pass = mean > 0 AND CI-low > 0 at >= 200 effective
   clusters. < 50 fires => fire-rate reality report, one-time <=7d extension.
 Kill checks: median fired spread > 3c; collector uptime < 80%.
 """
-import argparse, csv, json, sqlite3, time
+import argparse, csv, json, os, re, sqlite3, time, urllib.parse, urllib.request
 from datetime import datetime, timezone
 
 import joblib  # loads only the bundle train_track4_model.py wrote on this host (trusted, 0644 root path)
@@ -30,6 +35,35 @@ EV_FIRE = 0.02
 FEE = lambda e: 0.07 * e * (1.0 - e)  # noqa: E731
 SEED = 7
 N_BOOT = 5000
+THRESHOLD_RE = re.compile(r"-T[\d.]+$")
+SETTLE_CACHE = "/data/logs/track4_settlements.json"
+KALSHI = "https://api.elections.kalshi.com/trade-api/v2"
+
+
+def venue_results(tickers):
+    """result per ticker from the Kalshi API, disk-cached across runs."""
+    cache = {}
+    if os.path.exists(SETTLE_CACHE):
+        cache = json.load(open(SETTLE_CACHE))
+    missing = [t for t in tickers if t not in cache]
+    for k, t in enumerate(missing):
+        url = KALSHI + "/markets/" + urllib.parse.quote(t)
+        for attempt in range(5):
+            try:
+                req = urllib.request.Request(url, headers={"User-Agent": "track4-week1/1.0"})
+                m = json.loads(urllib.request.urlopen(req, timeout=15).read())["market"]
+                cache[t] = m.get("result") or ""
+                break
+            except Exception:  # noqa: BLE001 — transient API errors
+                if attempt == 4:
+                    cache[t] = ""
+                time.sleep(2 ** attempt)
+        if (k + 1) % 200 == 0:
+            print(f"  settlements {k + 1}/{len(missing)}", flush=True)
+            json.dump(cache, open(SETTLE_CACHE, "w"))
+        time.sleep(0.12)
+    json.dump(cache, open(SETTLE_CACHE, "w"))
+    return cache
 
 
 def load_spot_bars(con, underlying, t_end):
@@ -99,6 +133,8 @@ def main():
         for ts, ticker, strike, close_ts, bid, ask, spot in rows:
             if ticker in fired_tickers or close_ts is None or spot is None:
                 continue
+            if not THRESHOLD_RE.search(ticker):
+                continue  # B-type (range) market — outside the prereg instrument set
             if bid is None or ask is None or not (0.0 < bid < ask < 1.0):
                 no_fire_reasons["one_sided"] += 1
                 continue
@@ -120,26 +156,47 @@ def main():
                 no_fire_reasons["no_ev"] += 1
                 continue
             spot_close = spot_at(label_lut[und], close_ts)
-            if spot_close is None:
-                continue  # label unavailable — excluded, reported
-            settle_yes = spot_close >= strike
-            win = (side == "yes") == settle_yes
-            pnl = (1.0 if win else 0.0) - entry - FEE(entry)
+            cb_yes = None if spot_close is None else bool(spot_close >= strike)
             fired_tickers.add(ticker)
             fires.append({"ticker": ticker, "und": und, "ts": ts, "close_ts": close_ts,
                           "side": side, "entry": entry, "ev_model": ev, "p": p,
                           "spread_c": round((ask - bid) * 100, 1),
-                          "settle_yes": bool(settle_yes), "win": bool(win),
-                          "pnl": round(pnl, 4)})
+                          "cb_label_yes": cb_yes})
 
-    n = len(fires)
     print(f"collector_start={time.strftime('%FT%TZ', time.gmtime(t0))} "
           f"checkpoint={time.strftime('%FT%TZ', time.gmtime(CHECKPOINT_TS))}")
     print(f"uptime={uptime:.1%} (kill if <80%)  poll_minutes={n_poll_min}")
-    print(f"fires={n}  no_fire={no_fire_reasons}")
-    if n == 0:
+    print(f"fires={len(fires)} (threshold markets only)  no_fire={no_fire_reasons}")
+    if not fires:
         print("VERDICT: zero fires — fire-rate reality: EV>=2c never reached. "
               "Prereg allows ONE <=7d extension; else DEAD.")
+        return
+
+    # --- settle against the venue; prereg's Coinbase label kept as verification ---
+    print("fetching venue settlements...", flush=True)
+    results = venue_results([f["ticker"] for f in fires])
+    settled, dropped_unsettled = [], 0
+    cb_agree = cb_total = 0
+    for f in fires:
+        r = results.get(f["ticker"], "")
+        if r not in ("yes", "no"):
+            dropped_unsettled += 1
+            continue
+        venue_yes = r == "yes"
+        f["win"] = (f["side"] == "yes") == venue_yes
+        e = f["entry"]
+        f["pnl"] = round((1.0 if f["win"] else 0.0) - e - FEE(e), 4)
+        if f["cb_label_yes"] is not None:
+            cb_total += 1
+            cb_agree += f["cb_label_yes"] == venue_yes
+        settled.append(f)
+    fires = settled
+    n = len(fires)
+    print(f"settled={n}  unsettled_dropped={dropped_unsettled}  "
+          f"coinbase-label vs venue agreement={cb_agree}/{cb_total}"
+          f" ({cb_agree / max(cb_total, 1):.1%})")
+    if n == 0:
+        print("VERDICT: no settled fires — cannot evaluate")
         return
 
     pnl = np.array([f["pnl"] for f in fires])
